@@ -1,0 +1,54 @@
+# === Cargo target ===
+/target/
+Cargo.lock
+
+# === crate of target ===
+**/target/
+**/Cargo.lock
+
+# === build ===
+*.log
+*.out
+*.tmp
+*.bak
+*.rs.bk
+
+# === IDE ===
+# VSCode
+.vscode/
+.history/
+*.code-workspace
+
+# JetBrains (CLion / IntelliJ / RustRover)
+.idea/
+*.iml
+
+# === OS temp ===
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# === test ===
+/coverage/
+/debug/
+/dist/
+/reports/
+
+# === env / local setting ===
+.env
+.env.*
+config/local.toml
+config/dev.toml
+
+# === Git merge / backup ===
+*.orig
+*.rej
+
+# === etc ===
+/out/
+/build/
+
