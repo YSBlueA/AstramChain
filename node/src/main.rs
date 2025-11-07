@@ -1,6 +1,6 @@
 mod server;
 
-use netcoin_core::Blockchain; // netcoin_core crate: 이전에 만든 모듈 경로에 맞춰 조정
+use netcoin_core::Blockchain;
 use netcoin_core::block::{Block, BlockHeader, compute_merkle_root, compute_header_hash};
 use netcoin_core::transaction::{Transaction};
 use std::sync::{Arc, Mutex};
@@ -9,10 +9,13 @@ use server::run_server;
 use std::fs;
 use serde_json::Value;
 use chrono::Utc;
-use netcoin_node::NodeHandle; // lib.rs의 NodeHandle 사용
+use netcoin_node::NodeHandle;
 use netcoin_node::NodeState;
 use netcoin_config::config::Config;
-/// 노드 상태: core 블록체인 + in-memory chain view + pending tx queue
+use netcoin_core::consensus;
+use std::sync::atomic::AtomicBool;
+use std::cmp::Ordering;
+use std::sync::atomic::Ordering as OtherOrdering;
 
 #[tokio::main]
 async fn main() {
@@ -86,124 +89,126 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
     };
 
     println!("🚀 mining starting...");
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let cancel_flag_net = cancel_flag.clone();
+
     // mining/miner loop: every 10s attempt to mine pending txs
     loop {
-        {
+        cancel_flag.store(false, OtherOrdering::SeqCst);
+
+        // Snapshot pending txs + mining params while holding the lock briefly
+        let (snapshot_txs, difficulty, prev_hash_snapshot, index_snapshot) = {
             let mut state = node_handle.lock().unwrap();
-            // gather pending txs copy
-            let mut txs = vec![];
-            // coinbase will be added by miner below
-            txs.append(&mut state.pending);
 
-            println!("⛏️  Mining {} pending tx(s)...", txs.len());
+            // clone pending transactions to work on them outside the lock
+            let txs_copy = state.pending.clone();
 
-            // include coinbase as first tx
-            let mut coinbase = Transaction::coinbase(&miner_address, current_block_reward(&state));
-            coinbase = coinbase.with_txid(); // ensure txid set
-            let mut block_txs = vec![coinbase.clone()];
-            block_txs.append(&mut txs);
-
-            // build header template
+            // previous tip hash
             let prev_hash = state.bc.chain_tip.clone().unwrap_or_else(|| "0".repeat(64));
-            let merkle = compute_merkle_root(&block_txs.iter().map(|t| t.txid.clone()).collect::<Vec<_>>());
-            let mut nonce: u64 = 0;
-            let difficulty = state.bc.difficulty; // difficulty bits is stored in core
-            let mut found = None;
+            let diff = state.bc.difficulty;
 
-            // simple PoW: find header hash with leading zeros = difficulty
-            loop {
-                let header = BlockHeader {
-                    index: 0, // core will set index based on chain state; but core expects proper index when inserting.
-                    previous_hash: prev_hash.clone(),
-                    merkle_root: merkle.clone(),
-                    timestamp: Utc::now().timestamp(),
-                    nonce,
-                    difficulty: difficulty,
-                    state_root: None,
-                };
-
-
-                match compute_header_hash(&header) {
-                    Ok(hash) => {
-                        if hash.starts_with(&"0".repeat(difficulty as usize)) {
-                            found = Some((header, hash));
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error computing header hash: {}", e);
-                        break;
-                    }
+            // determine next index from tip header (so header.index is known before mining)
+            let mut next_index: u64 = 0;
+            if let Some(tip_hash) = state.bc.chain_tip.clone() {
+                if let Ok(Some(prev_header)) = state.bc.load_header(&tip_hash) {
+                    next_index = prev_header.index + 1;
+                } else {
+                    next_index = 0;
                 }
-                nonce = nonce.wrapping_add(1);
-                // avoid tight CPU loop in this example: break after many iterations so program remains responsive
-                // In production, miner should keep running; here we allow a limited search per cycle.
-                if nonce % 1_000_000 == 0 {
-                    // yield a bit
-                    // (no-op) – keep going; you can add a small sleep if needed
-                    // avoid CPU overload
-                    tokio::task::yield_now().await;
-                }
+            } else {
+                next_index = 0;
             }
 
-            if let Some((mut header, mut hash)) = found {
-                // set proper index value based on chain tip
-                // We'll try to get previous index from DB via tip
+            // clear pending locally — we'll requeue on failure
+            state.pending.clear();
+
+            (txs_copy, diff, prev_hash, next_index)
+        };
+
+        // prepare block transactions: coinbase + pending
+        // NOTE: we pass pending txs to consensus::mine_block_with_coinbase which will prepend coinbase
+        let block_txs_for_logging = snapshot_txs.len();
+        println!("⛏️ Mining {} pending tx(s)...", block_txs_for_logging);
+
+        // prepare parameters for blocking mining call
+        let prev_hash = prev_hash_snapshot.clone();
+        let difficulty_local = difficulty;
+        let index_local = index_snapshot;
+        let miner_addr_cloned = miner_address.clone();
+        let txs_cloned = snapshot_txs.clone();
+        let coinbase_reward = current_block_reward_snapshot();
+        let cancel_for_thread = cancel_flag.clone();
+
+        // Run CPU-bound mining in a blocking task so we don't block the tokio runtime
+        let mined_block_res: anyhow::Result<Block> = tokio::task::spawn_blocking(move || {
+            // call into core/consensus
+            consensus::mine_block_with_coinbase(
+                index_local,
+                prev_hash,
+                difficulty_local,
+                txs_cloned,
+                &miner_addr_cloned,
+                coinbase_reward,
+                cancel_for_thread,
+            )
+        })
+        .await
+        .expect("mining task panicked");
+
+        match mined_block_res {
+            Ok(mut block) => {
+                // Re-acquire lock to insert block atomically and to handle concurrent tip changes
+                let mut state = node_handle.lock().unwrap();
+
+                // As a safety, recompute index based on current tip in case chain advanced
                 if let Some(tip_hash) = state.bc.chain_tip.clone() {
-                    // try to load previous header to obtain index
                     if let Ok(Some(prev_header)) = state.bc.load_header(&tip_hash) {
-                        header.index = prev_header.index + 1;
+                        block.header.index = prev_header.index + 1;
                     } else {
-                        header.index = 0;
+                        block.header.index = 0;
                     }
                 } else {
-                    header.index = 0;
+                    block.header.index = 0;
                 }
 
-                // ✅ recompute hash with final header (after index set)
-                hash = compute_header_hash(&header).unwrap();
+                // update timestamp and recompute hash (index/timestamp changed)
+                block.header.timestamp = Utc::now().timestamp();
+                block.hash = compute_header_hash(&block.header).expect("recompute header hash failed");
 
-                // build final block
-                let block = Block {
-                    header: header.clone(),
-                    transactions: block_txs.clone(),
-                    hash: hash.clone(),
-                };
-
-                // attempt to insert via core's validate_and_insert_block (it will validate merkle etc.)
                 match state.bc.validate_and_insert_block(&block) {
                     Ok(_) => {
                         println!("✅ Mined new block index={} hash={}", block.header.index, block.hash);
-                        // update chain_tip in state.bc already done by core method
-                        // update in-memory chain view
                         state.blockchain.push(block);
-                        // clear pending (we consumed them earlier)
-                        state.pending.clear();
-                        // persist tip / DB already persisted by core
+                        // pending already cleared earlier
                     }
                     Err(e) => {
                         eprintln!("Block insertion failed: {}", e);
-                        // if insertion failed (e.g., prev not found) push txs back to pending
-                        // requeue non-coinbase transactions
-                        // For safety, we re-add txs[1..] to pending
-                        for tx in block_txs.into_iter().skip(1) {
+                        // requeue non-coinbase txs back to pending
+                        for tx in block.transactions.into_iter().skip(1) {
                             state.pending.push(tx);
                         }
                     }
                 }
-            } else {
-                println!("⛏️  No block found this cycle (nonce loop ended).");
             }
-        } // release lock
+            Err(e) => {
+                eprintln!("⛏️ Mining error: {}", e);
+                // requeue pending txs
+                let mut state = node_handle.lock().unwrap();
+                for tx in snapshot_txs.into_iter() {
+                    state.pending.push(tx);
+                }
+            }
+        }
 
+        // wait a bit before next cycle
         sleep(Duration::from_secs(10)).await;
     }
 
-    server_handle.await.unwrap();
+
+    // server_handle.await.unwrap(); // unreachable because loop is infinite
 }
 
-/// simple block reward halving logic: adjust as needed
-fn current_block_reward(state: &NodeState) -> u64 {
-    // naive: fixed 50 in this example or halving per 210000 as needed
+fn current_block_reward_snapshot() -> u64 {
+    // keep simple for now
     50
 }

@@ -214,5 +214,34 @@ impl Blockchain {
         Ok(sum)
     }
 
+    /// Determine next block index based on current tip
+    pub fn get_next_index(&self) -> Result<u64> {
+        if let Some(ref tip_hash) = self.chain_tip {
+            if let Some(prev) = self.load_header(tip_hash)? {
+                // assume BlockHeader.index is u64 or can be cast; adjust if different
+                return Ok(prev.index + 1);
+            }
+        }
+        Ok(0)
+    }
+
+    /// Find a valid nonce by updating header.nonce and computing header hash.
+    /// Returns (nonce, hash).
+    pub fn find_valid_nonce(&self, header: &mut BlockHeader, difficulty: u32) -> Result<(u64, String)> {
+        let target_prefix = "0".repeat(difficulty as usize);
+        let mut nonce: u64 = header.nonce;
+
+        loop {
+            header.nonce = nonce;
+            let hash = compute_header_hash(header)?;
+            if hash.starts_with(&target_prefix) {
+                return Ok((nonce, hash));
+            }
+
+            nonce = nonce.wrapping_add(1);
+            // Periodic yield can be added by caller if needed (to avoid busy-wait in single-threaded contexts)
+            // For large scale mining, this loop would be replaced with GPU/parallel miners.
+        }
+    }
 
 }

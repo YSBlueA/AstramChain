@@ -10,3 +10,5 @@ pub use wallet::*;
 
 pub mod utxo;
 pub mod db;
+pub mod consensus;
+pub mod network;
