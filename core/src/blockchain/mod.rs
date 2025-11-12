@@ -1,12 +1,14 @@
 use crate::block::{Block, BlockHeader, compute_header_hash, compute_merkle_root};
+use crate::db::{open_db, put_batch};
 use crate::transaction::{Transaction, TransactionInput, TransactionOutput};
 use crate::utxo::Utxo;
-use crate::db::{open_db, put_batch};
-use rocksdb::{DB, WriteBatch};
 use anyhow::{Result, anyhow};
+use bincode::config;
 use chrono::Utc;
-use hex;
-use bincode;
+use once_cell::sync::Lazy;
+use rocksdb::{DB, WriteBatch};
+
+pub static BINCODE_CONFIG: Lazy<config::Configuration> = Lazy::new(|| config::standard());
 
 /// Blockchain structure (disk-based RocksDB + in-memory cache)
 pub struct Blockchain {
@@ -22,7 +24,12 @@ impl Blockchain {
         // load tip if exists
         let tip = db.get(b"tip")?;
         let chain_tip = tip.map(|v| String::from_utf8(v).unwrap());
-        Ok(Blockchain { db, chain_tip, difficulty: 2/*16*/, block_interval: 60 }) // default difficulty (bits like count leading zeros)
+        Ok(Blockchain {
+            db,
+            chain_tip,
+            difficulty: 2, /*16*/
+            block_interval: 60,
+        }) // default difficulty (bits like count leading zeros)
     }
 
     /// Create genesis block (with a single coinbase transaction)
@@ -42,21 +49,30 @@ impl Blockchain {
             difficulty: self.difficulty,
         };
         let hash = compute_header_hash(&header)?;
-        let block = Block { header, transactions: vec![cb.with_txid()], hash: hash.clone() };
+        let block = Block {
+            header,
+            transactions: vec![cb.with_txid()],
+            hash: hash.clone(),
+        };
 
         // commit atomically
         let mut batch = WriteBatch::default();
         // header
-        let header_blob = bincode::serialize(&block.header)?;
+        let header_blob = bincode::encode_to_vec(&block.header, *BINCODE_CONFIG)?;
         batch.put(format!("h:{}", hash).as_bytes(), &header_blob);
         // tx
         for tx in &block.transactions {
-            let tx_blob = bincode::serialize(tx)?;
+            let tx_blob = bincode::encode_to_vec(tx, *BINCODE_CONFIG)?;
             batch.put(format!("t:{}", tx.txid).as_bytes(), &tx_blob);
             // utxo insert
             for (i, out) in tx.outputs.iter().enumerate() {
-                let utxo = Utxo { txid: tx.txid.clone(), vout: i as u32, to: out.to.clone(), amount: out.amount };
-                let utxo_blob = bincode::serialize(&utxo)?;
+                let utxo = Utxo {
+                    txid: tx.txid.clone(),
+                    vout: i as u32,
+                    to: out.to.clone(),
+                    amount: out.amount,
+                };
+                let utxo_blob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
                 batch.put(format!("u:{}:{}", tx.txid, i).as_bytes(), &utxo_blob);
             }
         }
@@ -74,7 +90,11 @@ impl Blockchain {
         // 1) header hash match
         let computed = compute_header_hash(&block.header)?;
         if computed != block.hash {
-            return Err(anyhow!("header hash mismatch: computed {} != block.hash {}", computed, block.hash));
+            return Err(anyhow!(
+                "header hash mismatch: computed {} != block.hash {}",
+                computed,
+                block.hash
+            ));
         }
 
         // 2) merkle check
@@ -118,11 +138,16 @@ impl Blockchain {
             // coinbase skip UTXO referencing checks
             if i == 0 {
                 // persist tx and utxos
-                let tx_blob = bincode::serialize(tx)?;
+                let tx_blob = bincode::encode_to_vec(tx, *BINCODE_CONFIG)?;
                 batch.put(format!("t:{}", tx.txid).as_bytes(), &tx_blob);
                 for (v, out) in tx.outputs.iter().enumerate() {
-                    let utxo = Utxo { txid: tx.txid.clone(), vout: v as u32, to: out.to.clone(), amount: out.amount };
-                    let ublob = bincode::serialize(&utxo)?;
+                    let utxo = Utxo {
+                        txid: tx.txid.clone(),
+                        vout: v as u32,
+                        to: out.to.clone(),
+                        amount: out.amount,
+                    };
+                    let ublob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
                     batch.put(format!("u:{}:{}", tx.txid, v).as_bytes(), &ublob);
                 }
                 continue;
@@ -134,13 +159,18 @@ impl Blockchain {
                 let ukey = format!("u:{}:{}", inp.txid, inp.vout);
                 match self.db.get(ukey.as_bytes())? {
                     Some(blob) => {
-                        let u: Utxo = bincode::deserialize(&blob)?;
+                        let (u, _): (Utxo, usize) =
+                            bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
                         input_sum += u.amount as u128;
                         // mark as spent by deleting in batch
                         batch.delete(ukey.as_bytes());
-                    },
+                    }
                     None => {
-                        return Err(anyhow!("referenced utxo not found {}:{}", inp.txid, inp.vout));
+                        return Err(anyhow!(
+                            "referenced utxo not found {}:{}",
+                            inp.txid,
+                            inp.vout
+                        ));
                     }
                 }
             }
@@ -153,19 +183,27 @@ impl Blockchain {
             }
 
             // persist tx and create new utxos
-            let tx_blob = bincode::serialize(tx)?;
+            let tx_blob = bincode::encode_to_vec(tx, *BINCODE_CONFIG)?;
             batch.put(format!("t:{}", tx.txid).as_bytes(), &tx_blob);
             for (v, out) in tx.outputs.iter().enumerate() {
-                let utxo = Utxo { txid: tx.txid.clone(), vout: v as u32, to: out.to.clone(), amount: out.amount };
-                let ublob = bincode::serialize(&utxo)?;
+                let utxo = Utxo {
+                    txid: tx.txid.clone(),
+                    vout: v as u32,
+                    to: out.to.clone(),
+                    amount: out.amount,
+                };
+                let ublob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
                 batch.put(format!("u:{}:{}", tx.txid, v).as_bytes(), &ublob);
             }
         }
 
         // persist header, index, tip
-        let header_blob = bincode::serialize(&block.header)?;
+        let header_blob = bincode::encode_to_vec(&block.header, *BINCODE_CONFIG)?;
         batch.put(format!("h:{}", block.hash).as_bytes(), &header_blob);
-        batch.put(format!("i:{}", block.header.index).as_bytes(), block.hash.as_bytes());
+        batch.put(
+            format!("i:{}", block.header.index).as_bytes(),
+            block.hash.as_bytes(),
+        );
         batch.put(b"tip", block.hash.as_bytes());
 
         // commit
@@ -177,7 +215,7 @@ impl Blockchain {
     /// helper: load block header by hash
     pub fn load_header(&self, hash: &str) -> Result<Option<BlockHeader>> {
         if let Some(blob) = self.db.get(format!("h:{}", hash).as_bytes())? {
-            let h: BlockHeader = bincode::deserialize(&blob)?;
+            let (h, _): (BlockHeader, usize) = bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
             return Ok(Some(h));
         }
         Ok(None)
@@ -186,7 +224,7 @@ impl Blockchain {
     /// load tx by id
     pub fn load_tx(&self, txid: &str) -> Result<Option<Transaction>> {
         if let Some(blob) = self.db.get(format!("t:{}", txid).as_bytes())? {
-            let t: Transaction = bincode::deserialize(&blob)?;
+            let (t, _): (Transaction, usize) = bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
             return Ok(Some(t));
         }
         Ok(None)
@@ -202,7 +240,7 @@ impl Blockchain {
 
             let key = String::from_utf8_lossy(&k).to_string();
             if key.starts_with("u:") {
-                let utxo: Utxo = bincode::deserialize(&v)
+                let (utxo, _): (Utxo, usize) = bincode::decode_from_slice(&v, *BINCODE_CONFIG)
                     .map_err(|e| format!("deserialize failed: {}", e))?;
 
                 if utxo.to == address {
@@ -227,7 +265,11 @@ impl Blockchain {
 
     /// Find a valid nonce by updating header.nonce and computing header hash.
     /// Returns (nonce, hash).
-    pub fn find_valid_nonce(&self, header: &mut BlockHeader, difficulty: u32) -> Result<(u64, String)> {
+    pub fn find_valid_nonce(
+        &self,
+        header: &mut BlockHeader,
+        difficulty: u32,
+    ) -> Result<(u64, String)> {
         let target_prefix = "0".repeat(difficulty as usize);
         let mut nonce: u64 = header.nonce;
 
@@ -243,5 +285,4 @@ impl Blockchain {
             // For large scale mining, this loop would be replaced with GPU/parallel miners.
         }
     }
-
 }

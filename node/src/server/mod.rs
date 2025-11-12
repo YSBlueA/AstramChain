@@ -1,13 +1,12 @@
-use warp::Filter;
-use netcoin_core::transaction::Transaction;
-use std::sync::{Arc, Mutex};
-use serde_json::json;
 use crate::NodeHandle;
-use warp::{http::StatusCode, reply::with_status};
+use base64::{Engine as _, engine::general_purpose};
+use bincode::config::standard;
+use netcoin_core::transaction::Transaction;
+use warp::Filter;
+use warp::{http::StatusCode, reply::with_status}; // bincode v2
 
 /// run_server expects NodeHandle (Arc<Mutex<NodeState>>)
 pub async fn run_server(node: NodeHandle) {
-    // node filter
     let node_filter = {
         let node = node.clone();
         warp::any().map(move || node.clone())
@@ -19,53 +18,54 @@ pub async fn run_server(node: NodeHandle) {
         .and(node_filter.clone())
         .and_then(|node: NodeHandle| async move {
             let state = node.lock().unwrap();
-            let json = serde_json::to_string_pretty(&state.blockchain)
-                .unwrap_or_else(|_| "[]".to_string());
-            Ok::<_, warp::Rejection>(
-                warp::reply::json(
-                    &serde_json::from_str::<serde_json::Value>(&json).unwrap()
-                )
-            )
+            let bincode_bytes = bincode::encode_to_vec(&state.blockchain, standard()).unwrap();
+            let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "blockchain": encoded
+            })))
         });
 
     // POST /tx
     let post_tx = warp::path("tx")
         .and(warp::post())
-        .and(warp::body::json())
+        .and(warp::body::bytes()) // raw body
         .and(node_filter.clone())
-        .and_then(|tx: Transaction, node: NodeHandle| async move {
+        .and_then(|body: bytes::Bytes, node: NodeHandle| async move {
+            let tx: Transaction = match bincode::decode_from_slice(&body, standard()) {
+                Ok((tx, _)) => tx,
+                Err(_) => return Ok::<_, warp::Rejection>(
+                    with_status(
+                        warp::reply::json(&serde_json::json!({"status":"error","message":"invalid bincode"})),
+                        StatusCode::BAD_REQUEST
+                    )
+                ),
+            };
+
             {
                 let mut state = node.lock().unwrap();
                 if !tx.inputs.is_empty() {
                     match tx.verify_signatures() {
-                        Ok(true) => {
-                            state.pending.push(tx);
-                        }
-                        _ => {
-                            return Ok::<_, warp::Rejection>(
-                                with_status(
-                                    warp::reply::json(
-                                        &json!({"status":"error","message":"invalid signature"})
-                                    ),
-                                    StatusCode::BAD_REQUEST
-                                )
-                            );
-                        }
+                        Ok(true) => state.pending.push(tx),
+                        _ => return Ok::<_, warp::Rejection>(
+                            with_status(
+                                warp::reply::json(&serde_json::json!({"status":"error","message":"invalid signature"})),
+                                StatusCode::BAD_REQUEST
+                            )
+                        ),
                     }
                 } else {
                     return Ok::<_, warp::Rejection>(
                         with_status(
-                            warp::reply::json(
-                                &json!({"status":"error","message":"coinbase tx not allowed"})
-                            ),
+                            warp::reply::json(&serde_json::json!({"status":"error","message":"coinbase tx not allowed"})),
                             StatusCode::BAD_REQUEST
                         )
                     );
                 }
             }
+
             Ok::<_, warp::Rejection>(
                 with_status(
-                    warp::reply::json(&json!({"status": "ok", "message": "tx queued"})),
+                    warp::reply::json(&serde_json::json!({"status": "ok", "message": "tx queued"})),
                     StatusCode::OK,
                 )
             )
@@ -77,10 +77,12 @@ pub async fn run_server(node: NodeHandle) {
         .and(node_filter.clone())
         .and_then(|node: NodeHandle| async move {
             let state = node.lock().unwrap();
-            let height = state.blockchain.last()
+            let height = state
+                .blockchain
+                .last()
                 .map(|b| b.header.index as usize)
                 .unwrap_or(0);
-            let s = json!({
+            let s = serde_json::json!({
                 "height": height,
                 "pending": state.pending.len()
             });
@@ -94,30 +96,30 @@ pub async fn run_server(node: NodeHandle) {
         .and_then(|address: String, node: NodeHandle| async move {
             let state = node.lock().unwrap();
             match state.bc.get_balance(&address) {
-                Ok(bal) => Ok::<_, warp::Rejection>(
-                    warp::reply::json(&json!({"address": address, "balance": bal}))
-                ),
-                Err(_) => Ok::<_, warp::Rejection>(
-                    warp::reply::json(&json!({"address": address, "balance": 0}))
-                ),
+                Ok(bal) => {
+                    log::info!("✅ balance lookup success: {} -> {}", address, bal);
+                    Ok::<_, warp::Rejection>(warp::reply::json(
+                        &serde_json::json!({"address": address, "balance": bal}),
+                    ))
+                }
+                Err(e) => {
+                    log::warn!("⚠️ balance lookup failed for {}: {:?}", address, e);
+                    Ok::<_, warp::Rejection>(warp::reply::json(
+                        &serde_json::json!({"address": address, "balance": 0}),
+                    ))
+                }
             }
         });
 
-    // 모든 route를 Box::leak 으로 static lifetime 으로 변환
     let routes = get_chain
         .or(post_tx)
         .or(status)
         .or(get_balance)
         .with(warp::log("netcoin::http"))
-        .boxed(); // <- boxed() 추가
+        .boxed();
 
     println!("🌐 HTTP server running at http://127.0.0.1:8333");
 
-    // 여기서 Arc::leak으로 lifetime 문제 해결
     let addr = ([127, 0, 0, 1], 8333);
-
-    // run_server 내부에서 await로 실행
-    warp::serve(routes) // routes.clone() 대신 boxed routes를 직접 사용
-        .run(addr)
-        .await;
+    warp::serve(routes).run(addr).await;
 }

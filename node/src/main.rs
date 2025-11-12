@@ -1,31 +1,73 @@
+mod p2p;
 mod server;
 
-use netcoin_core::Blockchain;
-use netcoin_core::block::{Block, BlockHeader, compute_merkle_root, compute_header_hash};
-use netcoin_core::transaction::{Transaction};
-use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
-use server::run_server;
-use std::fs;
-use serde_json::Value;
 use chrono::Utc;
+use log::info;
+use netcoin_config::config::Config;
+use netcoin_core::Blockchain;
+use netcoin_core::block;
+use netcoin_core::block::{Block, BlockHeader, compute_header_hash, compute_merkle_root};
+use netcoin_core::consensus;
+use netcoin_core::transaction::Transaction;
 use netcoin_node::NodeHandle;
 use netcoin_node::NodeState;
-use netcoin_config::config::Config;
-use netcoin_core::consensus;
-use std::sync::atomic::AtomicBool;
+use netcoin_node::p2p::manager::PeerManager;
+use serde_json::Value;
+use server::run_server;
 use std::cmp::Ordering;
+use std::fs;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering as OtherOrdering;
+use std::sync::{Arc, Mutex};
+use tokio::signal;
+use tokio::time::{Duration, sleep};
 
 #[tokio::main]
 async fn main() {
     println!("🚀 Netcoin node starting...");
+
+    //env_logger::init();
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Debug)
+        .init();
 
     let cfg = Config::load();
 
     // DB path for core blockchain
     let db_path = cfg.data_dir.clone();
 
+    /*
+        let p2p = Arc::new(PeerManager::new());
+        {
+            let p2p_clone = p2p.clone();
+            p2p_clone.set_on_block(|block: block::Block| {
+                tokio::spawn(async move {
+                    match netcoin_core::consensus::validate_and_add_block(block).await {
+                        Ok(_) => info!("Block added via p2p"),
+                        Err(e) => log::warn!("Received invalid block from p2p: {:?}", e),
+                    }
+                });
+            });
+        }
+
+        let p2p_clone = p2p.clone();
+        tokio::spawn(async move {
+            if let Err(e) = p2p_clone.start_listener("0.0.0.0:8333").await {
+                log::error!("P2P listener failed: {:?}", e);
+            }
+        });
+
+        let peers = vec!["127.0.0.1:8334"]; // config에서 가져오기
+        for peer_addr in peers {
+            let p2p_clone = p2p.clone();
+            let peer_addr = peer_addr.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = p2p_clone.connect_peer(&peer_addr).await {
+                    log::warn!("Failed connect {}: {:?}", peer_addr, e);
+                }
+            });
+        }
+    */
     // Initialize core Blockchain (RocksDB-backed)
     let mut bc = match Blockchain::new(db_path.as_str()) {
         Ok(b) => b,
@@ -38,18 +80,20 @@ async fn main() {
 
     // If chain is empty (no tip), create genesis from wallet address
     // Read wallet address from file
-    let wallet_file = fs::read_to_string(cfg.wallet_path.clone())
-        .expect("Failed to read wallet file");
-    let wallet: Value = serde_json::from_str(&wallet_file)
-        .expect("Failed to parse wallet JSON");
-    let miner_address = wallet["address"].as_str()
+    let wallet_file =
+        fs::read_to_string(cfg.wallet_path.clone()).expect("Failed to read wallet file");
+    let wallet: Value = serde_json::from_str(&wallet_file).expect("Failed to parse wallet JSON");
+    let miner_address = wallet["address"]
+        .as_str()
         .expect("Failed to get address from wallet")
         .to_string();
 
     // If DB has no tip, create genesis block
     if bc.chain_tip.is_none() {
         println!("No chain tip found — creating genesis block...");
-        let genesis_hash = bc.create_genesis(&miner_address).expect("create_genesis failed");
+        let genesis_hash = bc
+            .create_genesis(&miner_address)
+            .expect("create_genesis failed");
         // load genesis header & tx to in-memory chain view
         if let Ok(Some(header)) = bc.load_header(&genesis_hash) {
             // need block transactions loaded too -> load txs by scanning index i:0
@@ -62,7 +106,11 @@ async fn main() {
                 hash: genesis_hash.clone(),
             };
             // Build NodeState with this genesis header
-            let node = NodeState { bc, blockchain: vec![block], pending: vec![] };
+            let node = NodeState {
+                bc,
+                blockchain: vec![block],
+                pending: vec![],
+            };
             let node_handle = Arc::new(Mutex::new(node));
             start_services(node_handle, miner_address).await;
             return;
@@ -71,7 +119,11 @@ async fn main() {
 
     // Otherwise, we have an existing chain tip. For simplicity, we won't reconstruct full chain here.
     // We'll create NodeState with empty in-memory chain but with bc loaded.
-    let node = NodeState { bc, blockchain: vec![], pending: vec![] };
+    let node = NodeState {
+        bc,
+        blockchain: vec![],
+        pending: vec![],
+    };
     let node_handle = Arc::new(Mutex::new(node));
 
     start_services(node_handle.clone(), miner_address).await;
@@ -173,11 +225,15 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
 
                 // update timestamp and recompute hash (index/timestamp changed)
                 block.header.timestamp = Utc::now().timestamp();
-                block.hash = compute_header_hash(&block.header).expect("recompute header hash failed");
+                block.hash =
+                    compute_header_hash(&block.header).expect("recompute header hash failed");
 
                 match state.bc.validate_and_insert_block(&block) {
                     Ok(_) => {
-                        println!("✅ Mined new block index={} hash={}", block.header.index, block.hash);
+                        println!(
+                            "✅ Mined new block index={} hash={}",
+                            block.header.index, block.hash
+                        );
                         state.blockchain.push(block);
                         // pending already cleared earlier
                     }
@@ -203,7 +259,6 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
         // wait a bit before next cycle
         sleep(Duration::from_secs(10)).await;
     }
-
 
     // server_handle.await.unwrap(); // unreachable because loop is infinite
 }

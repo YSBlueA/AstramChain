@@ -1,6 +1,8 @@
 pub mod server;
+pub mod p2p;
 
 pub use server::*;
+pub use p2p::*;
 
 use netcoin_core::Blockchain;
 use netcoin_core::block::Block;

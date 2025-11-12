@@ -1,29 +1,31 @@
-use serde::{Serialize, Deserialize};
-use ed25519_dalek::{Keypair, Signature, PublicKey, Verifier, Signer};
-use rand::rngs::OsRng;
-use bincode;
-use sha2::{Sha256, Digest};
-use hex;
 use anyhow::Result;
+use bincode::error::EncodeError;
+use bincode::{Decode, Encode, config};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use hex;
+use once_cell::sync::Lazy;
+use sha2::{Digest, Sha256};
+
+pub static BINCODE_CONFIG: Lazy<config::Configuration> = Lazy::new(|| config::standard());
 
 /// Input: previous txid and vout index
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
 pub struct TransactionInput {
     pub txid: String, // hex
     pub vout: u32,
-    pub pubkey: String, // hex of public key (ed25519)
+    pub pubkey: String,            // hex of public key (ed25519)
     pub signature: Option<String>, // hex of signature
 }
 
 /// Output: recipient address (assumed to be a simple pubkey hash) + amount
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
 pub struct TransactionOutput {
     pub to: String,
     pub amount: u64,
 }
 
 /// Transaction: inputs / outputs / timestamp / txid
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
 pub struct Transaction {
     pub txid: String, // hex
     pub inputs: Vec<TransactionInput>,
@@ -32,9 +34,11 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// Create coinbase transaction (inputs are empty)
     pub fn coinbase(to: &str, amount: u64) -> Self {
-        let outputs = vec![TransactionOutput{ to: to.to_string(), amount }];
+        let outputs = vec![TransactionOutput {
+            to: to.to_string(),
+            amount,
+        }];
         let tx = Transaction {
             txid: "".to_string(),
             inputs: vec![],
@@ -44,16 +48,13 @@ impl Transaction {
         tx.with_txid()
     }
 
-    /// Deterministic serialization (for signing / hashing)
-    pub fn serialize_for_hash(&self) -> Result<Vec<u8>, bincode::Error> {
-        Ok(bincode::serialize(&(
-            &self.inputs,
-            &self.outputs,
-            &self.timestamp
-        ))?)
+    pub fn serialize_for_hash(&self) -> Result<Vec<u8>, EncodeError> {
+        Ok(bincode::encode_to_vec(
+            &(&self.inputs, &self.outputs, &self.timestamp),
+            *BINCODE_CONFIG,
+        )?)
     }
 
-    /// compute txid: sha256d(serialized_for_hash)
     pub fn compute_txid(&self) -> Result<String, anyhow::Error> {
         let bytes = self.serialize_for_hash()?;
         let h1 = Sha256::digest(&bytes);
@@ -61,7 +62,6 @@ impl Transaction {
         Ok(hex::encode(h2))
     }
 
-    /// returns a copy with txid set based on contents
     pub fn with_txid(mut self) -> Self {
         if let Ok(txid) = self.compute_txid() {
             self.txid = txid;
@@ -69,26 +69,22 @@ impl Transaction {
         self
     }
 
-    /// sign inputs (for simplicity: same key signs all inputs)
-    pub fn sign(&mut self, keypair: &Keypair) -> Result<(), anyhow::Error> {
-        // sign serialized_for_hash and attach signature + pubkey to each input
+    /// sign inputs (v2 style: SigningKey)
+    pub fn sign(&mut self, signing_key: &SigningKey) -> Result<(), anyhow::Error> {
         let msg = self.serialize_for_hash()?;
-        let sig: Signature = keypair.sign(&msg);
+        let sig: Signature = signing_key.sign(&msg);
         let sig_hex = hex::encode(sig.to_bytes());
-        let pk_hex = hex::encode(keypair.public.to_bytes());
+        let pk_hex = hex::encode(signing_key.verifying_key().to_bytes());
 
         for inp in &mut self.inputs {
             inp.signature = Some(sig_hex.clone());
             inp.pubkey = pk_hex.clone();
         }
-        // recompute txid after signing? ideally txid includes signature? Many designs exclude sig from txid.
-        // We'll keep txid computed from inputs+outputs+timestamp (no signature) for simplicity.
         Ok(())
     }
 
-    /// verify signatures for all inputs
+    /// verify signatures (v2 style: VerifyingKey)
     pub fn verify_signatures(&self) -> Result<bool, anyhow::Error> {
-        // coinbase tx has no inputs/signatures
         if self.inputs.is_empty() {
             return Ok(true);
         }
@@ -99,35 +95,53 @@ impl Transaction {
                 None => return Ok(false),
             };
             let sig_bytes = hex::decode(sig_hex)?;
-            let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes)?;
+            let sig: Signature = Signature::try_from(&sig_bytes[..])
+                .map_err(|e| anyhow::anyhow!("invalid signature: {}", e))?;
+
             let pk_bytes = hex::decode(&inp.pubkey)?;
-            let pk = ed25519_dalek::PublicKey::from_bytes(&pk_bytes)?;
+            let pk: VerifyingKey = VerifyingKey::try_from(&pk_bytes[..])
+                .map_err(|e| anyhow::anyhow!("invalid public key: {}", e))?;
+
             pk.verify(&msg, &sig)?;
         }
         Ok(true)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ed25519_dalek::Keypair;
+#[test]
+fn sign_and_verify() {
+    use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey};
+    use rand::TryRngCore;
     use rand::rngs::OsRng;
+    use std::convert::TryFrom;
 
-    #[test]
-    fn sign_and_verify() {
-        let mut csprng = OsRng{};
-        let kp: Keypair = Keypair::generate(&mut csprng);
+    let mut csprng = OsRng {};
+    let mut secret_bytes = [0u8; SECRET_KEY_LENGTH];
 
-        let mut tx = Transaction::coinbase("addr", 50);
-        // coinbase has no inputs -> verify true
-        assert!(tx.verify_signatures().unwrap());
+    // ✅ try_fill_bytes 사용, 반드시 Result 처리
+    csprng.try_fill_bytes(&mut secret_bytes).unwrap();
 
-        // make a simple tx with one input
-        let inp = TransactionInput { txid: "00".repeat(32), vout: 0, pubkey: "".to_string(), signature: None };
-        let out = TransactionOutput { to: "alice".to_string(), amount: 10 };
-        let mut tx2 = Transaction { txid: "".to_string(), inputs: vec![inp], outputs: vec![out], timestamp: chrono::Utc::now().timestamp() };
-        tx2.sign(&kp).unwrap();
-        assert!(tx2.verify_signatures().unwrap());
-    }
+    let signing_key = SigningKey::try_from(&secret_bytes[..]).unwrap();
+
+    let mut tx = Transaction::coinbase("addr", 50);
+    assert!(tx.verify_signatures().unwrap());
+
+    let inp = TransactionInput {
+        txid: "00".repeat(32),
+        vout: 0,
+        pubkey: "".to_string(),
+        signature: None,
+    };
+    let out = TransactionOutput {
+        to: "alice".to_string(),
+        amount: 10,
+    };
+    let mut tx2 = Transaction {
+        txid: "".to_string(),
+        inputs: vec![inp],
+        outputs: vec![out],
+        timestamp: chrono::Utc::now().timestamp(),
+    };
+    tx2.sign(&signing_key).unwrap();
+    assert!(tx2.verify_signatures().unwrap());
 }

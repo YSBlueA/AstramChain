@@ -1,6 +1,6 @@
-use serde::{Serialize, Deserialize};
+use bincode::{Decode, Encode};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone)]
 pub struct Utxo {
     pub txid: String,
     pub vout: u32,
