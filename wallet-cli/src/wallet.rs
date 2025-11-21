@@ -1,31 +1,9 @@
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
-use rand::rngs::OsRng;
-use serde::{Serialize, Deserialize};
-use sha2::{Sha256, Digest};
+use bs58;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use hex;
 use rand::RngCore;
-use bs58;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Transaction {
-    pub from: String,
-    pub to: String,
-    pub amount: u64,
-    pub nonce: u64,
-}
-
-impl Transaction {
-    pub fn new(from: String, to: String, amount: u64, nonce: u64) -> Self {
-        Self { from, to, amount, nonce }
-    }
-
-    pub fn hash(&self) -> Vec<u8> {
-        let data = serde_json::to_vec(self).unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        hasher.finalize().to_vec()
-    }
-}
+use rand::rngs::OsRng;
+use sha2::{Digest, Sha256};
 
 pub struct Wallet {
     pub signing_key: SigningKey,
@@ -44,16 +22,11 @@ impl Wallet {
         });
         let verifying_key = signing_key.verifying_key();
         let address = Self::address_from_public(&verifying_key);
-        Self { signing_key, verifying_key, address }
-    }
-
-    /// 개인키(hex)로 복원
-    pub fn from_private_key_hex(hex_str: &str) -> Self {
-        let secret_bytes = hex::decode(hex_str).unwrap();
-        let signing_key = SigningKey::from_bytes(&secret_bytes.try_into().unwrap());
-        let verifying_key = signing_key.verifying_key();
-        let address = Self::address_from_public(&verifying_key);
-        Self { signing_key, verifying_key, address }
+        Self {
+            signing_key,
+            verifying_key,
+            address,
+        }
     }
 
     fn address_from_public(pubkey: &VerifyingKey) -> String {
@@ -65,17 +38,6 @@ impl Wallet {
 
     pub fn secret_hex(&self) -> String {
         hex::encode(self.signing_key.to_bytes())
-    }
-
-    pub fn sign_transaction(&self, tx: &Transaction) -> Signature {
-        let hash = tx.hash();
-        self.signing_key.sign(&hash)
-    }
-
-    /// 서명 검증
-    pub fn verify_signature(&self, tx: &Transaction, sig: &Signature) -> bool {
-        let hash = tx.hash();
-        self.verifying_key.verify(&hash, sig).is_ok()
     }
 
     /// 개인키를 Base58로 변환 (Solana/Phantom 호환)
@@ -98,6 +60,10 @@ impl Wallet {
         let verifying_key = signing_key.verifying_key();
         let address = Self::address_from_public(&verifying_key);
 
-        Self { signing_key, verifying_key, address }
+        Self {
+            signing_key,
+            verifying_key,
+            address,
+        }
     }
 }

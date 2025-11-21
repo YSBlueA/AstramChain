@@ -1,6 +1,7 @@
 mod p2p;
 mod server;
 
+use crate::p2p::manager::MAX_OUTBOUND;
 use chrono::Utc;
 use log::info;
 use netcoin_config::config::Config;
@@ -15,6 +16,7 @@ use netcoin_node::p2p::manager::PeerManager;
 use serde_json::Value;
 use server::run_server;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering as OtherOrdering;
@@ -36,38 +38,56 @@ async fn main() {
     // DB path for core blockchain
     let db_path = cfg.data_dir.clone();
 
+    // Initialize P2P networking
+    let p2p = Arc::new(PeerManager::new());
     /*
-        let p2p = Arc::new(PeerManager::new());
-        {
-            let p2p_clone = p2p.clone();
-            p2p_clone.set_on_block(|block: block::Block| {
-                tokio::spawn(async move {
-                    match netcoin_core::consensus::validate_and_add_block(block).await {
-                        Ok(_) => info!("Block added via p2p"),
-                        Err(e) => log::warn!("Received invalid block from p2p: {:?}", e),
-                    }
-                });
-            });
-        }
-
+    {
         let p2p_clone = p2p.clone();
-        tokio::spawn(async move {
-            if let Err(e) = p2p_clone.start_listener("0.0.0.0:8333").await {
-                log::error!("P2P listener failed: {:?}", e);
-            }
-        });
-
-        let peers = vec!["127.0.0.1:8334"]; // config에서 가져오기
-        for peer_addr in peers {
-            let p2p_clone = p2p.clone();
-            let peer_addr = peer_addr.to_string();
+        p2p_clone.set_on_block(|block: block::Block| {
             tokio::spawn(async move {
-                if let Err(e) = p2p_clone.connect_peer(&peer_addr).await {
-                    log::warn!("Failed connect {}: {:?}", peer_addr, e);
+                match netcoin_core::consensus::validate_and_add_block(block).await {
+                    Ok(_) => info!("Block added via p2p"),
+                    Err(e) => log::warn!("Received invalid block from p2p: {:?}", e),
                 }
             });
-        }
+        });
+    }
     */
+
+    let p2p_clone = p2p.clone();
+    tokio::spawn(async move {
+        if let Err(e) = p2p_clone.start_listener("0.0.0.0:8335").await {
+            log::error!("P2P listener failed: {:?}", e);
+        }
+    });
+
+    let p2p_clone = p2p.clone();
+    let dns_list = p2p_clone.dns_seed_lookup().await.unwrap_or_default();
+
+    let saved_list = p2p_clone.load_saved_peers();
+    let mut peers: HashSet<String> = HashSet::new();
+
+    for addr in dns_list {
+        peers.insert(addr);
+    }
+
+    for sp in saved_list {
+        peers.insert(sp.addr);
+    }
+
+    let target_peers: Vec<String> = peers.into_iter().take(MAX_OUTBOUND).collect();
+
+    for addr in target_peers {
+        let p2p_clone = p2p.clone();
+        tokio::spawn(async move {
+            if let Err(e) = p2p_clone.connect_peer(&addr).await {
+                log::warn!("Failed connect {}: {:?}", addr, e);
+            }
+        });
+    }
+
+    print!("Initialize Block chain...\n");
+
     // Initialize core Blockchain (RocksDB-backed)
     let mut bc = match Blockchain::new(db_path.as_str()) {
         Ok(b) => b,

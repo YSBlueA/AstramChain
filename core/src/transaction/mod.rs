@@ -35,22 +35,28 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn coinbase(to: &str, amount: u64) -> Self {
-        let outputs = vec![TransactionOutput {
+        let output = TransactionOutput {
             to: to.to_string(),
             amount,
-        }];
+        };
         let tx = Transaction {
             txid: "".to_string(),
             inputs: vec![],
-            outputs,
+            outputs: vec![output],
             timestamp: chrono::Utc::now().timestamp(),
         };
         tx.with_txid()
     }
 
     pub fn serialize_for_hash(&self) -> Result<Vec<u8>, EncodeError> {
+        let inputs_for_hash: Vec<_> = self
+            .inputs
+            .iter()
+            .map(|i| (i.txid.clone(), i.vout)) // pubkey 제거
+            .collect();
+
         Ok(bincode::encode_to_vec(
-            &(&self.inputs, &self.outputs, &self.timestamp),
+            &(&inputs_for_hash, &self.outputs, &self.timestamp),
             *BINCODE_CONFIG,
         )?)
     }
@@ -71,8 +77,9 @@ impl Transaction {
 
     /// sign inputs (v2 style: SigningKey)
     pub fn sign(&mut self, signing_key: &SigningKey) -> Result<(), anyhow::Error> {
-        let msg = self.serialize_for_hash()?;
-        let sig: Signature = signing_key.sign(&msg);
+        let tx_bytes = self.serialize_for_hash()?;
+        let sig: Signature = signing_key.sign(&tx_bytes); // Ed25519는 해시 필요 없음
+
         let sig_hex = hex::encode(sig.to_bytes());
         let pk_hex = hex::encode(signing_key.verifying_key().to_bytes());
 
@@ -88,21 +95,26 @@ impl Transaction {
         if self.inputs.is_empty() {
             return Ok(true);
         }
-        let msg = self.serialize_for_hash()?;
+
+        let tx_bytes = self.serialize_for_hash()?;
+
+        for b in &tx_bytes {
+            print!("{:02x}", b);
+        }
+
         for inp in &self.inputs {
-            let sig_hex = match &inp.signature {
-                Some(s) => s,
-                None => return Ok(false),
-            };
-            let sig_bytes = hex::decode(sig_hex)?;
-            let sig: Signature = Signature::try_from(&sig_bytes[..])
-                .map_err(|e| anyhow::anyhow!("invalid signature: {}", e))?;
+            let sig_bytes = hex::decode(inp.signature.as_ref().unwrap())?;
+
+            for b in &sig_bytes {
+                print!("{:02x}", b);
+            }
+
+            let sig = Signature::try_from(&sig_bytes[..])?;
 
             let pk_bytes = hex::decode(&inp.pubkey)?;
-            let pk: VerifyingKey = VerifyingKey::try_from(&pk_bytes[..])
-                .map_err(|e| anyhow::anyhow!("invalid public key: {}", e))?;
+            let pk = VerifyingKey::try_from(&pk_bytes[..])?;
 
-            pk.verify(&msg, &sig)?;
+            pk.verify(&tx_bytes, &sig)?; // Ed25519는 해시 없이 검증
         }
         Ok(true)
     }

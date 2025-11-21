@@ -1,18 +1,28 @@
 use crate::p2p::messages::{InventoryType, P2pMessage};
 use crate::p2p::peer::{Peer, PeerId};
+use bincode::{Decode, Encode};
 use bytes::Bytes;
 use futures::SinkExt;
 use futures::StreamExt;
+use futures::future;
 use log::{info, warn};
 use netcoin_core::block;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use futures::future;
+#[derive(Encode, Decode, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SavedPeer {
+    pub addr: String,
+    pub last_seen: u64,
+}
+
+pub const MAX_OUTBOUND: usize = 8;
+pub const PEERS_FILE: &str = "peers.json";
 
 type Shared<T> = Arc<Mutex<T>>;
 pub struct PeerManager {
@@ -276,5 +286,45 @@ impl PeerManager {
         if let Some(tx) = self.peers.lock().get(peer_id) {
             let _ = tx.send(msg);
         }
+    }
+
+    pub fn load_saved_peers(&self) -> Vec<SavedPeer> {
+        if let Ok(data) = std::fs::read_to_string(PEERS_FILE) {
+            if let Ok(peers) = serde_json::from_str::<Vec<SavedPeer>>(&data) {
+                return peers;
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn save_saved_peers(&self, peers: &[SavedPeer]) {
+        if let Ok(json) = serde_json::to_string_pretty(peers) {
+            let _ = fs::write(PEERS_FILE, json);
+        }
+    }
+
+    pub async fn dns_seed_lookup(&self) -> anyhow::Result<Vec<String>> {
+        use tokio::net::lookup_host;
+        let seeds = vec![
+            "seed1.netcoin.org:8333",
+            "seed2.netcoin.org:8333",
+            "dnsseed.netcoin.io:8333",
+        ];
+
+        let mut peers = Vec::new();
+        /*
+                /// TODO : we need domain lookup in parallel
+                for seed in seeds {
+                    match lookup_host(seed).await {
+                        Ok(addrs) => {
+                            for a in addrs {
+                                peers.push(a.to_string());
+                            }
+                        }
+                        Err(e) => warn!("DNS seed {} lookup failed: {:?}", seed, e),
+                    }
+                }
+        */
+        Ok(peers)
     }
 }

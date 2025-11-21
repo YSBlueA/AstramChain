@@ -1,5 +1,5 @@
-mod wallet;
 mod commands;
+mod wallet;
 
 use clap::{Parser, Subcommand};
 use commands::*;
@@ -10,10 +10,9 @@ use netcoin_config::config::Config;
 #[command(name = "netcoin-wallet")]
 #[command(about = "NetCoin CLI Wallet", long_about = None)]
 struct Cli {
-#[command(subcommand)]
+    #[command(subcommand)]
     command: Commands,
 }
-
 
 fn main() {
     let cli = Cli::parse();
@@ -21,9 +20,7 @@ fn main() {
     match cli.command {
         Commands::Generate => generate_wallet(),
         Commands::Balance { address } => get_balance(&address),
-        Commands::Send { from, to, amount, private_key } => {
-            send_transaction(&from, &to, amount, &private_key)
-        }
+        Commands::Send { from, to, amount } => send_transaction(&from, &to, amount),
         Commands::Config { subcommand } => match subcommand {
             ConfigCommands::View => {
                 let cfg = Config::load();

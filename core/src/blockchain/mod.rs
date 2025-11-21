@@ -38,8 +38,8 @@ impl Blockchain {
             return Err(anyhow!("chain already exists"));
         }
         let cb = Transaction::coinbase(address, 50);
-        let txid = cb.txid.clone();
-        let merkle = compute_merkle_root(&vec![txid.clone()]);
+
+        let merkle = compute_merkle_root(&vec![cb.txid.clone()]);
         let header = BlockHeader {
             index: 0,
             previous_hash: "0".repeat(64),
@@ -51,7 +51,7 @@ impl Blockchain {
         let hash = compute_header_hash(&header)?;
         let block = Block {
             header,
-            transactions: vec![cb.with_txid()],
+            transactions: vec![cb.clone()],
             hash: hash.clone(),
         };
 
@@ -61,21 +61,21 @@ impl Blockchain {
         let header_blob = bincode::encode_to_vec(&block.header, *BINCODE_CONFIG)?;
         batch.put(format!("h:{}", hash).as_bytes(), &header_blob);
         // tx
-        for tx in &block.transactions {
-            let tx_blob = bincode::encode_to_vec(tx, *BINCODE_CONFIG)?;
-            batch.put(format!("t:{}", tx.txid).as_bytes(), &tx_blob);
-            // utxo insert
-            for (i, out) in tx.outputs.iter().enumerate() {
-                let utxo = Utxo {
-                    txid: tx.txid.clone(),
-                    vout: i as u32,
-                    to: out.to.clone(),
-                    amount: out.amount,
-                };
-                let utxo_blob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
-                batch.put(format!("u:{}:{}", tx.txid, i).as_bytes(), &utxo_blob);
-            }
+        let tx_blob = bincode::encode_to_vec(&cb, *BINCODE_CONFIG)?;
+        batch.put(format!("t:{}", cb.txid).as_bytes(), &tx_blob);
+
+        for (i, out) in cb.outputs.iter().enumerate() {
+            let utxo = Utxo {
+                txid: cb.txid.clone(),
+                vout: i as u32,
+                to: out.to.clone(),
+                amount: out.amount,
+            };
+
+            let utxo_blob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
+            batch.put(format!("u:{}:{}", cb.txid, i).as_bytes(), &utxo_blob);
         }
+
         // index
         batch.put(format!("i:0").as_bytes(), hash.as_bytes());
         batch.put(b"tip", hash.as_bytes());
@@ -284,5 +284,26 @@ impl Blockchain {
             // Periodic yield can be added by caller if needed (to avoid busy-wait in single-threaded contexts)
             // For large scale mining, this loop would be replaced with GPU/parallel miners.
         }
+    }
+
+    pub fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>> {
+        let mut utxos = Vec::new();
+
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+
+        for item in iter {
+            let (key, value) = item?;
+            let key_str = String::from_utf8(key.to_vec())?;
+
+            // UTXO key: u:{txid}:{vout}
+            if key_str.starts_with("u:") {
+                let (_u, _): (Utxo, usize) = bincode::decode_from_slice(&value, *BINCODE_CONFIG)?;
+                if _u.to == address {
+                    utxos.push(_u);
+                }
+            }
+        }
+
+        Ok(utxos)
     }
 }

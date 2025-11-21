@@ -1,11 +1,13 @@
-use crate::wallet::{Wallet, Transaction};
-use reqwest::blocking::Client;
-use serde_json::Value;
-use serde::Serialize;
-use std::fs;
-use std::path::PathBuf;
+use crate::wallet::Wallet;
+use chrono::Utc;
 use netcoin_config::config::Config;
-
+use netcoin_core::transaction::{BINCODE_CONFIG, Transaction, TransactionInput, TransactionOutput};
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize, de};
+use serde_json::Value;
+use std::fs;
+use std::io::Read;
+use std::path::PathBuf;
 
 #[derive(clap::Subcommand)]
 pub enum Commands {
@@ -20,7 +22,6 @@ pub enum Commands {
         from: String,
         to: String,
         amount: u64,
-        private_key: String,
     },
 
     /// Manage CLI configuration
@@ -33,14 +34,11 @@ pub enum Commands {
 #[derive(clap::Subcommand)]
 pub enum ConfigCommands {
     View,
-    Set {
-        key: String,
-        value: String,
-    },
+    Set { key: String, value: String },
     Init,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct WalletJson {
     secret_key: String,
     address: String,
@@ -71,6 +69,17 @@ pub fn generate_wallet() {
     save_wallet_base58(wallet, path.to_str().unwrap()).expect("Failed to save wallet");
 }
 
+fn load_wallet() -> Wallet {
+    let path = get_wallet_path();
+    let data = fs::read_to_string(&path).expect("Failed to read wallet file");
+    let wallet_json: WalletJson = serde_json::from_str(&data).expect("Failed to parse wallet JSON");
+
+    println!("✅ Wallet loaded: {}", wallet_json.address);
+    println!("✅ Private key: {}", wallet_json.secret_key);
+
+    Wallet::from_base58(&wallet_json.secret_key)
+}
+
 pub fn get_balance(address: &str) {
     let cfg = Config::load();
     let url = format!("{}/address/{}/balance", cfg.node_rpc_url, address);
@@ -83,25 +92,127 @@ pub fn get_balance(address: &str) {
     }
 }
 
-pub fn send_transaction(from: &str, to: &str, amount: u64, private_key: &str) {
+pub fn send_transaction(from: &str, to: &str, amount: u64) {
     let cfg = Config::load();
-    let wallet = Wallet::from_private_key_hex(private_key);
-    let tx = Transaction::new(from.to_string(), to.to_string(), amount, 0);
-    let signature = wallet.sign_transaction(&tx);
-
+    let wallet = load_wallet();
     let client = Client::new();
-    let res = client
-        .post(format!("{}/tx/send", cfg.node_rpc_url))
-        .json(&serde_json::json!({
-            "from": from,
-            "to": to,
-            "amount": amount,
-            "signature": hex::encode(signature.to_bytes())
-        }))
-        .send();
 
-    match res {
-        Ok(_) => println!("🚀 Transaction broadcast completed!"),
-        Err(e) => println!("❌ Transaction failed: {}", e),
+    let url = format!("{}/address/{}/utxos", cfg.node_rpc_url, wallet.address);
+    let utxos: Vec<Value> = match client.get(&url).send() {
+        Ok(res) => match res.json() {
+            Ok(v) => v,
+            Err(e) => {
+                println!("❌ Failed to parse UTXOs JSON: {}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            println!("❌ Query failed: {}", e);
+            return;
+        }
+    };
+
+    if utxos.is_empty() {
+        println!("❌ No UTXOs available for address {}", wallet.address);
+        return;
+    }
+
+    let mut selected_inputs = vec![];
+    let mut input_sum: u64 = 0;
+
+    for u in &utxos {
+        let txid = u["txid"].as_str().unwrap().to_string();
+        let vout = u["vout"].as_u64().unwrap() as u32;
+        let amt = u["amount"].as_u64().unwrap();
+        selected_inputs.push(TransactionInput {
+            txid,
+            vout,
+            pubkey: wallet.address.clone(),
+            signature: None,
+        });
+        input_sum += amt;
+        if input_sum >= amount {
+            break;
+        }
+    }
+
+    if input_sum < amount {
+        println!(
+            "❌ Insufficient balance: have {}, need {}",
+            input_sum, amount
+        );
+        return;
+    }
+
+    let mut outputs = vec![TransactionOutput {
+        to: to.to_string(),
+        amount,
+    }];
+
+    let change = input_sum - amount;
+    if change > 0 {
+        outputs.push(TransactionOutput {
+            to: wallet.address.clone(),
+            amount: change,
+        });
+    }
+
+    let mut tx = Transaction {
+        txid: "".to_string(),
+        inputs: selected_inputs,
+        outputs,
+        timestamp: chrono::Utc::now().timestamp(),
+    };
+
+    // 5️⃣ 서명
+    if let Err(e) = tx.sign(&wallet.signing_key) {
+        println!("❌ Failed to sign transaction: {}", e);
+        return;
+    }
+
+    tx.verify_signatures()
+        .expect("Signature verification failed after signing");
+
+    // 6️⃣ txid 채우기
+    tx = tx.with_txid();
+
+    println!("✅ Transaction created. txid: {}", tx.txid);
+    println!(
+        "Signature: {}",
+        tx.inputs
+            .get(0)
+            .and_then(|i| i.signature.as_deref())
+            .unwrap_or("no signature")
+    );
+
+    // 7️⃣ Serialize
+    let body = match bincode::encode_to_vec(&tx, *BINCODE_CONFIG) {
+        Ok(b) => b,
+        Err(e) => {
+            println!("❌ Failed to serialize transaction: {}", e);
+            return;
+        }
+    };
+
+    // 8️⃣ POST /tx
+    match client
+        .post(format!("{}/tx", cfg.node_rpc_url))
+        .body(body)
+        .header("Content-Type", "application/octet-stream")
+        .send()
+    {
+        Ok(mut response) => {
+            let status = response.status();
+            let mut text = String::new();
+            response.read_to_string(&mut text).unwrap_or_default();
+            if status.is_success() {
+                println!("🚀 Transaction broadcast completed!");
+            } else {
+                println!("❌ Transaction failed!");
+                println!("Status: {}", status);
+                println!("Response body: {}", text);
+            }
+        }
+        Err(e) => println!("❌ Transaction failed (network/reqwest error): {}", e),
     }
 }
