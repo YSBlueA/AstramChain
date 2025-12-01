@@ -11,7 +11,9 @@ pub async fn run_server(node: NodeHandle) {
         warp::any().map(move || node.clone())
     };
 
+    // -------------------------------
     // GET /blockchain
+    // -------------------------------
     let get_chain = warp::path("blockchain")
         .and(warp::get())
         .and(node_filter.clone())
@@ -25,74 +27,129 @@ pub async fn run_server(node: NodeHandle) {
             })))
         });
 
-    // POST /tx
+    // -------------------------------
+    // POST /tx  (client → node)
+    // -------------------------------
     let post_tx = warp::path("tx")
         .and(warp::post())
-        .and(warp::body::bytes()) // raw body
+        .and(warp::body::bytes())
         .and(node_filter.clone())
         .and_then(|body: bytes::Bytes, node: NodeHandle| async move {
-            // try decode as SignedTx first, fall back to Transaction
-            let mut create_tx: Transaction;
-            // fallback: try decoding raw Transaction (wallet-cli may send this)
+            let mut tx: Transaction;
+
             match bincode::decode_from_slice::<Transaction, _>(&body, *BINCODE_CONFIG) {
-                Ok((tx, _)) => {
-                    log::info!("✅ Received raw Transaction");
-                    create_tx = tx;
+                Ok((decoded, _)) => {
+                    log::info!("Received Transaction {}", decoded.txid);
+                    tx = decoded;
                 }
                 Err(e) => {
-                    log::debug!("❌ error decoding bincode: {}", e);
-                    return Ok::<_, warp::Rejection>(
-                        with_status(
-                            warp::reply::json(&serde_json::json!({"status":"error","message":"invalid bincode"})),
-                            StatusCode::BAD_REQUEST
-                        )
-                    );
+                    log::warn!("Invalid tx bincode: {}", e);
+                    return Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "status": "error",
+                            "message": "invalid bincode"
+                        })),
+                        StatusCode::BAD_REQUEST,
+                    ));
                 }
             }
 
-            {
-                let mut state = node.lock().unwrap();
+            // lock
+            let mut state = node.lock().unwrap();
 
-                log::debug!("Created Transaction: {:?}", create_tx);
-                log::info!("Queuing transaction with {} inputs and {} outputs", create_tx.inputs.len(), create_tx.outputs.len());
-                log::info!("Transaction ID: {}", create_tx.txid);
-                if !create_tx.inputs.is_empty() {
-                    log::info!("From pubkey: {}", create_tx.inputs[0].pubkey);
-                }
-                if !create_tx.outputs.is_empty() {
-                    log::info!("To address: {}", create_tx.outputs[0].to);
-                    log::info!("Amount: {}", create_tx.outputs[0].amount);
-                }
-                log::info!("Timestamp: {}", create_tx.timestamp);
-                log::info!("Signature: {}", create_tx.inputs.get(0).and_then(|i| i.signature.as_deref()).unwrap_or("no signature"));
-                log::info!("Verifying signature...");
-
-                if !create_tx.inputs.is_empty() {
-                    match create_tx.verify_signatures() {
-                        Ok(true) => state.pending.push(create_tx),
-                        _ => return Ok::<_, warp::Rejection>(
-                            with_status(
-                                warp::reply::json(&serde_json::json!({"status":"error","message":"invalid signature"})),
-                                StatusCode::BAD_REQUEST
-                            )
-                        ),
-                    }
-                } else {
-                    return Ok::<_, warp::Rejection>(
-                        with_status(
-                            warp::reply::json(&serde_json::json!({"status":"error","message":"coinbase tx not allowed"})),
-                            StatusCode::BAD_REQUEST
-                        )
-                    );
-                }
-            }
-
-            Ok::<_, warp::Rejection>(
-                with_status(
-                    warp::reply::json(&serde_json::json!({"status": "ok", "message": "tx queued"})),
+            // 중복 방지
+            if state.seen_tx.contains(&tx.txid) {
+                log::info!("Duplicate TX {}", tx.txid);
+                return Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "status": "duplicate"
+                    })),
                     StatusCode::OK,
-                )
-            )
+                ));
+            }
+
+            // signature 검증
+            match tx.verify_signatures() {
+                Ok(true) => {
+                    log::info!("TX {} signature OK", tx.txid);
+
+                    state.seen_tx.insert(tx.txid.clone());
+                    state.pending.push(tx.clone());
+
+                    // ---- broadcast to peers (async) ----
+                    let p2p_clone = state.p2p.clone();
+                    let tx_clone = tx.clone();
+
+                    tokio::spawn(async move {
+                        p2p_clone.broadcast_tx(&tx_clone).await;
+                    });
+                }
+                _ => {
+                    log::warn!("TX {} signature invalid", tx.txid);
+                    return Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "status": "error",
+                            "message": "invalid signature"
+                        })),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+            }
+
+            Ok::<_, warp::Rejection>(with_status(
+                warp::reply::json(&serde_json::json!({
+                    "status": "ok",
+                    "message": "tx queued"
+                })),
+                StatusCode::OK,
+            ))
+        });
+
+    // -------------------------------
+    // POST /tx/relay  (node → node)
+    // -------------------------------
+    let relay_tx = warp::path!("tx" / "relay")
+        .and(warp::post())
+        .and(warp::body::bytes())
+        .and(node_filter.clone())
+        .and_then(|body: bytes::Bytes, node: NodeHandle| async move {
+            let (tx, _) = match bincode::decode_from_slice::<Transaction, _>(&body, *BINCODE_CONFIG)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("relay invalid bincode: {}", e);
+                    return Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({"status":"error"})),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+            };
+
+            let mut state = node.lock().unwrap();
+
+            // 중복 체크
+            if state.seen_tx.contains(&tx.txid) {
+                return Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({"status":"duplicate"})),
+                    StatusCode::OK,
+                ));
+            }
+
+            // seen 기록
+            state.seen_tx.insert(tx.txid.clone());
+
+            // 검증
+            if tx.verify_signatures().unwrap_or(false) {
+                log::info!("relay accepted tx {}", tx.txid);
+                state.pending.push(tx);
+            } else {
+                log::warn!("relay invalid signature");
+            }
+
+            Ok::<_, warp::Rejection>(with_status(
+                warp::reply::json(&serde_json::json!({"status":"ok"})),
+                StatusCode::OK,
+            ))
         });
 
     // GET /status
@@ -149,8 +206,12 @@ pub async fn run_server(node: NodeHandle) {
             }
         });
 
+    // -------------------------------
+    // combine routes
+    // -------------------------------
     let routes = get_chain
         .or(post_tx)
+        .or(relay_tx)
         .or(status)
         .or(get_balance)
         .or(get_utxos)

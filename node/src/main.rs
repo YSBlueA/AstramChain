@@ -28,7 +28,6 @@ use tokio::time::{Duration, sleep};
 async fn main() {
     println!("🚀 Netcoin node starting...");
 
-    //env_logger::init();
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Debug)
         .init();
@@ -40,6 +39,7 @@ async fn main() {
 
     // Initialize P2P networking
     let p2p = Arc::new(PeerManager::new());
+
     /*
     {
         let p2p_clone = p2p.clone();
@@ -130,6 +130,8 @@ async fn main() {
                 bc,
                 blockchain: vec![block],
                 pending: vec![],
+                seen_tx: HashSet::new(),
+                p2p: p2p.clone(),
             };
             let node_handle = Arc::new(Mutex::new(node));
             start_services(node_handle, miner_address).await;
@@ -143,6 +145,8 @@ async fn main() {
         bc,
         blockchain: vec![],
         pending: vec![],
+        seen_tx: HashSet::new(),
+        p2p: p2p.clone(),
     };
     let node_handle = Arc::new(Mutex::new(node));
 
@@ -169,7 +173,7 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
         cancel_flag.store(false, OtherOrdering::SeqCst);
 
         // Snapshot pending txs + mining params while holding the lock briefly
-        let (snapshot_txs, difficulty, prev_hash_snapshot, index_snapshot) = {
+        let (snapshot_txs, difficulty, prev_hash, index_snapshot, p2p_handle) = {
             let mut state = node_handle.lock().unwrap();
 
             // clone pending transactions to work on them outside the lock
@@ -194,7 +198,7 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
             // clear pending locally — we'll requeue on failure
             state.pending.clear();
 
-            (txs_copy, diff, prev_hash, next_index)
+            (txs_copy, diff, prev_hash, next_index, state.p2p.clone())
         };
 
         // prepare block transactions: coinbase + pending
@@ -203,7 +207,7 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
         println!("⛏️ Mining {} pending tx(s)...", block_txs_for_logging);
 
         // prepare parameters for blocking mining call
-        let prev_hash = prev_hash_snapshot.clone();
+        let prev_hash = prev_hash.clone();
         let difficulty_local = difficulty;
         let index_local = index_snapshot;
         let miner_addr_cloned = miner_address.clone();
@@ -254,8 +258,17 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
                             "✅ Mined new block index={} hash={}",
                             block.header.index, block.hash
                         );
+                        let block_to_broadcast = block.clone();
+
                         state.blockchain.push(block);
                         // pending already cleared earlier
+                        println!("✅ Block mined! Broadcasting...");
+
+                        // -------------------------
+                        // Broadcast mined block
+                        // -------------------------
+                        // broadcast_block returns () (fire-and-forget), so just await it
+                        p2p_handle.broadcast_block(&block_to_broadcast).await;
                     }
                     Err(e) => {
                         eprintln!("Block insertion failed: {}", e);

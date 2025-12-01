@@ -3,6 +3,7 @@
 use bincode::{Decode, Encode};
 use netcoin_core::block::Block;
 use netcoin_core::block::BlockHeader;
+use netcoin_core::transaction::Transaction;
 
 /// (inv/getdata)
 #[derive(Debug, Clone, Encode, Decode)]
@@ -37,6 +38,9 @@ pub enum P2pMessage {
     },
     Block {
         block: Block,
+    },
+    Tx {
+        tx: Transaction,
     },
     Ping(u64),
     Pong(u64),

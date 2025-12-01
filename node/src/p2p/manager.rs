@@ -7,6 +7,7 @@ use futures::StreamExt;
 use futures::future;
 use log::{info, warn};
 use netcoin_core::block;
+use netcoin_core::transaction::Transaction;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fs;
@@ -326,5 +327,25 @@ impl PeerManager {
                 }
         */
         Ok(peers)
+    }
+
+    /// Broadcast a block to all connected peers (fire-and-forget)
+    pub async fn broadcast_block(&self, block: &block::Block) {
+        let peers = self.peers.lock().clone();
+        for (_id, tx) in peers {
+            // clone the block for each peer
+            let _ = tx.send(P2pMessage::Block {
+                block: block.clone(),
+            });
+        }
+    }
+
+    /// Broadcast a transaction to all connected peers (async so callers can `.await`)
+    pub async fn broadcast_tx(&self, tx_obj: &Transaction) {
+        let peers = self.peers.lock().clone();
+        for (_id, tx) in peers {
+            // clone the transaction for each peer
+            let _ = tx.send(P2pMessage::Tx { tx: tx_obj.clone() });
+        }
     }
 }
