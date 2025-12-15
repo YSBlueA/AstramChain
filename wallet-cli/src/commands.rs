@@ -18,11 +18,7 @@ pub enum Commands {
     Balance { address: String },
 
     /// Create, sign, and broadcast a transaction to the network
-    Send {
-        from: String,
-        to: String,
-        amount: u64,
-    },
+    Send { to: String, amount: u64 },
 
     /// Manage CLI configuration
     Config {
@@ -92,7 +88,7 @@ pub fn get_balance(address: &str) {
     }
 }
 
-pub fn send_transaction(from: &str, to: &str, amount: u64) {
+pub fn send_transaction(to: &str, amount: u64) {
     let cfg = Config::load();
     let wallet = load_wallet();
     let client = Client::new();

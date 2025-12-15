@@ -20,7 +20,7 @@ fn main() {
     match cli.command {
         Commands::Generate => generate_wallet(),
         Commands::Balance { address } => get_balance(&address),
-        Commands::Send { from, to, amount } => send_transaction(&from, &to, amount),
+        Commands::Send { to, amount } => send_transaction(&to, amount),
         Commands::Config { subcommand } => match subcommand {
             ConfigCommands::View => {
                 let cfg = Config::load();
