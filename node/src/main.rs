@@ -1,7 +1,4 @@
-mod p2p;
-mod server;
-
-use crate::p2p::manager::MAX_OUTBOUND;
+// Use library exports instead of declaring local modules to avoid duplicate crate types
 use chrono::Utc;
 use hex;
 use log::info;
@@ -13,9 +10,9 @@ use netcoin_core::consensus;
 use netcoin_core::transaction::Transaction;
 use netcoin_node::NodeHandle;
 use netcoin_node::NodeState;
-use netcoin_node::p2p::manager::PeerManager;
+use netcoin_node::p2p::service::P2PService;
+use netcoin_node::server::run_server;
 use serde_json::Value;
-use server::run_server;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs;
@@ -35,6 +32,15 @@ async fn main() {
 
     let cfg = Config::load();
 
+    // Read wallet address from file
+    let wallet_file =
+        fs::read_to_string(cfg.wallet_path.clone()).expect("Failed to read wallet file");
+    let wallet: Value = serde_json::from_str(&wallet_file).expect("Failed to parse wallet JSON");
+    let miner_address = wallet["address"]
+        .as_str()
+        .expect("Failed to get address from wallet")
+        .to_string();
+
     // DB path for core blockchain
     let db_path = cfg.data_dir.clone();
 
@@ -51,8 +57,25 @@ async fn main() {
     };
 
     // Initialize P2P networking
-    let p2p = Arc::new(PeerManager::new());
+    let p2p_service = P2PService::new();
 
+    let node = NodeState {
+        bc,
+        blockchain: vec![],
+        pending: vec![],
+        seen_tx: HashSet::new(),
+        p2p: p2p_service.manager(),
+    };
+
+    let node_handle = Arc::new(Mutex::new(node));
+
+    p2p_service
+        .start("0.0.0.0:8335".to_string(), node_handle.clone())
+        .await
+        .expect("p2p start failed");
+
+    start_services(node_handle, miner_address).await;
+    /*
     // Get current blockchain height from DB and set it in P2P manager
     let my_height: u64 = if let Some(tip_hash) = &bc.chain_tip {
         if let Ok(Some(header)) = bc.load_header(tip_hash) {
@@ -278,6 +301,7 @@ async fn main() {
     }
 
     start_services(node_handle.clone(), miner_address).await;
+    */
 }
 
 async fn start_services(node_handle: NodeHandle, miner_address: String) {

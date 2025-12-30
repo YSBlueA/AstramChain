@@ -1,7 +1,7 @@
 pub mod p2p;
 pub mod server;
 
-pub use p2p::*;
+pub use crate::p2p::manager::PeerManager;
 pub use server::*;
 
 use netcoin_core::Blockchain;

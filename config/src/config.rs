@@ -17,7 +17,10 @@ impl Config {
     pub fn load() -> Self {
         let path = Self::default_path();
         if !path.exists() {
-            println!("⚠️ Configuration file not found. Creating default configuration.: {:?}", path);
+            println!(
+                "⚠️ Configuration file not found. Creating default configuration.: {:?}",
+                path
+            );
             let cfg = Self::default();
             cfg.save();
             return cfg;
@@ -56,7 +59,10 @@ impl Config {
     pub fn init_default() {
         let cfg = Self::default();
         cfg.save();
-        println!("✅ Default configuration file has been created: {:?}", Self::default_path());
+        println!(
+            "✅ Default configuration file has been created: {:?}",
+            Self::default_path()
+        );
     }
 }
 
