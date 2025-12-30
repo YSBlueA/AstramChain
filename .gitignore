@@ -6,6 +6,8 @@ Cargo.lock
 **/target/
 **/Cargo.lock
 
+
+
 # === build ===
 *.log
 *.out
@@ -46,6 +48,14 @@ config/dev.toml
 
 # === Git merge / backup ===
 *.orig
+
+# === Explorer (Blockchain Explorer) ===
+# Node.js frontend
+explorer/web/node_modules/
+explorer/web/dist/
+explorer/web/.env.local
+explorer/web/.env.*.local
+
 *.rej
 
 # === etc ===
