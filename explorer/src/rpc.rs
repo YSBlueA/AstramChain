@@ -80,12 +80,20 @@ impl NodeRpcClient {
                 let timestamp = chrono::DateTime::<Utc>::from_timestamp(block.header.timestamp, 0)
                     .unwrap_or_else(|| Utc::now());
 
+                // Coinbase 트랜잭션(첫 번째)에서 miner 주소 추출
+                let miner = block
+                    .transactions
+                    .first()
+                    .and_then(|tx| tx.outputs.first())
+                    .map(|output| output.to.clone())
+                    .unwrap_or_else(|| "Unknown_Miner".to_string());
+
                 BlockInfo {
                     height: block.header.index,
                     hash: block.hash.clone(),
                     timestamp,
                     transactions: block.transactions.len(),
-                    miner: "NetCoin_Miner".to_string(), // BlockHeader에 miner 정보 없음
+                    miner,
                     difficulty: block.header.difficulty,
                     nonce: block.header.nonce,
                     previous_hash: block.header.previous_hash.clone(),
