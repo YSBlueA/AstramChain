@@ -17,9 +17,67 @@ impl NodeRpcClient {
         }
     }
 
-    /// Node의 /blockchain 엔드포인트에서 실제 블록체인 데이터 조회
+    /// Lightweight counts endpoint
+    pub async fn fetch_counts(&self) -> Result<(u64, u64), String> {
+        let url = format!("{}/counts", self.node_url);
+        match reqwest::get(&url).await {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    let blocks = v.get("blocks").and_then(|b| b.as_u64()).unwrap_or(0);
+                    let transactions = v.get("transactions").and_then(|t| t.as_u64()).unwrap_or(0);
+                    Ok((blocks, transactions))
+                }
+                Err(e) => Err(format!("Failed to parse counts response: {}", e)),
+            },
+            Err(e) => Err(format!("Network error fetching counts: {}", e)),
+        }
+    }
+
+    /// Fetch total volume from Node DB
+    pub async fn fetch_total_volume(&self) -> Result<u64, String> {
+        let url = format!("{}/counts", self.node_url);
+        match reqwest::get(&url).await {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    let volume = v
+                        .get("total_volume")
+                        .and_then(|vol| vol.as_u64())
+                        .unwrap_or(0);
+                    Ok(volume)
+                }
+                Err(e) => Err(format!("Failed to parse volume response: {}", e)),
+            },
+            Err(e) => Err(format!("Network error fetching volume: {}", e)),
+        }
+    }
+
+    /// Fetch address info from Node DB
+    pub async fn fetch_address_info(
+        &self,
+        address: &str,
+    ) -> Result<(u64, u64, u64, usize), String> {
+        let url = format!("{}/address/{}/info", self.node_url, address);
+        match reqwest::get(&url).await {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    let balance = v.get("balance").and_then(|b| b.as_u64()).unwrap_or(0);
+                    let received = v.get("received").and_then(|r| r.as_u64()).unwrap_or(0);
+                    let sent = v.get("sent").and_then(|s| s.as_u64()).unwrap_or(0);
+                    let tx_count = v
+                        .get("transaction_count")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0) as usize;
+                    Ok((balance, received, sent, tx_count))
+                }
+                Err(e) => Err(format!("Failed to parse address info response: {}", e)),
+            },
+            Err(e) => Err(format!("Network error fetching address info: {}", e)),
+        }
+    }
+
+    /// Node의 /blockchain/db 엔드포인트에서 실제 블록체인 데이터 조회 (DB에서 직접)
     pub async fn fetch_blocks(&self) -> Result<Vec<BlockInfo>, String> {
-        let url = format!("{}/blockchain", self.node_url);
+        let url = format!("{}/blockchain/db", self.node_url);
 
         match reqwest::get(&url).await {
             Ok(response) => {
@@ -30,7 +88,7 @@ impl NodeRpcClient {
                             data.get("blockchain").and_then(|v| v.as_str())
                         {
                             match self.decode_blockchain(encoded_blockchain) {
-                                Ok(blocks) => {
+                                Ok((blocks, _)) => {
                                     info!("✅ Fetched {} blocks from Node", blocks.len());
                                     Ok(blocks)
                                 }
@@ -60,8 +118,55 @@ impl NodeRpcClient {
         }
     }
 
+    /// 블록체인 전체 조회 (DB에서 직접, 블록 + 트랜잭션)
+    pub async fn fetch_blockchain_with_transactions(
+        &self,
+    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>), String> {
+        let url = format!("{}/blockchain/db", self.node_url);
+
+        match reqwest::get(&url).await {
+            Ok(response) => match response.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    if let Some(encoded_blockchain) =
+                        data.get("blockchain").and_then(|v| v.as_str())
+                    {
+                        match self.decode_blockchain(encoded_blockchain) {
+                            Ok((blocks, raw_blocks)) => {
+                                let transactions = self.extract_transactions(&raw_blocks);
+                                info!(
+                                    "✅ Fetched {} blocks and {} transactions from Node",
+                                    blocks.len(),
+                                    transactions.len()
+                                );
+                                Ok((blocks, transactions))
+                            }
+                            Err(e) => {
+                                error!("Failed to decode blockchain: {}", e);
+                                Err(e)
+                            }
+                        }
+                    } else {
+                        error!("No blockchain data in response");
+                        Err("No blockchain data in response".to_string())
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to parse blockchain response: {}", e);
+                    Err(format!("Parse error: {}", e))
+                }
+            },
+            Err(e) => {
+                error!("Failed to fetch from Node: {}", e);
+                Err(format!(
+                    "Network error: {}. Make sure Node is running on {}",
+                    e, self.node_url
+                ))
+            }
+        }
+    }
+
     /// Base64-encoded bincode 데이터 디코딩
-    fn decode_blockchain(&self, encoded: &str) -> Result<Vec<BlockInfo>, String> {
+    fn decode_blockchain(&self, encoded: &str) -> Result<(Vec<BlockInfo>, Vec<Block>), String> {
         // Base64 디코딩
         let decoded_bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
@@ -73,10 +178,9 @@ impl NodeRpcClient {
             .map_err(|e| format!("Bincode decode error: {}", e))?;
 
         // Block을 BlockInfo로 변환
-        Ok(blocks
-            .into_iter()
-            .enumerate()
-            .map(|(idx, block)| {
+        let block_infos: Vec<BlockInfo> = blocks
+            .iter()
+            .map(|block| {
                 let timestamp = chrono::DateTime::<Utc>::from_timestamp(block.header.timestamp, 0)
                     .unwrap_or_else(|| Utc::now());
 
@@ -99,25 +203,61 @@ impl NodeRpcClient {
                     previous_hash: block.header.previous_hash.clone(),
                 }
             })
-            .collect())
+            .collect();
+
+        Ok((block_infos, blocks))
     }
 
     /// 트랜잭션 정보 조회 (블록에서 추출)
-    pub fn extract_transactions(&self, blocks: &[BlockInfo]) -> Vec<TransactionInfo> {
+    pub fn extract_transactions(&self, blocks: &[Block]) -> Vec<TransactionInfo> {
         let mut transactions = Vec::new();
 
-        for (block_idx, block) in blocks.iter().enumerate() {
-            for tx_idx in 0..block.transactions {
-                transactions.push(TransactionInfo {
-                    hash: format!("0x{:064x}", block_idx * 1000 + tx_idx),
-                    from: block.miner.clone(),
-                    to: format!("addr_{}", tx_idx % 10),
-                    amount: 1_000_000_000,
-                    fee: 50_000,
-                    timestamp: block.timestamp,
-                    block_height: Some(block.height),
-                    status: "confirmed".to_string(),
-                });
+        for block in blocks {
+            let timestamp = chrono::DateTime::<Utc>::from_timestamp(block.header.timestamp, 0)
+                .unwrap_or_else(|| Utc::now());
+
+            for tx in &block.transactions {
+                let is_coinbase = tx.inputs.is_empty();
+
+                // Coinbase 트랜잭션: 보상
+                if is_coinbase {
+                    // 보상 트랜잭션: 모든 output을 분리된 트랜잭션으로 표시
+                    for output in &tx.outputs {
+                        transactions.push(TransactionInfo {
+                            hash: tx.txid.clone(),
+                            from: "Block_Reward".to_string(),
+                            to: output.to.clone(),
+                            amount: output.amount,
+                            fee: 0,
+                            total: output.amount, // 보상이므로 amount == total
+                            timestamp,
+                            block_height: Some(block.header.index),
+                            status: "confirmed".to_string(),
+                        });
+                    }
+                } else {
+                    // 일반 트랜잭션: 모든 output을 표시
+                    // Note: fee 계산은 DB 접근이 필요하므로 여기서는 0으로 설정
+                    let from = tx
+                        .inputs
+                        .first()
+                        .map(|i| i.pubkey.clone())
+                        .unwrap_or_else(|| "Unknown".to_string());
+
+                    for output in &tx.outputs {
+                        transactions.push(TransactionInfo {
+                            hash: tx.txid.clone(),
+                            from: from.clone(),
+                            to: output.to.clone(),
+                            amount: output.amount,
+                            fee: 0,               // Fee 계산은 UTXO 조회가 필요
+                            total: output.amount, // 현재는 fee=0이므로 amount == total
+                            timestamp,
+                            block_height: Some(block.header.index),
+                            status: "confirmed".to_string(),
+                        });
+                    }
+                }
             }
         }
 

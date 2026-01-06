@@ -1,9 +1,10 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use chrono::Utc;
 
-use crate::state::{AppState, BlockInfo, TransactionInfo, AddressInfo, BlockchainStats};
+use crate::rpc::NodeRpcClient;
+use crate::state::{AddressInfo, AppState, BlockInfo, BlockchainStats, TransactionInfo};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
@@ -34,12 +35,12 @@ pub async fn get_blocks(
 ) -> HttpResponse {
     let page = query.page.unwrap_or(1);
     let limit = query.limit.unwrap_or(20);
-    
+
     let app_state = state.lock().unwrap();
-    
+
     let start = ((page - 1) * limit) as usize;
     let end = (page * limit) as usize;
-    
+
     let blocks: Vec<BlockInfo> = app_state
         .cached_blocks
         .iter()
@@ -65,11 +66,7 @@ pub async fn get_block_by_height(
     let height = path.into_inner();
     let app_state = state.lock().unwrap();
 
-    if let Some(block) = app_state
-        .cached_blocks
-        .iter()
-        .find(|b| b.height == height)
-    {
+    if let Some(block) = app_state.cached_blocks.iter().find(|b| b.height == height) {
         HttpResponse::Ok().json(block)
     } else {
         HttpResponse::NotFound().json(serde_json::json!({
@@ -86,11 +83,7 @@ pub async fn get_block_by_hash(
     let hash = path.into_inner();
     let app_state = state.lock().unwrap();
 
-    if let Some(block) = app_state
-        .cached_blocks
-        .iter()
-        .find(|b| b.hash == hash)
-    {
+    if let Some(block) = app_state.cached_blocks.iter().find(|b| b.hash == hash) {
         HttpResponse::Ok().json(block)
     } else {
         HttpResponse::NotFound().json(serde_json::json!({
@@ -106,12 +99,12 @@ pub async fn get_transactions(
 ) -> HttpResponse {
     let page = query.page.unwrap_or(1);
     let limit = query.limit.unwrap_or(20);
-    
+
     let app_state = state.lock().unwrap();
-    
+
     let start = ((page - 1) * limit) as usize;
     let end = (page * limit) as usize;
-    
+
     let transactions: Vec<TransactionInfo> = app_state
         .cached_transactions
         .iter()
@@ -151,26 +144,30 @@ pub async fn get_transaction_by_hash(
 }
 
 // 블록체인 통계 조회
-pub async fn get_blockchain_stats(
-    state: web::Data<Arc<Mutex<AppState>>>,
-) -> HttpResponse {
-    let app_state = state.lock().unwrap();
-    
-    let total_blocks = app_state.cached_blocks.len() as u64;
-    let total_transactions = app_state.cached_transactions.len() as u64;
-    let total_volume: u64 = app_state
-        .cached_transactions
-        .iter()
-        .map(|t| t.amount + t.fee)
-        .sum();
+pub async fn get_blockchain_stats(state: web::Data<Arc<Mutex<AppState>>>) -> HttpResponse {
+    // snapshot cached data (do not hold lock across network calls)
+    let (cached_blocks, cached_txs) = {
+        let s = state.lock().unwrap();
+        (s.cached_blocks.clone(), s.cached_transactions.clone())
+    };
 
-    let average_block_time = if total_blocks > 1 {
-        if let (Some(first), Some(last)) = (
-            app_state.cached_blocks.first(),
-            app_state.cached_blocks.last(),
-        ) {
+    // Try to fetch authoritative counts from Node DB
+    let rpc = NodeRpcClient::new("http://127.0.0.1:8333");
+    let (total_blocks, total_transactions) = match rpc.fetch_counts().await {
+        Ok((b, t)) => (b, t),
+        Err(_) => (cached_blocks.len() as u64, cached_txs.len() as u64),
+    };
+
+    // Fetch total volume from DB via Node
+    let total_volume: u64 = match rpc.fetch_total_volume().await {
+        Ok(vol) => vol,
+        Err(_) => cached_txs.iter().map(|t| t.amount + t.fee).sum(),
+    };
+
+    let average_block_time = if cached_blocks.len() > 1 {
+        if let (Some(first), Some(last)) = (cached_blocks.first(), cached_blocks.last()) {
             let duration = (last.timestamp - first.timestamp).num_seconds() as f64;
-            duration / (total_blocks - 1) as f64
+            duration / ((cached_blocks.len() - 1) as f64)
         } else {
             0.0
         }
@@ -184,11 +181,7 @@ pub async fn get_blockchain_stats(
         total_volume,
         average_block_time,
         average_block_size: 250, // 평균값
-        current_difficulty: app_state
-            .cached_blocks
-            .last()
-            .map(|b| b.difficulty)
-            .unwrap_or(0),
+        current_difficulty: cached_blocks.last().map(|b| b.difficulty).unwrap_or(0),
         network_hashrate: "0.00 TH/s".to_string(),
     };
 
@@ -201,39 +194,69 @@ pub async fn get_address_info(
     path: web::Path<String>,
 ) -> HttpResponse {
     let address = path.into_inner();
-    let app_state = state.lock().unwrap();
 
-    let mut balance = 0u64;
-    let mut sent = 0u64;
-    let mut received = 0u64;
-    let mut last_transaction: Option<chrono::DateTime<Utc>> = None;
+    let info: AddressInfo = {
+        // Try Node RPC first
+        let rpc = NodeRpcClient::new("http://127.0.0.1:8333");
 
-    for tx in &app_state.cached_transactions {
-        if tx.to == address {
-            received += tx.amount;
-            last_transaction = Some(tx.timestamp);
+        match rpc.fetch_address_info(&address).await {
+            Ok((balance, received, sent, transaction_count)) => {
+                let app_state = state.lock().unwrap();
+
+                let last_transaction = app_state
+                    .cached_transactions
+                    .iter()
+                    .filter(|t| t.from == address || t.to == address)
+                    .max_by_key(|t| t.timestamp)
+                    .map(|t| t.timestamp);
+
+                AddressInfo {
+                    address,
+                    balance,
+                    sent,
+                    received,
+                    transaction_count,
+                    last_transaction,
+                }
+            }
+
+            Err(_) => {
+                // Fallback to cached data
+                let app_state = state.lock().unwrap();
+
+                let mut sent = 0u64;
+                let mut received = 0u64;
+                let mut last_transaction: Option<chrono::DateTime<Utc>> = None;
+
+                for tx in &app_state.cached_transactions {
+                    if tx.to == address {
+                        received += tx.amount;
+                        last_transaction = Some(tx.timestamp);
+                    }
+                    if tx.from == address {
+                        sent += tx.amount + tx.fee;
+                        last_transaction = Some(tx.timestamp);
+                    }
+                }
+
+                let balance = received.saturating_sub(sent);
+
+                let transaction_count = app_state
+                    .cached_transactions
+                    .iter()
+                    .filter(|t| t.from == address || t.to == address)
+                    .count();
+
+                AddressInfo {
+                    address,
+                    balance,
+                    sent,
+                    received,
+                    transaction_count,
+                    last_transaction,
+                }
+            }
         }
-        if tx.from == address {
-            sent += tx.amount + tx.fee;
-            last_transaction = Some(tx.timestamp);
-        }
-    }
-
-    balance = received.saturating_sub(sent);
-
-    let transaction_count = app_state
-        .cached_transactions
-        .iter()
-        .filter(|t| t.from == address || t.to == address)
-        .count();
-
-    let info = AddressInfo {
-        address,
-        balance,
-        sent,
-        received,
-        transaction_count,
-        last_transaction,
     };
 
     HttpResponse::Ok().json(info)

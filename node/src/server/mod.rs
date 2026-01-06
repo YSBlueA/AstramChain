@@ -12,14 +12,101 @@ pub async fn run_server(node: NodeHandle) {
     };
 
     // -------------------------------
-    // GET /blockchain
-    // -------------------------------
+    // GET /blockchain/memory - In-memory blockchain state
+    let get_chain_memory = warp::path!("blockchain" / "memory")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+            let bincode_bytes = bincode::encode_to_vec(&state.blockchain, *BINCODE_CONFIG).unwrap();
+            let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
+            log::info!("✅ Returning {} blocks from memory", state.blockchain.len());
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "blockchain": encoded,
+                "count": state.blockchain.len(),
+                "source": "memory"
+            })))
+        });
+
+    // GET /blockchain/db - Blocks from database
+    let get_chain_db = warp::path!("blockchain" / "db")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+            match state.bc.get_all_blocks() {
+                Ok(all_blocks) => {
+                    let bincode_bytes =
+                        bincode::encode_to_vec(&all_blocks, *BINCODE_CONFIG).unwrap();
+                    let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
+                    log::info!("✅ Returning {} blocks from DB", all_blocks.len());
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "blockchain": encoded,
+                        "count": all_blocks.len(),
+                        "source": "database"
+                    })))
+                }
+                Err(e) => {
+                    log::error!("❌ Failed to fetch blocks from DB: {}", e);
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "error": format!("Failed to fetch blockchain from DB: {}", e),
+                        "count": 0,
+                        "source": "database"
+                    })))
+                }
+            }
+        });
+
+    // GET /debug/block-counts - Simple debug endpoint
+    let debug_counts = warp::path!("debug" / "block-counts")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+            let memory_count = state.blockchain.len();
+            let db_count = state.bc.get_all_blocks().map(|b| b.len()).unwrap_or(0);
+
+            log::info!(
+                "📊 Block counts - Memory: {}, DB: {}",
+                memory_count,
+                db_count
+            );
+
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "memory": memory_count,
+                "database": db_count,
+                "match": memory_count == db_count
+            })))
+        });
+
+    // GET /counts - lightweight counts for blocks and transactions (DB)
+    let get_counts = warp::path("counts")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+            let blocks = state.bc.get_all_blocks().map(|b| b.len()).unwrap_or(0);
+            let transactions = state.bc.count_transactions().unwrap_or(0);
+            let volume = state.bc.calculate_total_volume().unwrap_or(0);
+            log::info!(
+                "📈 Counts endpoint - blocks: {}, transactions: {}, volume: {}",
+                blocks,
+                transactions,
+                volume
+            );
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "blocks": blocks,
+                "transactions": transactions,
+                "total_volume": volume
+            })))
+        });
+
+    // GET /blockchain - Default endpoint (use memory for now)
     let get_chain = warp::path("blockchain")
         .and(warp::get())
         .and(node_filter.clone())
         .and_then(|node: NodeHandle| async move {
             let state = node.lock().unwrap();
-            // use core's BINCODE_CONFIG so client/server config matches
             let bincode_bytes = bincode::encode_to_vec(&state.blockchain, *BINCODE_CONFIG).unwrap();
             let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
             Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
@@ -206,15 +293,93 @@ pub async fn run_server(node: NodeHandle) {
             }
         });
 
+    // GET /address/{address}/info - Address statistics from DB
+    let get_address_info = warp::path!("address" / String / "info")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|address: String, node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+
+            let balance = state.bc.get_address_balance_from_db(&address).unwrap_or(0);
+            let received = state.bc.get_address_received_from_db(&address).unwrap_or(0);
+            let sent = state.bc.get_address_sent_from_db(&address).unwrap_or(0);
+            let tx_count = state
+                .bc
+                .get_address_transaction_count_from_db(&address)
+                .unwrap_or(0);
+
+            log::info!(
+                "📍 Address info for {}: balance={}, received={}, sent={}, tx_count={}",
+                address,
+                balance,
+                received,
+                sent,
+                tx_count
+            );
+
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "address": address,
+                "balance": balance,
+                "received": received,
+                "sent": sent,
+                "transaction_count": tx_count
+            })))
+        });
+
+    // GET /tx/{txid}
+    let get_tx = warp::path!("tx" / String)
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|txid: String, node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+
+            match state.bc.get_transaction(&txid) {
+                Ok(Some((tx, height))) => {
+                    let bincode_bytes = bincode::encode_to_vec(&tx, *BINCODE_CONFIG).unwrap();
+                    let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
+
+                    Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "txid": txid,
+                            "block_height": height,
+                            "transaction": encoded,
+                            "encoding": "bincode+base64"
+                        })),
+                        StatusCode::OK,
+                    ))
+                }
+
+                Ok(None) => Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "error": "tx not found"
+                    })),
+                    StatusCode::NOT_FOUND,
+                )),
+
+                Err(e) => Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "error": format!("db error: {}", e)
+                    })),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )),
+            }
+        });
+
     // -------------------------------
     // combine routes
-    // -------------------------------
+    // combine routes
     let routes = get_chain
+        .or(get_chain_memory)
+        .or(get_chain_db)
+        .or(get_counts)
+        .or(debug_counts)
         .or(post_tx)
         .or(relay_tx)
         .or(status)
         .or(get_balance)
+        .or(get_address_info)
         .or(get_utxos)
+        .or(get_tx)
         .with(warp::log("netcoin::http"))
         .boxed();
 

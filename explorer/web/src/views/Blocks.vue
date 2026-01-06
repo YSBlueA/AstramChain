@@ -65,6 +65,7 @@ export default {
       currentPage: 1,
       limit: 20,
       total: 0,
+      refreshInterval: null,
     };
   },
   computed: {
@@ -74,6 +75,14 @@ export default {
   },
   mounted() {
     this.fetchBlocks();
+    // 5초마다 자동 새로고침 (최신 블록 동기화)
+    this.refreshInterval = setInterval(() => this.fetchBlocks(), 5000);
+  },
+  beforeUnmount() {
+    // 컴포넌트 언마운트 시 인터벌 제거
+    if (this.refreshInterval) {
+      clearInterval(this.refreshInterval);
+    }
   },
   methods: {
     async fetchBlocks() {

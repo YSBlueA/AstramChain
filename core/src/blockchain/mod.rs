@@ -57,9 +57,9 @@ impl Blockchain {
 
         // commit atomically
         let mut batch = WriteBatch::default();
-        // header
-        let header_blob = bincode::encode_to_vec(&block.header, *BINCODE_CONFIG)?;
-        batch.put(format!("h:{}", hash).as_bytes(), &header_blob);
+        // Store complete block (header + transactions)
+        let block_blob = bincode::encode_to_vec(&block, *BINCODE_CONFIG)?;
+        batch.put(format!("b:{}", hash).as_bytes(), &block_blob);
         // tx
         let tx_blob = bincode::encode_to_vec(&cb, *BINCODE_CONFIG)?;
         batch.put(format!("t:{}", cb.txid).as_bytes(), &tx_blob);
@@ -107,7 +107,7 @@ impl Blockchain {
         // 3) previous exists (unless genesis)
         if block.header.index > 0 {
             let prev_hash = &block.header.previous_hash;
-            let key = format!("h:{}", prev_hash);
+            let key = format!("b:{}", prev_hash);
             if self.db.get(key.as_bytes())?.is_none() {
                 return Err(anyhow!("previous header not found: {}", prev_hash));
             }
@@ -197,9 +197,9 @@ impl Blockchain {
             }
         }
 
-        // persist header, index, tip
-        let header_blob = bincode::encode_to_vec(&block.header, *BINCODE_CONFIG)?;
-        batch.put(format!("h:{}", block.hash).as_bytes(), &header_blob);
+        // persist complete block, index, tip
+        let block_blob = bincode::encode_to_vec(&block, *BINCODE_CONFIG)?;
+        batch.put(format!("b:{}", block.hash).as_bytes(), &block_blob);
         batch.put(
             format!("i:{}", block.header.index).as_bytes(),
             block.hash.as_bytes(),
@@ -214,9 +214,9 @@ impl Blockchain {
 
     /// helper: load block header by hash
     pub fn load_header(&self, hash: &str) -> Result<Option<BlockHeader>> {
-        if let Some(blob) = self.db.get(format!("h:{}", hash).as_bytes())? {
-            let (h, _): (BlockHeader, usize) = bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
-            return Ok(Some(h));
+        if let Some(blob) = self.db.get(format!("b:{}", hash).as_bytes())? {
+            let (block, _): (Block, usize) = bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
+            return Ok(Some(block.header));
         }
         Ok(None)
     }
@@ -305,5 +305,190 @@ impl Blockchain {
         }
 
         Ok(utxos)
+    }
+
+    /// Count transactions stored in DB (keys starting with `t:`)
+    pub fn count_transactions(&self) -> Result<usize> {
+        let mut count: usize = 0;
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (k, _v) = item?;
+            let key_str = String::from_utf8_lossy(&k).to_string();
+            if key_str.starts_with("t:") {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Load all blocks from DB by iterating through block indices
+    pub fn get_all_blocks(&self) -> Result<Vec<Block>> {
+        let mut blocks = Vec::new();
+        let mut index = 0u64;
+
+        loop {
+            let key = format!("i:{}", index);
+            match self.db.get(key.as_bytes())? {
+                Some(hash_bytes) => {
+                    let hash = String::from_utf8(hash_bytes)?;
+
+                    // Load complete block (with transactions) by hash
+                    if let Some(blob) = self.db.get(format!("b:{}", hash).as_bytes())? {
+                        let (block, _): (Block, usize) =
+                            bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
+                        blocks.push(block);
+                    }
+                    index += 1;
+                }
+                None => {
+                    // No more blocks at this index
+                    break;
+                }
+            }
+        }
+
+        Ok(blocks)
+    }
+
+    pub fn get_transaction(&self, txid: &str) -> anyhow::Result<Option<(Transaction, usize)>> {
+        let blocks = self.get_all_blocks()?;
+
+        for block in blocks {
+            for tx in block.transactions {
+                if tx.txid == txid {
+                    return Ok(Some((tx, block.header.index as usize)));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Calculate total transaction volume from all outputs in DB (in natoshi)
+    pub fn calculate_total_volume(&self) -> Result<u64> {
+        let mut total: u64 = 0;
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+
+        for item in iter {
+            let (k, v) = item?;
+            let key_str = String::from_utf8_lossy(&k).to_string();
+
+            // Iterate through all transaction outputs: u:{txid}:{vout}
+            if key_str.starts_with("u:") {
+                let (utxo, _): (Utxo, usize) = bincode::decode_from_slice(&v, *BINCODE_CONFIG)?;
+                total = total.saturating_add(utxo.amount);
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Get address balance (sum of unspent outputs) from DB
+    pub fn get_address_balance_from_db(&self, address: &str) -> Result<u64> {
+        let mut balance: u64 = 0;
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+
+        for item in iter {
+            let (key, value) = item?;
+            let key_str = String::from_utf8(key.to_vec())?;
+
+            // UTXO key: u:{txid}:{vout}
+            if key_str.starts_with("u:") {
+                let (utxo, _): (Utxo, usize) = bincode::decode_from_slice(&value, *BINCODE_CONFIG)?;
+                if utxo.to == address {
+                    balance = balance.saturating_add(utxo.amount);
+                }
+            }
+        }
+
+        Ok(balance)
+    }
+
+    /// Get total received amount for address (all outputs to this address)
+    pub fn get_address_received_from_db(&self, address: &str) -> Result<u64> {
+        let mut total: u64 = 0;
+        let blocks = self.get_all_blocks()?;
+
+        for block in blocks {
+            for tx in block.transactions {
+                for output in &tx.outputs {
+                    if output.to == address {
+                        total = total.saturating_add(output.amount);
+                    }
+                }
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Get total sent amount for address (all transaction outputs, excluding coinbase inputs)
+    pub fn get_address_sent_from_db(&self, address: &str) -> Result<u64> {
+        let mut total: u64 = 0;
+        let blocks = self.get_all_blocks()?;
+
+        for block in blocks {
+            for tx in block.transactions {
+                // Skip coinbase transactions (first tx in block)
+                if !tx.inputs.is_empty() {
+                    // Check if any input comes from this address
+                    let mut is_sender = false;
+                    for input in &tx.inputs {
+                        if input.pubkey == address {
+                            is_sender = true;
+                            break;
+                        }
+                    }
+
+                    if is_sender {
+                        // Sum all outputs from this transaction
+                        for output in &tx.outputs {
+                            total = total.saturating_add(output.amount);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Get transaction count for address
+    pub fn get_address_transaction_count_from_db(&self, address: &str) -> Result<usize> {
+        let mut count: usize = 0;
+        let blocks = self.get_all_blocks()?;
+        let mut seen_txids = std::collections::HashSet::new();
+
+        for block in blocks {
+            for tx in block.transactions {
+                // Check if address is involved (sender or receiver)
+                let mut involved = false;
+
+                // Check outputs (receiver)
+                for output in &tx.outputs {
+                    if output.to == address {
+                        involved = true;
+                        break;
+                    }
+                }
+
+                // Check inputs (sender)
+                if !involved {
+                    for input in &tx.inputs {
+                        if input.pubkey == address {
+                            involved = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Count each unique transaction only once
+                if involved && seen_txids.insert(tx.txid.clone()) {
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(count)
     }
 }

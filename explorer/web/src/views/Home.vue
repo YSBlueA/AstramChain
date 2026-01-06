@@ -27,7 +27,7 @@
       <div class="stat-card">
         <div class="stat-label">총 거래량</div>
         <div class="stat-value">
-          {{ (stats.total_volume / 1e8).toFixed(2) }}
+          {{ formatAmount(stats.total_volume) }}
         </div>
       </div>
       <div class="stat-card">
@@ -73,7 +73,7 @@
               <span class="timestamp">{{ formatTime(tx.timestamp) }}</span>
             </div>
             <div class="item-detail">
-              <span class="amount">{{ (tx.amount / 1e8).toFixed(4) }} NC</span>
+              <span class="amount">{{ formatAmount(tx.amount) }} NTC</span>
               <span class="status" :class="tx.status">{{ tx.status }}</span>
             </div>
           </div>
@@ -147,6 +147,14 @@ export default {
     formatTime(timestamp) {
       const date = new Date(timestamp);
       return date.toLocaleString("ko-KR");
+    },
+    formatAmount(value) {
+      const num = Number(value) || 0;
+      const ntc = num / 100_000_000; // Convert natoshi to NTC
+      return ntc.toLocaleString("en-US", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 8,
+      });
     },
     truncateHash(hash) {
       return hash.substring(0, 8) + "..." + hash.substring(hash.length - 8);

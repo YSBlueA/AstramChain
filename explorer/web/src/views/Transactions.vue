@@ -25,8 +25,8 @@
             <td class="hash">{{ truncateHash(tx.hash) }}</td>
             <td class="address">{{ truncateAddress(tx.from) }}</td>
             <td class="address">{{ truncateAddress(tx.to) }}</td>
-            <td class="amount">{{ (tx.amount / 1e8).toFixed(4) }}</td>
-            <td class="fee">{{ (tx.fee / 1e8).toFixed(4) }}</td>
+            <td class="amount">{{ formatAmount(tx.amount) }}</td>
+            <td class="fee">{{ formatAmount(tx.fee) }}</td>
             <td class="status" :class="tx.status">{{ tx.status }}</td>
             <td class="timestamp">{{ formatTime(tx.timestamp) }}</td>
           </tr>
@@ -108,6 +108,14 @@ export default {
     formatTime(timestamp) {
       const date = new Date(timestamp);
       return date.toLocaleString("ko-KR");
+    },
+    formatAmount(value) {
+      const num = Number(value) || 0;
+      const ntc = num / 100_000_000; // Convert natoshi to NTC
+      return ntc.toLocaleString("en-US", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 8,
+      });
     },
     truncateHash(hash) {
       return hash.substring(0, 12) + "...";

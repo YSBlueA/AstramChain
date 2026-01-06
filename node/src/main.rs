@@ -6,6 +6,7 @@ use netcoin_config::config::Config;
 use netcoin_core::Blockchain;
 use netcoin_core::block;
 use netcoin_core::block::{Block, BlockHeader, compute_header_hash, compute_merkle_root};
+use netcoin_core::config::{INITIAL_BLOCK_REWARD, calculate_block_reward};
 use netcoin_core::consensus;
 use netcoin_core::transaction::Transaction;
 use netcoin_node::NodeHandle;
@@ -447,7 +448,11 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
     // server_handle.await.unwrap(); // unreachable because loop is infinite
 }
 
+// Constants for NTC token economics
+const HALVING_INTERVAL: u64 = 210_000; // blocks (approx 4 years at ~10 min/block)
+
 fn current_block_reward_snapshot() -> u64 {
-    // keep simple for now
-    50
+    // For now, always return initial reward (genesis/early blocks)
+    // In production, this would take current blockchain height as parameter
+    INITIAL_BLOCK_REWARD
 }

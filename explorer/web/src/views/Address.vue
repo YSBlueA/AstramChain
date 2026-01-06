@@ -10,21 +10,15 @@
       <div class="detail-grid">
         <div class="detail-item highlight">
           <span class="label">잔액</span>
-          <span class="value balance"
-            >{{ (addressInfo.balance / 1e8).toFixed(4) }} NC</span
-          >
+          <span class="value balance">{{ formatAmount(addressInfo.balance) }} NTC</span>
         </div>
         <div class="detail-item">
           <span class="label">받은 금액</span>
-          <span class="value received"
-            >{{ (addressInfo.received / 1e8).toFixed(4) }} NC</span
-          >
+          <span class="value received">{{ formatAmount(addressInfo.received) }} NTC</span>
         </div>
         <div class="detail-item">
           <span class="label">보낸 금액</span>
-          <span class="value sent"
-            >{{ (addressInfo.sent / 1e8).toFixed(4) }} NC</span
-          >
+          <span class="value sent">{{ formatAmount(addressInfo.sent) }} NTC</span>
         </div>
         <div class="detail-item">
           <span class="label">트랜잭션 수</span>
@@ -76,6 +70,14 @@ export default {
     formatTime(timestamp) {
       const date = new Date(timestamp);
       return date.toLocaleString("ko-KR");
+    },
+    formatAmount(value) {
+      const num = Number(value) || 0;
+      const ntc = num / 100_000_000; // Convert natoshi to NTC
+      return ntc.toLocaleString("en-US", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 8,
+      });
     },
     goHome() {
       this.$router.push("/");

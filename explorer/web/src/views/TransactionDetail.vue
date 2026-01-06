@@ -25,24 +25,15 @@
         </div>
         <div class="detail-item">
           <span class="label">금액</span>
-          <span class="value amount"
-            >{{ (transaction.amount / 1e8).toFixed(4) }} NC</span
-          >
+          <span class="value amount">{{ formatAmount(transaction.amount) }} NTC</span>
         </div>
         <div class="detail-item">
           <span class="label">수수료</span>
-          <span class="value fee"
-            >{{ (transaction.fee / 1e8).toFixed(4) }} NC</span
-          >
+          <span class="value fee">{{ formatAmount(transaction.fee) }} NTC</span>
         </div>
         <div class="detail-item">
           <span class="label">총액</span>
-          <span class="value total"
-            >{{
-              ((transaction.amount + transaction.fee) / 1e8).toFixed(4)
-            }}
-            NC</span
-          >
+          <span class="value total">{{ formatAmount(transaction.amount + transaction.fee) }} NTC</span>
         </div>
         <div class="detail-item">
           <span class="label">상태</span>
@@ -102,6 +93,14 @@ export default {
     formatTime(timestamp) {
       const date = new Date(timestamp);
       return date.toLocaleString("ko-KR");
+    },
+    formatAmount(value) {
+      const num = Number(value) || 0;
+      const ntc = num / 100_000_000; // Convert natoshi to NTC
+      return ntc.toLocaleString("en-US", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 8,
+      });
     },
     goToTransactions() {
       this.$router.push("/transactions");
