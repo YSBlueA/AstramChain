@@ -46,6 +46,11 @@ fn get_wallet_path() -> PathBuf {
 }
 
 fn save_wallet_base58(wallet: Wallet, path: &str) -> std::io::Result<()> {
+    // Create parent directories if they don't exist
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     let wallet_json = WalletJson {
         secret_key: wallet.secret_base58(),
         address: wallet.address.clone(),
