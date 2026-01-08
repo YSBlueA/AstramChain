@@ -33,9 +33,10 @@ async fn main() {
 
     let cfg = Config::load();
 
-    // Read wallet address from file
+    // Read wallet address from file (expand paths configured via CLI)
+    let wallet_path = cfg.wallet_path_resolved();
     let wallet_file =
-        fs::read_to_string(cfg.wallet_path.clone()).expect("Failed to read wallet file");
+        fs::read_to_string(wallet_path.as_path()).expect("Failed to read wallet file");
     let wallet: Value = serde_json::from_str(&wallet_file).expect("Failed to parse wallet JSON");
     let miner_address = wallet["address"]
         .as_str()
@@ -140,14 +141,7 @@ async fn main() {
     // 현재 DB에 있는 블록 높이와 Peer에 연결된 블록 높이를 비교하여 부족한 블록을 요청하고 동기화하는 로직을 구현해야 합니다.
 
     // If chain is empty (no tip), create genesis from wallet address
-    // Read wallet address from file
-    let wallet_file =
-        fs::read_to_string(cfg.wallet_path.clone()).expect("Failed to read wallet file");
-    let wallet: Value = serde_json::from_str(&wallet_file).expect("Failed to parse wallet JSON");
-    let miner_address = wallet["address"]
-        .as_str()
-        .expect("Failed to get address from wallet")
-        .to_string();
+    // Reuse the already loaded miner address
 
     // If DB has no tip, create genesis block
     if bc.chain_tip.is_none() {

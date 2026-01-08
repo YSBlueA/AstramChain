@@ -9,6 +9,11 @@ pub struct Config {
 }
 
 impl Config {
+    fn expand_path(path: &str) -> PathBuf {
+        let expanded = shellexpand::tilde(path);
+        PathBuf::from(expanded.into_owned())
+    }
+
     /// Compute the default wallet path depending on the target OS.
     fn default_wallet_path() -> String {
         let home = dirs::home_dir().expect("Cannot find home directory");
@@ -43,6 +48,16 @@ impl Config {
     pub fn default_path() -> PathBuf {
         let home = dirs::home_dir().expect("Cannot find home directory");
         home.join(".netcoin/config.json")
+    }
+
+    /// Wallet path with tilde expansion applied.
+    pub fn wallet_path_resolved(&self) -> PathBuf {
+        Self::expand_path(&self.wallet_path)
+    }
+
+    /// Data directory with tilde expansion applied.
+    pub fn data_dir_resolved(&self) -> PathBuf {
+        Self::expand_path(&self.data_dir)
     }
 
     pub fn load() -> Self {

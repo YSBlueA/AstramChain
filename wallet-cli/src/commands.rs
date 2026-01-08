@@ -42,8 +42,7 @@ struct WalletJson {
 
 fn get_wallet_path() -> PathBuf {
     let cfg = Config::load();
-    let expanded = shellexpand::tilde(&cfg.wallet_path);
-    PathBuf::from(expanded.to_string())
+    cfg.wallet_path_resolved()
 }
 
 fn save_wallet_base58(wallet: Wallet, path: &str) -> std::io::Result<()> {
