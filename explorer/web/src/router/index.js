@@ -5,6 +5,7 @@ import BlockDetail from '../views/BlockDetail.vue'
 import Transactions from '../views/Transactions.vue'
 import TransactionDetail from '../views/TransactionDetail.vue'
 import Address from '../views/Address.vue'
+import NodeStatus from '../views/NodeStatus.vue'
 
 const routes = [
   {
@@ -36,6 +37,11 @@ const routes = [
     path: '/address/:address',
     name: 'Address',
     component: Address,
+  },
+  {
+    path: '/node/status',
+    name: 'NodeStatus',
+    component: NodeStatus,
   },
 ]
 

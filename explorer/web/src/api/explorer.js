@@ -43,4 +43,9 @@ export const explorerAPI = {
   health() {
     return axios.get(`${API_BASE_URL}/health`)
   },
+
+  // 노드 상태
+  getNodeStatus() {
+    return axios.get(`${API_BASE_URL}/node/status`)
+  },
 }

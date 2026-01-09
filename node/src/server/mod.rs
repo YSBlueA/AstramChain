@@ -101,6 +101,62 @@ pub async fn run_server(node: NodeHandle) {
             })))
         });
 
+    // GET /status - Node status information (real-time monitoring)
+    let get_status = warp::path("status")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+
+            // Get blockchain info
+            let block_height = state.bc.get_all_blocks().map(|b| b.len()).unwrap_or(0);
+            let memory_blocks = state.blockchain.len();
+            let pending_tx = state.pending.len();
+            let seen_tx = state.seen_tx.len();
+
+            // Get P2P network info
+            let peer_heights = state.p2p.get_peer_heights();
+            let connected_peers = peer_heights.len();
+            let my_height = state.p2p.get_my_height();
+
+            // Get chain tip hash
+            let chain_tip = state
+                .bc
+                .chain_tip
+                .as_ref()
+                .map(|hash| hex::encode(hash))
+                .unwrap_or_else(|| "none".to_string());
+
+            log::info!(
+                "🔍 Status requested - Height: {}, Peers: {}, Pending TX: {}",
+                block_height,
+                connected_peers,
+                pending_tx
+            );
+
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "node": {
+                    "version": "0.1.0",
+                    "uptime_seconds": 0, // TODO: Add start time tracking
+                },
+                "blockchain": {
+                    "height": block_height,
+                    "memory_blocks": memory_blocks,
+                    "chain_tip": chain_tip,
+                    "my_height": my_height,
+                },
+                "mempool": {
+                    "pending_transactions": pending_tx,
+                    "seen_transactions": seen_tx,
+                },
+                "network": {
+                    "connected_peers": connected_peers,
+                    "peer_heights": peer_heights,
+                },
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            })))
+        });
+
     // GET /blockchain - Default endpoint (use memory for now)
     let get_chain = warp::path("blockchain")
         .and(warp::get())
@@ -372,6 +428,7 @@ pub async fn run_server(node: NodeHandle) {
         .or(get_chain_memory)
         .or(get_chain_db)
         .or(get_counts)
+        .or(get_status)
         .or(debug_counts)
         .or(post_tx)
         .or(relay_tx)

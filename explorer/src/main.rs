@@ -112,7 +112,8 @@ async fn main() -> std::io::Result<()> {
                     .route(
                         "/address/{address}",
                         web::get().to(handlers::get_address_info),
-                    ),
+                    )
+                    .route("/node/status", web::get().to(handlers::get_node_status)),
             )
     })
     .bind(format!("{}:{}", server_address, server_port))?
