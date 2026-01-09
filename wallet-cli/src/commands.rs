@@ -1,13 +1,25 @@
 use crate::wallet::Wallet;
-use chrono::Utc;
 use netcoin_config::config::Config;
 use netcoin_core::transaction::{BINCODE_CONFIG, Transaction, TransactionInput, TransactionOutput};
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize, de};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+
+// NTC unit constants (8 decimal places)
+const NATOSHI_PER_NTC: u64 = 100_000_000; // 1 NTC = 100,000,000 natoshi
+
+/// Convert NTC to natoshi (smallest unit)
+fn ntc_to_natoshi(ntc: f64) -> u64 {
+    (ntc * NATOSHI_PER_NTC as f64) as u64
+}
+
+/// Convert natoshi to NTC for display
+fn natoshi_to_ntc(natoshi: u64) -> f64 {
+    natoshi as f64 / NATOSHI_PER_NTC as f64
+}
 
 #[derive(clap::Subcommand)]
 pub enum Commands {
@@ -18,7 +30,12 @@ pub enum Commands {
     Balance { address: String },
 
     /// Create, sign, and broadcast a transaction to the network
-    Send { to: String, amount: u64 },
+    /// Amount should be specified in NTC (e.g., 1.5 for 1.5 NTC)
+    Send {
+        to: String,
+        #[arg(help = "Amount in NTC (e.g., 1.5)")]
+        amount: f64,
+    },
 
     /// Manage CLI configuration
     Config {
@@ -86,13 +103,18 @@ pub fn get_balance(address: &str) {
     match Client::new().get(&url).send() {
         Ok(res) => {
             let json: Value = res.json().unwrap();
-            println!("💰 balance: {}", json["balance"]);
+            let balance_natoshi = json["balance"].as_u64().unwrap_or(0);
+            let balance_ntc = natoshi_to_ntc(balance_natoshi);
+            println!(
+                "💰 Balance: {} NTC ({} natoshi)",
+                balance_ntc, balance_natoshi
+            );
         }
         Err(e) => println!("❌ Query failed: {}", e),
     }
 }
 
-pub fn send_transaction(to: &str, amount: u64) {
+pub fn send_transaction(to: &str, amount_natoshi: u64) {
     let cfg = Config::load();
     let wallet = load_wallet();
     let client = Client::new();
@@ -131,25 +153,26 @@ pub fn send_transaction(to: &str, amount: u64) {
             signature: None,
         });
         input_sum += amt;
-        if input_sum >= amount {
+        if input_sum >= amount_natoshi {
             break;
         }
     }
 
-    if input_sum < amount {
+    if input_sum < amount_natoshi {
         println!(
-            "❌ Insufficient balance: have {}, need {}",
-            input_sum, amount
+            "❌ Insufficient balance: have {} NTC, need {} NTC",
+            natoshi_to_ntc(input_sum),
+            natoshi_to_ntc(amount_natoshi)
         );
         return;
     }
 
     let mut outputs = vec![TransactionOutput {
         to: to.to_string(),
-        amount,
+        amount: amount_natoshi,
     }];
 
-    let change = input_sum - amount;
+    let change = input_sum - amount_natoshi;
     if change > 0 {
         outputs.push(TransactionOutput {
             to: wallet.address.clone(),
@@ -176,7 +199,20 @@ pub fn send_transaction(to: &str, amount: u64) {
     // 6️⃣ txid 채우기
     tx = tx.with_txid();
 
-    println!("✅ Transaction created. txid: {}", tx.txid);
+    println!("✅ Transaction created successfully!");
+    println!("   TXID: {}", tx.txid);
+    println!(
+        "   Amount: {} NTC ({} natoshi)",
+        natoshi_to_ntc(amount_natoshi),
+        amount_natoshi
+    );
+    if change > 0 {
+        println!(
+            "   Change: {} NTC ({} natoshi)",
+            natoshi_to_ntc(change),
+            change
+        );
+    }
     println!(
         "Signature: {}",
         tx.inputs
