@@ -110,11 +110,28 @@ export default {
       return date.toLocaleString("ko-KR");
     },
     formatAmount(value) {
-      const num = Number(value) || 0;
-      const ntc = num / 100_000_000; // Convert natoshi to NTC
+      // Handle hex string (0x...), decimal string, number, and U256 array format
+      let num;
+      
+      if (Array.isArray(value)) {
+        num = BigInt(value[0]) + (BigInt(value[1]) << BigInt(64)) +
+              (BigInt(value[2]) << BigInt(128)) + (BigInt(value[3]) << BigInt(192));
+      } else if (typeof value === "string") {
+        if (value.startsWith("0x")) {
+          num = BigInt(value);
+        } else {
+          num = BigInt(value);
+        }
+      } else {
+        num = BigInt(value || 0);
+      }
+
+      const divisor = BigInt("1000000000000000000"); // 10^18
+      const ntc = Number(num) / Number(divisor);
+
       return ntc.toLocaleString("en-US", {
         minimumFractionDigits: 0,
-        maximumFractionDigits: 8,
+        maximumFractionDigits: 18,
       });
     },
     truncateHash(hash) {

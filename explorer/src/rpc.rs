@@ -4,7 +4,26 @@ use chrono::Utc;
 use log::{error, info};
 use netcoin_core::block::Block;
 use netcoin_core::transaction::BINCODE_CONFIG;
+use primitive_types::U256;
 use reqwest;
+
+/// Parse U256 from hex string (with or without 0x prefix) or decimal string
+fn parse_u256_from_json(value: &serde_json::Value) -> Option<U256> {
+    if let Some(s) = value.as_str() {
+        // Try hex first (0x prefix)
+        if let Some(hex_str) = s.strip_prefix("0x") {
+            if let Ok(u) = U256::from_str_radix(hex_str, 16) {
+                return Some(u);
+            }
+        }
+        // Try decimal
+        if let Ok(u) = U256::from_dec_str(s) {
+            return Some(u);
+        }
+    }
+    // Try as number
+    value.as_u64().map(U256::from)
+}
 
 pub struct NodeRpcClient {
     node_url: String,
@@ -34,15 +53,15 @@ impl NodeRpcClient {
     }
 
     /// Fetch total volume from Node DB
-    pub async fn fetch_total_volume(&self) -> Result<u64, String> {
+    pub async fn fetch_total_volume(&self) -> Result<U256, String> {
         let url = format!("{}/counts", self.node_url);
         match reqwest::get(&url).await {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(v) => {
                     let volume = v
                         .get("total_volume")
-                        .and_then(|vol| vol.as_u64())
-                        .unwrap_or(0);
+                        .and_then(|vol| parse_u256_from_json(vol))
+                        .unwrap_or_else(U256::zero);
                     Ok(volume)
                 }
                 Err(e) => Err(format!("Failed to parse volume response: {}", e)),
@@ -55,18 +74,49 @@ impl NodeRpcClient {
     pub async fn fetch_address_info(
         &self,
         address: &str,
-    ) -> Result<(u64, u64, u64, usize), String> {
+    ) -> Result<(U256, U256, U256, usize), String> {
         let url = format!("{}/address/{}/info", self.node_url, address);
+        log::info!("🌐 Fetching from Node: {}", url);
         match reqwest::get(&url).await {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(v) => {
-                    let balance = v.get("balance").and_then(|b| b.as_u64()).unwrap_or(0);
-                    let received = v.get("received").and_then(|r| r.as_u64()).unwrap_or(0);
-                    let sent = v.get("sent").and_then(|s| s.as_u64()).unwrap_or(0);
+                    log::info!("📥 Raw JSON from Node: {}", v);
+
+                    // Parse U256 values from JSON (hex or decimal)
+                    let balance = v
+                        .get("balance")
+                        .and_then(|b| {
+                            log::info!("Balance field: {:?}", b);
+                            parse_u256_from_json(b)
+                        })
+                        .unwrap_or_else(U256::zero);
+                    let received = v
+                        .get("received")
+                        .and_then(|r| {
+                            log::info!("Received field: {:?}", r);
+                            parse_u256_from_json(r)
+                        })
+                        .unwrap_or_else(U256::zero);
+                    let sent = v
+                        .get("sent")
+                        .and_then(|s| {
+                            log::info!("Sent field: {:?}", s);
+                            parse_u256_from_json(s)
+                        })
+                        .unwrap_or_else(U256::zero);
                     let tx_count = v
                         .get("transaction_count")
                         .and_then(|t| t.as_u64())
                         .unwrap_or(0) as usize;
+
+                    log::info!(
+                        "✅ Parsed - balance: {}, received: {}, sent: {}, tx_count: {}",
+                        balance,
+                        received,
+                        sent,
+                        tx_count
+                    );
+
                     Ok((balance, received, sent, tx_count))
                 }
                 Err(e) => Err(format!("Failed to parse address info response: {}", e)),
@@ -227,9 +277,9 @@ impl NodeRpcClient {
                             hash: tx.txid.clone(),
                             from: "Block_Reward".to_string(),
                             to: output.to.clone(),
-                            amount: output.amount,
-                            fee: 0,
-                            total: output.amount, // 보상이므로 amount == total
+                            amount: output.amount(),
+                            fee: U256::zero(),
+                            total: output.amount(), // 보상이므로 amount == total
                             timestamp,
                             block_height: Some(block.header.index),
                             status: "confirmed".to_string(),
@@ -249,9 +299,9 @@ impl NodeRpcClient {
                             hash: tx.txid.clone(),
                             from: from.clone(),
                             to: output.to.clone(),
-                            amount: output.amount,
-                            fee: 0,               // Fee 계산은 UTXO 조회가 필요
-                            total: output.amount, // 현재는 fee=0이므로 amount == total
+                            amount: output.amount(),
+                            fee: U256::zero(),      // Fee 계산은 UTXO 조회가 필요
+                            total: output.amount(), // 현재는 fee=0이므로 amount == total
                             timestamp,
                             block_height: Some(block.header.index),
                             status: "confirmed".to_string(),

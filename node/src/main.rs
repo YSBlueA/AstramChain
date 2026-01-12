@@ -6,13 +6,14 @@ use netcoin_config::config::Config;
 use netcoin_core::Blockchain;
 use netcoin_core::block;
 use netcoin_core::block::{Block, BlockHeader, compute_header_hash, compute_merkle_root};
-use netcoin_core::config::{INITIAL_BLOCK_REWARD, calculate_block_reward};
+use netcoin_core::config::{calculate_block_reward, initial_block_reward};
 use netcoin_core::consensus;
 use netcoin_core::transaction::Transaction;
 use netcoin_node::NodeHandle;
 use netcoin_node::NodeState;
 use netcoin_node::p2p::service::P2PService;
 use netcoin_node::server::run_server;
+use primitive_types::U256;
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -75,6 +76,12 @@ async fn main() {
         .start("0.0.0.0:8335".to_string(), node_handle.clone())
         .await
         .expect("p2p start failed");
+
+    // Start Ethereum JSON-RPC server for MetaMask
+    let eth_rpc_node = node_handle.clone();
+    tokio::spawn(async move {
+        netcoin_node::server::run_eth_rpc_server(eth_rpc_node).await;
+    });
 
     start_services(node_handle, miner_address).await;
     /*
@@ -445,8 +452,8 @@ async fn start_services(node_handle: NodeHandle, miner_address: String) {
 // Constants for NTC token economics
 const HALVING_INTERVAL: u64 = 210_000; // blocks (approx 4 years at ~10 min/block)
 
-fn current_block_reward_snapshot() -> u64 {
+fn current_block_reward_snapshot() -> U256 {
     // For now, always return initial reward (genesis/early blocks)
     // In production, this would take current blockchain height as parameter
-    INITIAL_BLOCK_REWARD
+    initial_block_reward()
 }

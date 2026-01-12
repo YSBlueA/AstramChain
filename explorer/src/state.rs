@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,20 +19,20 @@ pub struct TransactionInfo {
     pub hash: String,
     pub from: String,
     pub to: String,
-    pub amount: u64,           // 송금 금액
-    pub fee: u64,              // 수수료
-    pub total: u64,            // 총액 (amount + fee)
+    pub amount: U256, // 송금 금액
+    pub fee: U256,    // 수수료
+    pub total: U256,  // 총액 (amount + fee)
     pub timestamp: DateTime<Utc>,
     pub block_height: Option<u64>,
-    pub status: String,        // "confirmed", "pending"
+    pub status: String, // "confirmed", "pending"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressInfo {
     pub address: String,
-    pub balance: u64,
-    pub sent: u64,
-    pub received: u64,
+    pub balance: U256,
+    pub sent: U256,
+    pub received: U256,
     pub transaction_count: usize,
     pub last_transaction: Option<DateTime<Utc>>,
 }
@@ -40,7 +41,7 @@ pub struct AddressInfo {
 pub struct BlockchainStats {
     pub total_blocks: u64,
     pub total_transactions: u64,
-    pub total_volume: u64,
+    pub total_volume: U256,
     pub average_block_time: f64,
     pub average_block_size: usize,
     pub current_difficulty: u32,

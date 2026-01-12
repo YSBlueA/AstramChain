@@ -1,7 +1,12 @@
+pub mod eth_rpc;
+
+pub use eth_rpc::run_eth_rpc_server;
+
 use crate::NodeHandle;
 use base64::{Engine as _, engine::general_purpose};
 use netcoin_core::transaction::{BINCODE_CONFIG, Transaction};
 use netcoin_core::utxo::Utxo;
+use primitive_types::U256;
 use warp::Filter;
 use warp::{http::StatusCode, reply::with_status}; // bincode v2
 /// run_server expects NodeHandle (Arc<Mutex<NodeState>>)
@@ -87,7 +92,7 @@ pub async fn run_server(node: NodeHandle) {
             let state = node.lock().unwrap();
             let blocks = state.bc.get_all_blocks().map(|b| b.len()).unwrap_or(0);
             let transactions = state.bc.count_transactions().unwrap_or(0);
-            let volume = state.bc.calculate_total_volume().unwrap_or(0);
+            let volume = state.bc.calculate_total_volume().unwrap_or(U256::zero());
             log::info!(
                 "📈 Counts endpoint - blocks: {}, transactions: {}, volume: {}",
                 blocks,
@@ -97,7 +102,7 @@ pub async fn run_server(node: NodeHandle) {
             Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
                 "blocks": blocks,
                 "transactions": transactions,
-                "total_volume": volume
+                "total_volume": format!("0x{:x}", volume)
             })))
         });
 
@@ -178,7 +183,7 @@ pub async fn run_server(node: NodeHandle) {
         .and(warp::body::bytes())
         .and(node_filter.clone())
         .and_then(|body: bytes::Bytes, node: NodeHandle| async move {
-            let mut tx: Transaction;
+            let tx: Transaction;
 
             match bincode::decode_from_slice::<Transaction, _>(&body, *BINCODE_CONFIG) {
                 Ok((decoded, _)) => {
@@ -319,7 +324,7 @@ pub async fn run_server(node: NodeHandle) {
         .and(node_filter.clone())
         .and_then(|address: String, node: NodeHandle| async move {
             let state = node.lock().unwrap();
-            match state.bc.get_balance(&address) {
+            match state.bc.get_address_balance_from_db(&address) {
                 Ok(bal) => {
                     log::info!("✅ balance lookup success: {} -> {}", address, bal);
                     Ok::<_, warp::Rejection>(warp::reply::json(
@@ -354,11 +359,22 @@ pub async fn run_server(node: NodeHandle) {
         .and(warp::get())
         .and(node_filter.clone())
         .and_then(|address: String, node: NodeHandle| async move {
+            // Normalize address to lowercase for consistent lookup
+            let address = address.to_lowercase();
             let state = node.lock().unwrap();
 
-            let balance = state.bc.get_address_balance_from_db(&address).unwrap_or(0);
-            let received = state.bc.get_address_received_from_db(&address).unwrap_or(0);
-            let sent = state.bc.get_address_sent_from_db(&address).unwrap_or(0);
+            let balance = state
+                .bc
+                .get_address_balance_from_db(&address)
+                .unwrap_or(U256::zero());
+            let received = state
+                .bc
+                .get_address_received_from_db(&address)
+                .unwrap_or(U256::zero());
+            let sent = state
+                .bc
+                .get_address_sent_from_db(&address)
+                .unwrap_or(U256::zero());
             let tx_count = state
                 .bc
                 .get_address_transaction_count_from_db(&address)
@@ -373,11 +389,12 @@ pub async fn run_server(node: NodeHandle) {
                 tx_count
             );
 
+            // Convert U256 to hex strings for JSON (to avoid precision loss in JavaScript)
             Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
                 "address": address,
-                "balance": balance,
-                "received": received,
-                "sent": sent,
+                "balance": format!("0x{:x}", balance),
+                "received": format!("0x{:x}", received),
+                "sent": format!("0x{:x}", sent),
                 "transaction_count": tx_count
             })))
         });

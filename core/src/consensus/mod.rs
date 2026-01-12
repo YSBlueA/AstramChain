@@ -1,12 +1,13 @@
 // core/consensus.rs
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use crate::block::{Block, BlockHeader, compute_header_hash, compute_merkle_root};
 use crate::transaction::Transaction;
-use chrono::Utc;
 use anyhow::{Result, anyhow};
+use chrono::Utc;
+use primitive_types::U256;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// Find a valid nonce by updating header.nonce and returning (nonce, hash).
 /// Simple CPU single-threaded loop. Caller should run this in spawn_blocking.
@@ -43,7 +44,7 @@ pub fn mine_block_with_coinbase(
     difficulty: u32,
     txs: Vec<Transaction>,
     miner_addr: &str,
-    reward: u64,
+    reward: U256,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<Block> {
     let coinbase = Transaction::coinbase(miner_addr, reward).with_txid();

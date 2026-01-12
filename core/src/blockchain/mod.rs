@@ -5,7 +5,9 @@ use crate::utxo::Utxo;
 use anyhow::{Result, anyhow};
 use bincode::config;
 use chrono::Utc;
+use log;
 use once_cell::sync::Lazy;
+use primitive_types::U256;
 use rocksdb::{DB, WriteBatch};
 
 pub static BINCODE_CONFIG: Lazy<config::Configuration> = Lazy::new(|| config::standard());
@@ -49,7 +51,7 @@ impl Blockchain {
         if self.chain_tip.is_some() {
             return Err(anyhow!("chain already exists"));
         }
-        let cb = Transaction::coinbase(address, 50);
+        let cb = Transaction::coinbase(address, U256::from(50));
 
         let merkle = compute_merkle_root(&vec![cb.txid.clone()]);
         let header = BlockHeader {
@@ -77,12 +79,7 @@ impl Blockchain {
         batch.put(format!("t:{}", cb.txid).as_bytes(), &tx_blob);
 
         for (i, out) in cb.outputs.iter().enumerate() {
-            let utxo = Utxo {
-                txid: cb.txid.clone(),
-                vout: i as u32,
-                to: out.to.clone(),
-                amount: out.amount,
-            };
+            let utxo = Utxo::new(cb.txid.clone(), i as u32, out.to.clone(), out.amount());
 
             let utxo_blob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
             batch.put(format!("u:{}:{}", cb.txid, i).as_bytes(), &utxo_blob);
@@ -155,12 +152,10 @@ impl Blockchain {
                 let tx_blob = bincode::encode_to_vec(tx, *BINCODE_CONFIG)?;
                 batch.put(format!("t:{}", tx.txid).as_bytes(), &tx_blob);
                 for (v, out) in tx.outputs.iter().enumerate() {
-                    let utxo = Utxo {
-                        txid: tx.txid.clone(),
-                        vout: v as u32,
-                        to: out.to.clone(),
-                        amount: out.amount,
-                    };
+                    // Normalize address to lowercase for consistent storage
+                    let normalized_address = out.to.to_lowercase();
+                    let utxo =
+                        Utxo::new(tx.txid.clone(), v as u32, normalized_address, out.amount());
                     let ublob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
                     batch.put(format!("u:{}:{}", tx.txid, v).as_bytes(), &ublob);
                 }
@@ -168,14 +163,14 @@ impl Blockchain {
             }
 
             // for non-coinbase tx, check each input exists in UTXO and sum amounts
-            let mut input_sum: u128 = 0;
+            let mut input_sum = U256::zero();
             for inp in &tx.inputs {
                 let ukey = format!("u:{}:{}", inp.txid, inp.vout);
                 match self.db.get(ukey.as_bytes())? {
                     Some(blob) => {
                         let (u, _): (Utxo, usize) =
                             bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
-                        input_sum += u.amount as u128;
+                        input_sum = input_sum + u.amount();
                         // mark as spent by deleting in batch
                         batch.delete(ukey.as_bytes());
                     }
@@ -188,9 +183,9 @@ impl Blockchain {
                     }
                 }
             }
-            let mut output_sum: u128 = 0;
+            let mut output_sum = U256::zero();
             for out in &tx.outputs {
-                output_sum += out.amount as u128;
+                output_sum = output_sum + out.amount();
             }
             if output_sum > input_sum {
                 return Err(anyhow!("outputs exceed inputs in tx {}", tx.txid));
@@ -200,12 +195,9 @@ impl Blockchain {
             let tx_blob = bincode::encode_to_vec(tx, *BINCODE_CONFIG)?;
             batch.put(format!("t:{}", tx.txid).as_bytes(), &tx_blob);
             for (v, out) in tx.outputs.iter().enumerate() {
-                let utxo = Utxo {
-                    txid: tx.txid.clone(),
-                    vout: v as u32,
-                    to: out.to.clone(),
-                    amount: out.amount,
-                };
+                // Normalize address to lowercase for consistent storage
+                let normalized_address = out.to.to_lowercase();
+                let utxo = Utxo::new(tx.txid.clone(), v as u32, normalized_address, out.amount());
                 let ublob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
                 batch.put(format!("u:{}:{}", tx.txid, v).as_bytes(), &ublob);
             }
@@ -246,8 +238,8 @@ impl Blockchain {
 
     /// get balance by scanning UTXO set (use get_address_balance_from_db instead)
     #[deprecated(note = "Use get_address_balance_from_db instead")]
-    pub fn get_balance(&self, address: &str) -> Result<u128, Box<dyn std::error::Error>> {
-        Ok(self.get_address_balance_from_db(address)? as u128)
+    pub fn get_balance(&self, address: &str) -> Result<U256, Box<dyn std::error::Error>> {
+        Ok(self.get_address_balance_from_db(address)?)
     }
 
     /// Determine next block index based on current tip
@@ -362,8 +354,8 @@ impl Blockchain {
     }
 
     /// Calculate total transaction volume from all outputs in DB (in natoshi)
-    pub fn calculate_total_volume(&self) -> Result<u64> {
-        let mut total: u64 = 0;
+    pub fn calculate_total_volume(&self) -> Result<U256> {
+        let mut total = U256::zero();
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
 
         for item in iter {
@@ -373,7 +365,7 @@ impl Blockchain {
             // Iterate through all transaction outputs: u:{txid}:{vout}
             if key_str.starts_with("u:") {
                 let (utxo, _): (Utxo, usize) = bincode::decode_from_slice(&v, *BINCODE_CONFIG)?;
-                total = total.saturating_add(utxo.amount);
+                total = total + utxo.amount();
             }
         }
 
@@ -381,8 +373,9 @@ impl Blockchain {
     }
 
     /// Get address balance (sum of unspent outputs) from DB
-    pub fn get_address_balance_from_db(&self, address: &str) -> Result<u64> {
-        let mut balance: u64 = 0;
+    pub fn get_address_balance_from_db(&self, address: &str) -> Result<U256> {
+        let mut balance = U256::zero();
+        let mut utxo_count = 0;
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
 
         for item in iter {
@@ -391,26 +384,46 @@ impl Blockchain {
 
             // UTXO key: u:{txid}:{vout}
             if key_str.starts_with("u:") {
-                let (utxo, _): (Utxo, usize) = bincode::decode_from_slice(&value, *BINCODE_CONFIG)?;
-                if utxo.to == address {
-                    balance = balance.saturating_add(utxo.amount);
+                match bincode::decode_from_slice::<Utxo, _>(&value, *BINCODE_CONFIG) {
+                    Ok((utxo, _)) => {
+                        if utxo.to == address {
+                            utxo_count += 1;
+                            let amount = utxo.amount();
+                            log::debug!(
+                                "Found UTXO for {}: {} (total so far: {})",
+                                address,
+                                amount,
+                                balance + amount
+                            );
+                            balance = balance + amount;
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to decode UTXO at {}: {}", key_str, e);
+                    }
                 }
             }
         }
 
+        log::info!(
+            "Address {} balance: {} (from {} UTXOs)",
+            address,
+            balance,
+            utxo_count
+        );
         Ok(balance)
     }
 
     /// Get total received amount for address (all outputs to this address)
-    pub fn get_address_received_from_db(&self, address: &str) -> Result<u64> {
-        let mut total: u64 = 0;
+    pub fn get_address_received_from_db(&self, address: &str) -> Result<U256> {
+        let mut total = U256::zero();
         let blocks = self.get_all_blocks_cached()?;
 
         for block in blocks {
             for tx in block.transactions {
                 for output in &tx.outputs {
                     if output.to == address {
-                        total = total.saturating_add(output.amount);
+                        total = total + output.amount();
                     }
                 }
             }
@@ -420,8 +433,8 @@ impl Blockchain {
     }
 
     /// Get total sent amount for address (all transaction outputs, excluding coinbase inputs)
-    pub fn get_address_sent_from_db(&self, address: &str) -> Result<u64> {
-        let mut total: u64 = 0;
+    pub fn get_address_sent_from_db(&self, address: &str) -> Result<U256> {
+        let mut total = U256::zero();
         let blocks = self.get_all_blocks_cached()?;
 
         for block in blocks {
@@ -434,7 +447,7 @@ impl Blockchain {
                     if is_sender {
                         // Sum all outputs from this transaction
                         for output in &tx.outputs {
-                            total = total.saturating_add(output.amount);
+                            total = total + output.amount();
                         }
                     }
                 }

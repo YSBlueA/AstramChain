@@ -1,10 +1,10 @@
-use actix_web::{HttpResponse, web};
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-
 use crate::rpc::NodeRpcClient;
 use crate::state::{AddressInfo, AppState, BlockInfo, BlockchainStats, TransactionInfo};
+use actix_web::{HttpResponse, web};
+use chrono::Utc;
+use primitive_types::U256;
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
@@ -159,9 +159,11 @@ pub async fn get_blockchain_stats(state: web::Data<Arc<Mutex<AppState>>>) -> Htt
     };
 
     // Fetch total volume from DB via Node
-    let total_volume: u64 = match rpc.fetch_total_volume().await {
+    let total_volume: U256 = match rpc.fetch_total_volume().await {
         Ok(vol) => vol,
-        Err(_) => cached_txs.iter().map(|t| t.amount + t.fee).sum(),
+        Err(_) => cached_txs
+            .iter()
+            .fold(U256::zero(), |acc, t| acc + t.amount + t.fee),
     };
 
     let average_block_time = if cached_blocks.len() > 1 {
@@ -194,6 +196,7 @@ pub async fn get_address_info(
     path: web::Path<String>,
 ) -> HttpResponse {
     let address = path.into_inner();
+    log::info!("📍 Explorer handler: Fetching address info for {}", address);
 
     let info: AddressInfo = {
         // Try Node RPC first
@@ -201,6 +204,13 @@ pub async fn get_address_info(
 
         match rpc.fetch_address_info(&address).await {
             Ok((balance, received, sent, transaction_count)) => {
+                log::info!(
+                    "✅ Got from Node RPC - balance: {}, received: {}, sent: {}, tx_count: {}",
+                    balance,
+                    received,
+                    sent,
+                    transaction_count
+                );
                 let app_state = state.lock().unwrap();
 
                 let last_transaction = app_state
@@ -210,22 +220,31 @@ pub async fn get_address_info(
                     .max_by_key(|t| t.timestamp)
                     .map(|t| t.timestamp);
 
-                AddressInfo {
-                    address,
+                let info = AddressInfo {
+                    address: address.clone(),
                     balance,
                     sent,
                     received,
                     transaction_count,
                     last_transaction,
-                }
+                };
+
+                log::info!(
+                    "📤 Sending to client - balance: {}, received: {}, sent: {}",
+                    info.balance,
+                    info.received,
+                    info.sent
+                );
+
+                info
             }
 
             Err(_) => {
                 // Fallback to cached data
                 let app_state = state.lock().unwrap();
 
-                let mut sent = 0u64;
-                let mut received = 0u64;
+                let mut sent = U256::zero();
+                let mut received = U256::zero();
                 let mut last_transaction: Option<chrono::DateTime<Utc>> = None;
 
                 for tx in &app_state.cached_transactions {
@@ -239,7 +258,11 @@ pub async fn get_address_info(
                     }
                 }
 
-                let balance = received.saturating_sub(sent);
+                let balance = if received > sent {
+                    received - sent
+                } else {
+                    U256::zero()
+                };
 
                 let transaction_count = app_state
                     .cached_transactions

@@ -25,7 +25,9 @@
         </div>
         <div class="detail-item">
           <span class="label">금액</span>
-          <span class="value amount">{{ formatAmount(transaction.amount) }} NTC</span>
+          <span class="value amount"
+            >{{ formatAmount(transaction.amount) }} NTC</span
+          >
         </div>
         <div class="detail-item">
           <span class="label">수수료</span>
@@ -33,7 +35,9 @@
         </div>
         <div class="detail-item">
           <span class="label">총액</span>
-          <span class="value total">{{ formatAmount(transaction.amount + transaction.fee) }} NTC</span>
+          <span class="value total"
+            >{{ formatTotal(transaction.amount, transaction.fee) }} NTC</span
+          >
         </div>
         <div class="detail-item">
           <span class="label">상태</span>
@@ -95,11 +99,61 @@ export default {
       return date.toLocaleString("ko-KR");
     },
     formatAmount(value) {
-      const num = Number(value) || 0;
-      const ntc = num / 100_000_000; // Convert natoshi to NTC
+      // Handle hex string (0x...), decimal string, number, and U256 array format
+      let num;
+      
+      if (Array.isArray(value)) {
+        num = BigInt(value[0]) + (BigInt(value[1]) << BigInt(64)) +
+              (BigInt(value[2]) << BigInt(128)) + (BigInt(value[3]) << BigInt(192));
+      } else if (typeof value === "string") {
+        if (value.startsWith("0x")) {
+          num = BigInt(value);
+        } else {
+          num = BigInt(value);
+        }
+      } else {
+        num = BigInt(value || 0);
+      }
+
+      const divisor = BigInt("1000000000000000000"); // 10^18
+      const ntc = Number(num) / Number(divisor);
+
       return ntc.toLocaleString("en-US", {
         minimumFractionDigits: 0,
-        maximumFractionDigits: 8,
+        maximumFractionDigits: 18,
+      });
+    },
+    formatTotal(amount, fee) {
+      // Convert both values using the same logic as formatAmount
+      let numAmount, numFee;
+      
+      // Parse amount
+      if (Array.isArray(amount)) {
+        numAmount = BigInt(amount[0]) + (BigInt(amount[1]) << BigInt(64)) +
+                    (BigInt(amount[2]) << BigInt(128)) + (BigInt(amount[3]) << BigInt(192));
+      } else if (typeof amount === "string" && amount.startsWith("0x")) {
+        numAmount = BigInt(amount);
+      } else {
+        numAmount = BigInt(amount || 0);
+      }
+      
+      // Parse fee
+      if (Array.isArray(fee)) {
+        numFee = BigInt(fee[0]) + (BigInt(fee[1]) << BigInt(64)) +
+                 (BigInt(fee[2]) << BigInt(128)) + (BigInt(fee[3]) << BigInt(192));
+      } else if (typeof fee === "string" && fee.startsWith("0x")) {
+        numFee = BigInt(fee);
+      } else {
+        numFee = BigInt(fee || 0);
+      }
+      
+      const total = numAmount + numFee;
+      const divisor = BigInt("1000000000000000000"); // 10^18
+      const ntc = Number(total) / Number(divisor);
+      
+      return ntc.toLocaleString("en-US", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 18,
       });
     },
     goToTransactions() {

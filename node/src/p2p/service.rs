@@ -1,11 +1,11 @@
 // node/src/p2p/service.rs
+use crate::NodeHandle;
 use crate::p2p::manager::{MAX_OUTBOUND, PeerManager};
-use crate::{NodeHandle, NodeState};
 use hex;
 use log::{info, warn};
 use netcoin_core::block;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::time::{Duration, sleep};
 
 pub struct P2PService {

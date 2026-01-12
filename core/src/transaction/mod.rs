@@ -1,9 +1,9 @@
 use anyhow::Result;
 use bincode::error::EncodeError;
 use bincode::{Decode, Encode, config};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hex;
 use once_cell::sync::Lazy;
+use primitive_types::U256;
 use sha2::{Digest, Sha256};
 
 pub static BINCODE_CONFIG: Lazy<config::Configuration> = Lazy::new(|| config::standard());
@@ -13,15 +13,33 @@ pub static BINCODE_CONFIG: Lazy<config::Configuration> = Lazy::new(|| config::st
 pub struct TransactionInput {
     pub txid: String, // hex
     pub vout: u32,
-    pub pubkey: String,            // hex of public key (ed25519)
-    pub signature: Option<String>, // hex of signature
+    pub pubkey: String,            // hex of public key (secp256k1, uncompressed)
+    pub signature: Option<String>, // hex of signature (64 bytes compact)
 }
 
 /// Output: recipient address (assumed to be a simple pubkey hash) + amount
+/// Amount is stored as [u64; 4] for bincode compatibility, represents U256
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct TransactionOutput {
     pub to: String,
-    pub amount: u64,
+    amount_raw: [u64; 4], // U256 internal representation
+}
+
+impl TransactionOutput {
+    pub fn new(to: String, amount: U256) -> Self {
+        TransactionOutput {
+            to,
+            amount_raw: amount.0,
+        }
+    }
+
+    pub fn amount(&self) -> U256 {
+        U256(self.amount_raw)
+    }
+
+    pub fn set_amount(&mut self, amount: U256) {
+        self.amount_raw = amount.0;
+    }
 }
 
 /// Transaction: inputs / outputs / timestamp / txid
@@ -34,11 +52,8 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    pub fn coinbase(to: &str, amount: u64) -> Self {
-        let output = TransactionOutput {
-            to: to.to_string(),
-            amount,
-        };
+    pub fn coinbase(to: &str, amount: U256) -> Self {
+        let output = TransactionOutput::new(to.to_string(), amount);
         let tx = Transaction {
             txid: "".to_string(),
             inputs: vec![],
@@ -75,13 +90,13 @@ impl Transaction {
         self
     }
 
-    /// sign inputs (v2 style: SigningKey)
-    pub fn sign(&mut self, signing_key: &SigningKey) -> Result<(), anyhow::Error> {
+    /// sign inputs using secp256k1
+    pub fn sign(&mut self, secret_key: &crate::crypto::WalletKeypair) -> Result<(), anyhow::Error> {
         let tx_bytes = self.serialize_for_hash()?;
-        let sig: Signature = signing_key.sign(&tx_bytes); // Ed25519는 해시 필요 없음
+        let sig_bytes = secret_key.sign(&tx_bytes);
 
-        let sig_hex = hex::encode(sig.to_bytes());
-        let pk_hex = hex::encode(signing_key.verifying_key().to_bytes());
+        let sig_hex = hex::encode(sig_bytes);
+        let pk_hex = secret_key.public_hex();
 
         for inp in &mut self.inputs {
             inp.signature = Some(sig_hex.clone());
@@ -90,7 +105,7 @@ impl Transaction {
         Ok(())
     }
 
-    /// verify signatures (v2 style: VerifyingKey)
+    /// verify signatures using secp256k1
     pub fn verify_signatures(&self) -> Result<bool, anyhow::Error> {
         if self.inputs.is_empty() {
             return Ok(true);
@@ -99,13 +114,15 @@ impl Transaction {
         let tx_bytes = self.serialize_for_hash()?;
 
         for inp in &self.inputs {
-            let sig_bytes = hex::decode(inp.signature.as_ref().unwrap())?;
-            let sig = Signature::try_from(&sig_bytes[..])?;
+            let sig_hex = inp
+                .signature
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Missing signature"))?;
+            let sig_bytes = hex::decode(sig_hex)?;
 
-            let pk_bytes = hex::decode(&inp.pubkey)?;
-            let pk = VerifyingKey::try_from(&pk_bytes[..])?;
-
-            pk.verify(&tx_bytes, &sig)?; // Ed25519는 해시 없이 검증
+            if !crate::crypto::verify_signature(&inp.pubkey, &tx_bytes, &sig_bytes) {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
@@ -113,20 +130,11 @@ impl Transaction {
 
 #[test]
 fn sign_and_verify() {
-    use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey};
-    use rand::TryRngCore;
-    use rand::rngs::OsRng;
-    use std::convert::TryFrom;
+    use crate::crypto::WalletKeypair;
 
-    let mut csprng = OsRng {};
-    let mut secret_bytes = [0u8; SECRET_KEY_LENGTH];
+    let keypair = WalletKeypair::new();
 
-    // ✅ try_fill_bytes 사용, 반드시 Result 처리
-    csprng.try_fill_bytes(&mut secret_bytes).unwrap();
-
-    let signing_key = SigningKey::try_from(&secret_bytes[..]).unwrap();
-
-    let tx = Transaction::coinbase("addr", 50);
+    let tx = Transaction::coinbase("addr", U256::from(50));
     assert!(tx.verify_signatures().unwrap());
 
     let inp = TransactionInput {
@@ -135,16 +143,13 @@ fn sign_and_verify() {
         pubkey: "".to_string(),
         signature: None,
     };
-    let out = TransactionOutput {
-        to: "alice".to_string(),
-        amount: 10,
-    };
+    let out = TransactionOutput::new("alice".to_string(), U256::from(10));
     let mut tx2 = Transaction {
         txid: "".to_string(),
         inputs: vec![inp],
         outputs: vec![out],
         timestamp: chrono::Utc::now().timestamp(),
     };
-    tx2.sign(&signing_key).unwrap();
+    tx2.sign(&keypair).unwrap();
     assert!(tx2.verify_signatures().unwrap());
 }

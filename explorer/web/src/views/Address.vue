@@ -10,15 +10,21 @@
       <div class="detail-grid">
         <div class="detail-item highlight">
           <span class="label">잔액</span>
-          <span class="value balance">{{ formatAmount(addressInfo.balance) }} NTC</span>
+          <span class="value balance"
+            >{{ formatAmount(addressInfo.balance) }} NTC</span
+          >
         </div>
         <div class="detail-item">
           <span class="label">받은 금액</span>
-          <span class="value received">{{ formatAmount(addressInfo.received) }} NTC</span>
+          <span class="value received"
+            >{{ formatAmount(addressInfo.received) }} NTC</span
+          >
         </div>
         <div class="detail-item">
           <span class="label">보낸 금액</span>
-          <span class="value sent">{{ formatAmount(addressInfo.sent) }} NTC</span>
+          <span class="value sent"
+            >{{ formatAmount(addressInfo.sent) }} NTC</span
+          >
         </div>
         <div class="detail-item">
           <span class="label">트랜잭션 수</span>
@@ -63,6 +69,8 @@ export default {
         const address = this.$route.params.address;
         const res = await explorerAPI.getAddressInfo(address);
         this.addressInfo = res.data;
+        console.log("Address Info:", res.data);
+        console.log("Balance:", res.data.balance, typeof res.data.balance);
       } catch (error) {
         console.error("주소 정보 로딩 실패:", error);
       }
@@ -72,11 +80,34 @@ export default {
       return date.toLocaleString("ko-KR");
     },
     formatAmount(value) {
-      const num = Number(value) || 0;
-      const ntc = num / 100_000_000; // Convert natoshi to NTC
+      // Handle hex string (0x...), decimal string, number, and U256 array format
+      let num;
+      
+      if (Array.isArray(value)) {
+        // U256 is serialized as [u64, u64, u64, u64]
+        num =
+          BigInt(value[0]) +
+          (BigInt(value[1]) << BigInt(64)) +
+          (BigInt(value[2]) << BigInt(128)) +
+          (BigInt(value[3]) << BigInt(192));
+      } else if (typeof value === "string") {
+        // Handle hex string (0x...) or decimal string
+        if (value.startsWith("0x")) {
+          num = BigInt(value); // BigInt automatically handles hex with 0x prefix
+        } else {
+          num = BigInt(value);
+        }
+      } else {
+        num = BigInt(value || 0);
+      }
+
+      // Convert to NTC using BigInt division
+      const divisor = BigInt("1000000000000000000"); // 10^18
+      const ntc = Number(num) / Number(divisor);
+
       return ntc.toLocaleString("en-US", {
         minimumFractionDigits: 0,
-        maximumFractionDigits: 8,
+        maximumFractionDigits: 18,
       });
     },
     goHome() {
