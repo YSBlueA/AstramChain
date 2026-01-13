@@ -5,6 +5,7 @@ pub mod consensus;
 pub mod crypto;
 pub mod db;
 pub mod network;
+pub mod security;
 pub mod transaction;
 pub mod utxo;
 pub mod wallet;

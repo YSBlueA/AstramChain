@@ -54,6 +54,16 @@ pub fn eth_address_from_public_key(pubkey: &PublicKey) -> String {
     format!("0x{}", hex::encode(&hash[12..32])) // Last 20 bytes with 0x prefix
 }
 
+/// Generate Ethereum-style address from hex-encoded public key string
+pub fn eth_address_from_pubkey_hex(pubkey_hex: &str) -> Result<String, String> {
+    let pubkey_bytes = hex::decode(pubkey_hex).map_err(|e| format!("invalid hex: {}", e))?;
+
+    let pubkey =
+        PublicKey::from_slice(&pubkey_bytes).map_err(|e| format!("invalid public key: {}", e))?;
+
+    Ok(eth_address_from_public_key(&pubkey))
+}
+
 pub fn keccak256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Keccak::v256();
     let mut output = [0u8; 32];

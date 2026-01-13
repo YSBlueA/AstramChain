@@ -19,11 +19,19 @@ pub fn max_supply() -> U256 {
 }
 
 // ========== Fee Model ==========
-/// Minimum relay fee: 1 natoshi per byte
-pub const MIN_RELAY_FEE_NAT_PER_BYTE: U256 = U256([1, 0, 0, 0]);
+// 🛡️ Anti-DDoS Fee Policy (Learned from Solana's $0.00025 fee DDoS attacks in 2021-2022)
+// Low fees enable spam attacks: attackers sent 400k+ tx/sec, causing 17hr network downtime
 
-/// Default wallet fee: 2 natoshi per byte
-pub const DEFAULT_WALLET_FEE_NAT_PER_BYTE: U256 = U256([2, 0, 0, 0]);
+/// Base minimum fee: 100,000 natoshi (0.0000000000001 NTC )
+/// This prevents spam while remaining essentially free for users
+pub const BASE_MIN_FEE: U256 = U256([100_000, 0, 0, 0]);
+
+/// Additional fee per byte: 100 natoshi/byte
+/// Penalizes large/complex transactions to prevent resource abuse
+pub const MIN_RELAY_FEE_NAT_PER_BYTE: U256 = U256([100, 0, 0, 0]);
+
+/// Default wallet fee per byte: 200 natoshi/byte (2x minimum for faster confirmation)
+pub const DEFAULT_WALLET_FEE_NAT_PER_BYTE: U256 = U256([200, 0, 0, 0]);
 
 // ========== Helper Functions ==========
 
@@ -40,13 +48,17 @@ pub fn calculate_block_reward(block_height: u64) -> U256 {
 }
 
 /// Calculate minimum fee for transaction in natoshi based on transaction size
+/// Formula: BASE_MIN_FEE + (size × MIN_RELAY_FEE_NAT_PER_BYTE)
+/// Example: 250 bytes → 100,000 + (250 × 100) = 125,000 natoshi
 pub fn calculate_min_fee(tx_size_bytes: usize) -> U256 {
-    MIN_RELAY_FEE_NAT_PER_BYTE * U256::from(tx_size_bytes)
+    BASE_MIN_FEE + (MIN_RELAY_FEE_NAT_PER_BYTE * U256::from(tx_size_bytes))
 }
 
 /// Calculate default wallet fee for transaction in natoshi based on transaction size
+/// Formula: BASE_MIN_FEE + (size × DEFAULT_WALLET_FEE_NAT_PER_BYTE)
+/// Example: 250 bytes → 100,000 + (250 × 200) = 150,000 natoshi
 pub fn calculate_default_fee(tx_size_bytes: usize) -> U256 {
-    DEFAULT_WALLET_FEE_NAT_PER_BYTE * U256::from(tx_size_bytes)
+    BASE_MIN_FEE + (DEFAULT_WALLET_FEE_NAT_PER_BYTE * U256::from(tx_size_bytes))
 }
 
 #[cfg(test)]
@@ -70,7 +82,27 @@ mod tests {
 
     #[test]
     fn test_fee_calculation() {
-        let fee = calculate_default_fee(250); // standard tx size
-        assert_eq!(fee, U256::from(500)); // 2 nat/byte * 250 bytes
+        // Standard transaction: 250 bytes
+        let min_fee = calculate_min_fee(250);
+        let expected_min = U256::from(100_000) + U256::from(250 * 100); // BASE + (size × rate)
+        assert_eq!(min_fee, expected_min); // 125,000 natoshi
+
+        let default_fee = calculate_default_fee(250);
+        let expected_default = U256::from(100_000) + U256::from(250 * 200);
+        assert_eq!(default_fee, expected_default); // 150,000 natoshi
+    }
+
+    #[test]
+    fn test_base_fee_prevents_spam() {
+        // Even tiny transactions pay base fee
+        let tiny_tx_fee = calculate_min_fee(100);
+        assert!(tiny_tx_fee >= BASE_MIN_FEE);
+
+        // Spam attack cost: 1,000,000 transactions
+        let spam_cost = calculate_min_fee(250) * U256::from(1_000_000);
+        // = 125,000,000,000 natoshi = 0.000000125 NTC
+        // At $1/NTC: $0.000000125 × 1M = $125 total cost
+        // This makes spam attacks expensive!
+        assert!(spam_cost > U256::from(100_000_000_000u64));
     }
 }

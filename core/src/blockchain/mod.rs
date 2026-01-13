@@ -128,6 +128,9 @@ impl Blockchain {
         // We'll create a WriteBatch and atomically apply changes
         let mut batch = WriteBatch::default();
 
+        // 🔒 Security: Validate block-level constraints
+        crate::security::validate_block_security(&block)?;
+
         // For coinbase check
         if block.transactions.is_empty() {
             return Err(anyhow!("empty block"));
@@ -141,6 +144,9 @@ impl Blockchain {
 
         // iterate non-coinbase txs
         for (i, tx) in block.transactions.iter().enumerate() {
+            // 🔒 Security: Validate transaction-level constraints
+            crate::security::validate_transaction_security(tx, block.header.timestamp)?;
+
             // verify signature(s)
             if !tx.verify_signatures()? {
                 return Err(anyhow!("tx signature invalid: {}", tx.txid));
@@ -164,31 +170,87 @@ impl Blockchain {
 
             // for non-coinbase tx, check each input exists in UTXO and sum amounts
             let mut input_sum = U256::zero();
+            let mut used_utxos = std::collections::HashSet::new();
+
             for inp in &tx.inputs {
                 let ukey = format!("u:{}:{}", inp.txid, inp.vout);
+
+                // 🔒 Security: Prevent double-spending within same transaction
+                if !used_utxos.insert(ukey.clone()) {
+                    return Err(anyhow!(
+                        "duplicate input in tx {}: {}:{}",
+                        tx.txid,
+                        inp.txid,
+                        inp.vout
+                    ));
+                }
+
                 match self.db.get(ukey.as_bytes())? {
                     Some(blob) => {
                         let (u, _): (Utxo, usize) =
                             bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
+
+                        // 🔒 Security: CRITICAL - Verify UTXO ownership
+                        // Derive address from input's public key and compare with UTXO owner
+                        let input_address = crate::crypto::eth_address_from_pubkey_hex(&inp.pubkey)
+                            .map_err(|e| anyhow!("invalid pubkey in input: {}", e))?;
+
+                        let utxo_owner = u.to.to_lowercase();
+                        let input_addr_lower = input_address.to_lowercase();
+
+                        if input_addr_lower != utxo_owner {
+                            return Err(anyhow!(
+                                "UTXO ownership verification failed for {}:{} - expected {}, got {}",
+                                inp.txid,
+                                inp.vout,
+                                utxo_owner,
+                                input_addr_lower
+                            ));
+                        }
+
                         input_sum = input_sum + u.amount();
                         // mark as spent by deleting in batch
                         batch.delete(ukey.as_bytes());
                     }
                     None => {
                         return Err(anyhow!(
-                            "referenced utxo not found {}:{}",
+                            "referenced utxo not found {}:{} (already spent or never existed)",
                             inp.txid,
                             inp.vout
                         ));
                     }
                 }
             }
+
             let mut output_sum = U256::zero();
             for out in &tx.outputs {
                 output_sum = output_sum + out.amount();
             }
+
+            // 🔒 Security: Validate fee is reasonable (outputs <= inputs)
             if output_sum > input_sum {
-                return Err(anyhow!("outputs exceed inputs in tx {}", tx.txid));
+                return Err(anyhow!(
+                    "invalid transaction {}: outputs ({}) exceed inputs ({})",
+                    tx.txid,
+                    output_sum,
+                    input_sum
+                ));
+            }
+
+            // 🔒 Security: Enforce minimum fee based on transaction size (prevent DDoS)
+            // Uses Anti-DDoS fee policy from config.rs: BASE_MIN_FEE + (size × rate)
+            let fee = input_sum - output_sum;
+            let tx_blob = bincode::encode_to_vec(tx, *BINCODE_CONFIG)?;
+            let min_fee = crate::config::calculate_min_fee(tx_blob.len());
+
+            if fee < min_fee {
+                return Err(anyhow!(
+                    "transaction fee too low {}: got {} natoshi, need {} natoshi (base 100k + {} bytes × 100 nat/byte)",
+                    tx.txid,
+                    fee,
+                    min_fee,
+                    tx_blob.len()
+                ));
             }
 
             // persist tx and create new utxos

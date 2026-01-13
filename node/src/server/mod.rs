@@ -220,6 +220,46 @@ pub async fn run_server(node: NodeHandle) {
             match tx.verify_signatures() {
                 Ok(true) => {
                     log::info!("TX {} signature OK", tx.txid);
+                    
+                    // 🔒 Security: Validate fee before accepting to mempool
+                    // Calculate input/output sums to verify fee
+                    let mut input_sum = U256::zero();
+                    let mut output_sum = U256::zero();
+                    
+                    // Get UTXOs from blockchain to calculate input sum
+                    for inp in &tx.inputs {
+                        let ukey = format!("u:{}:{}", inp.txid, inp.vout);
+                        if let Ok(Some(blob)) = state.bc.db.get(ukey.as_bytes()) {
+                            if let Ok((utxo, _)) = bincode::decode_from_slice::<Utxo, _>(&blob, *BINCODE_CONFIG) {
+                                input_sum = input_sum + utxo.amount();
+                            }
+                        }
+                    }
+                    
+                    for out in &tx.outputs {
+                        output_sum = output_sum + out.amount();
+                    }
+                    
+                    let fee = if input_sum >= output_sum {
+                        input_sum - output_sum
+                    } else {
+                        U256::zero()
+                    };
+                    
+                    // Check minimum fee
+                    let tx_blob = bincode::encode_to_vec(&tx, *BINCODE_CONFIG).unwrap();
+                    let min_fee = netcoin_core::config::calculate_min_fee(tx_blob.len());
+                    
+                    if fee < min_fee {
+                        log::warn!("TX {} fee too low: got {}, need {}", tx.txid, fee, min_fee);
+                        return Ok::<_, warp::Rejection>(with_status(
+                            warp::reply::json(&serde_json::json!({
+                                "status": "error",
+                                "message": format!("fee too low: got {} natoshi, need {} natoshi", fee, min_fee)
+                            })),
+                            StatusCode::BAD_REQUEST,
+                        ));
+                    }
 
                     state.seen_tx.insert(tx.txid.clone());
                     state.pending.push(tx.clone());
@@ -286,12 +326,41 @@ pub async fn run_server(node: NodeHandle) {
             // seen 기록
             state.seen_tx.insert(tx.txid.clone());
 
-            // 검증
-            if tx.verify_signatures().unwrap_or(false) {
-                log::info!("relay accepted tx {}", tx.txid);
+            // 검증: signature + fee
+            if !tx.verify_signatures().unwrap_or(false) {
+                log::warn!("relay invalid signature");
+                return Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({"status":"invalid_signature"})),
+                    StatusCode::OK,
+                ));
+            }
+            
+            // 🔒 Security: Validate fee for relayed transactions
+            let mut input_sum = U256::zero();
+            let mut output_sum = U256::zero();
+            
+            for inp in &tx.inputs {
+                let ukey = format!("u:{}:{}", inp.txid, inp.vout);
+                if let Ok(Some(blob)) = state.bc.db.get(ukey.as_bytes()) {
+                    if let Ok((utxo, _)) = bincode::decode_from_slice::<Utxo, _>(&blob, *BINCODE_CONFIG) {
+                        input_sum = input_sum + utxo.amount();
+                    }
+                }
+            }
+            
+            for out in &tx.outputs {
+                output_sum = output_sum + out.amount();
+            }
+            
+            let fee = if input_sum >= output_sum { input_sum - output_sum } else { U256::zero() };
+            let tx_blob = bincode::encode_to_vec(&tx, *BINCODE_CONFIG).unwrap();
+            let min_fee = netcoin_core::config::calculate_min_fee(tx_blob.len());
+            
+            if fee >= min_fee {
+                log::info!("relay accepted tx {} (fee: {} >= {})", tx.txid, fee, min_fee);
                 state.pending.push(tx);
             } else {
-                log::warn!("relay invalid signature");
+                log::warn!("relay rejected tx {}: fee too low ({} < {})", tx.txid, fee, min_fee);
             }
 
             Ok::<_, warp::Rejection>(with_status(
