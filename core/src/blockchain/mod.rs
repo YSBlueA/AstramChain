@@ -451,12 +451,6 @@ impl Blockchain {
                         if utxo.to == address {
                             utxo_count += 1;
                             let amount = utxo.amount();
-                            log::debug!(
-                                "Found UTXO for {}: {} (total so far: {})",
-                                address,
-                                amount,
-                                balance + amount
-                            );
                             balance = balance + amount;
                         }
                     }
@@ -466,13 +460,6 @@ impl Blockchain {
                 }
             }
         }
-
-        log::info!(
-            "Address {} balance: {} (from {} UTXOs)",
-            address,
-            balance,
-            utxo_count
-        );
         Ok(balance)
     }
 

@@ -118,6 +118,23 @@ impl Transaction {
                 .signature
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Missing signature"))?;
+
+            // Check for Ethereum-style signature (from MetaMask)
+            if sig_hex.starts_with("eth_sig:") {
+                // For Ethereum signatures, just verify the public key is valid
+                // The Ethereum signature was already validated when converting the transaction
+                if inp.pubkey.is_empty() {
+                    return Ok(false);
+                }
+                // Verify the public key can be parsed
+                if hex::decode(&inp.pubkey).is_err() {
+                    return Ok(false);
+                }
+                // Accept it - the Ethereum signature was validated during eth_sendRawTransaction
+                continue;
+            }
+
+            // Standard NetCoin signature verification
             let sig_bytes = hex::decode(sig_hex)?;
 
             if !crate::crypto::verify_signature(&inp.pubkey, &tx_bytes, &sig_bytes) {

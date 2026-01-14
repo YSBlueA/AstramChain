@@ -16,7 +16,7 @@ use netcoin_node::server::run_server;
 use primitive_types::U256;
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering as OtherOrdering;
@@ -68,6 +68,7 @@ async fn main() {
         pending: vec![],
         seen_tx: HashSet::new(),
         p2p: p2p_service.manager(),
+        eth_to_netcoin_tx: HashMap::new(),
     };
 
     let node_handle = Arc::new(Mutex::new(node));
@@ -174,6 +175,7 @@ async fn main() {
                 pending: vec![],
                 seen_tx: HashSet::new(),
                 p2p: p2p.clone(),
+                eth_to_netcoin_tx: HashMap::new(),
             };
             let node_handle = Arc::new(Mutex::new(node));
 
@@ -245,6 +247,7 @@ async fn main() {
         pending: vec![],
         seen_tx: HashSet::new(),
         p2p: p2p.clone(),
+        eth_to_netcoin_tx: HashMap::new(),
     };
     let node_handle = Arc::new(Mutex::new(node));
 

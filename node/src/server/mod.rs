@@ -508,6 +508,34 @@ pub async fn run_server(node: NodeHandle) {
         });
 
     // -------------------------------
+    // GET /eth_mapping/:eth_hash - Resolve Ethereum tx hash to NetCoin txid
+    let get_eth_mapping = warp::path!("eth_mapping" / String)
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|eth_hash: String, node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+            // Strip 0x prefix if present
+            let eth_hash = eth_hash.strip_prefix("0x").unwrap_or(&eth_hash);
+            
+            match state.eth_to_netcoin_tx.get(eth_hash) {
+                Some(netcoin_txid) => {
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "eth_hash": format!("0x{}", eth_hash),
+                        "netcoin_txid": netcoin_txid,
+                        "found": true
+                    })))
+                }
+                None => {
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "eth_hash": format!("0x{}", eth_hash),
+                        "netcoin_txid": null,
+                        "found": false
+                    })))
+                }
+            }
+        });
+
+    // -------------------------------
     // combine routes
     // combine routes
     let routes = get_chain
@@ -523,6 +551,7 @@ pub async fn run_server(node: NodeHandle) {
         .or(get_address_info)
         .or(get_utxos)
         .or(get_tx)
+        .or(get_eth_mapping)
         .with(warp::log("netcoin::http"))
         .boxed();
 

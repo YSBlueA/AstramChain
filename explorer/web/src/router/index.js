@@ -34,6 +34,11 @@ const routes = [
     component: TransactionDetail,
   },
   {
+    path: '/tx/:hash',
+    name: 'TransactionDetailShort',
+    component: TransactionDetail,
+  },
+  {
     path: '/address/:address',
     name: 'Address',
     component: Address,

@@ -329,4 +329,26 @@ impl NodeRpcClient {
             Err(e) => Err(format!("Network error fetching node status: {}", e)),
         }
     }
+
+    /// Resolve Ethereum transaction hash to NetCoin txid
+    pub async fn resolve_eth_hash(&self, eth_hash: &str) -> Result<String, String> {
+        let url = format!("{}/eth_mapping/{}", self.node_url, eth_hash);
+
+        match reqwest::get(&url).await {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    if let Some(found) = v.get("found").and_then(|f| f.as_bool()) {
+                        if found {
+                            if let Some(txid) = v.get("netcoin_txid").and_then(|t| t.as_str()) {
+                                return Ok(txid.to_string());
+                            }
+                        }
+                    }
+                    Err("Mapping not found".to_string())
+                }
+                Err(e) => Err(format!("Failed to parse mapping response: {}", e)),
+            },
+            Err(e) => Err(format!("Network error resolving ETH hash: {}", e)),
+        }
+    }
 }
