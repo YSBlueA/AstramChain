@@ -10,6 +10,7 @@ use log::{info, warn};
 use netcoin_core::block;
 use netcoin_core::transaction::Transaction;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
@@ -441,4 +442,137 @@ impl PeerManager {
     pub fn get_peer_heights(&self) -> HashMap<PeerId, u64> {
         self.peer_heights.lock().clone()
     }
+
+    /// Register this node with a DNS server
+    pub async fn register_with_dns(
+        &self,
+        dns_server: &str,
+        my_address: &str,
+        my_port: u16,
+    ) -> anyhow::Result<()> {
+        let client = reqwest::Client::new();
+        let my_height = self.get_my_height();
+        let version = env!("CARGO_PKG_VERSION").to_string();
+
+        let request = DnsRegisterRequest {
+            address: my_address.to_string(),
+            port: my_port,
+            version,
+            height: my_height,
+        };
+
+        let response = client
+            .post(format!("{}/register", dns_server))
+            .json(&request)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let resp: DnsRegisterResponse = response.json().await?;
+            info!(
+                "Successfully registered with DNS server: {} (total nodes: {})",
+                resp.message, resp.node_count
+            );
+        } else {
+            warn!("Failed to register with DNS server: {}", response.status());
+        }
+
+        Ok(())
+    }
+
+    /// Fetch peer nodes from DNS server
+    pub async fn fetch_peers_from_dns(
+        &self,
+        dns_server: &str,
+        limit: Option<usize>,
+        min_height: Option<u64>,
+    ) -> anyhow::Result<Vec<String>> {
+        let client = reqwest::Client::new();
+        let mut url = format!("{}/nodes", dns_server);
+
+        let mut params = Vec::new();
+        if let Some(l) = limit {
+            params.push(format!("limit={}", l));
+        }
+        if let Some(h) = min_height {
+            params.push(format!("min_height={}", h));
+        }
+
+        if !params.is_empty() {
+            url = format!("{}?{}", url, params.join("&"));
+        }
+
+        let response = client.get(&url).send().await?;
+
+        if response.status().is_success() {
+            let resp: DnsNodesResponse = response.json().await?;
+            info!("Fetched {} peer nodes from DNS server", resp.count);
+
+            let peer_addrs: Vec<String> = resp
+                .nodes
+                .iter()
+                .map(|n| format!("{}:{}", n.address, n.port))
+                .collect();
+
+            Ok(peer_addrs)
+        } else {
+            warn!(
+                "Failed to fetch peers from DNS server: {}",
+                response.status()
+            );
+            Ok(Vec::new())
+        }
+    }
+
+    /// Start periodic DNS registration (call this in a background task)
+    pub async fn start_dns_registration_loop(
+        self: Arc<Self>,
+        dns_server: String,
+        my_address: String,
+        my_port: u16,
+        interval_secs: u64,
+    ) {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+
+        loop {
+            interval.tick().await;
+
+            if let Err(e) = self
+                .register_with_dns(&dns_server, &my_address, my_port)
+                .await
+            {
+                warn!("DNS registration failed: {:?}", e);
+            }
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DnsRegisterRequest {
+    address: String,
+    port: u16,
+    version: String,
+    height: u64,
+}
+
+#[derive(Deserialize)]
+struct DnsRegisterResponse {
+    success: bool,
+    message: String,
+    node_count: usize,
+}
+
+#[derive(Deserialize)]
+struct DnsNodeInfo {
+    address: String,
+    port: u16,
+    version: String,
+    height: u64,
+    last_seen: i64,
+}
+
+#[derive(Deserialize)]
+struct DnsNodesResponse {
+    nodes: Vec<DnsNodeInfo>,
+    count: usize,
 }
