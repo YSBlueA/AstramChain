@@ -32,12 +32,48 @@ impl Blockchain {
         // load tip if exists
         let tip = db.get(b"tip")?;
         let chain_tip = tip.map(|v| String::from_utf8(v).unwrap());
+
+        // Load current difficulty from chain tip
+        let difficulty = if let Some(ref tip_hash) = chain_tip {
+            // Try to load the tip block header
+            if let Ok(Some(blob)) = db.get(format!("b:{}", tip_hash).as_bytes()) {
+                if let Ok((block, _)) =
+                    bincode::decode_from_slice::<Block, _>(&blob, *BINCODE_CONFIG)
+                {
+                    // Calculate difficulty for the next block based on current chain state
+                    let next_index = block.header.index + 1;
+                    // Create temporary instance to call calculate_adjusted_difficulty
+                    let temp_bc = Blockchain {
+                        db: open_db(db_path)?,
+                        chain_tip: chain_tip.clone(),
+                        difficulty: block.header.difficulty,
+                        block_interval: 120,
+                    };
+
+                    temp_bc
+                        .calculate_adjusted_difficulty(next_index)
+                        .unwrap_or(block.header.difficulty)
+                } else {
+                    log::warn!("Failed to decode tip block, using default difficulty");
+                    2
+                }
+            } else {
+                log::warn!("Tip block not found, using default difficulty");
+                2
+            }
+        } else {
+            // No chain exists yet, use default
+            2
+        };
+
+        log::info!("Blockchain initialized with difficulty: {}", difficulty);
+
         Ok(Blockchain {
             db,
             chain_tip,
-            difficulty: 2,       /*16*/
+            difficulty,
             block_interval: 120, // Target: 2 minutes per block
-        }) // default difficulty (bits like count leading zeros)
+        })
     }
 
     /// Helper: Iterate over all blocks efficiently
