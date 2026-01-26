@@ -20,6 +20,9 @@ pub struct NodeState {
     pub eth_to_netcoin_tx: HashMap<String, String>,
     /// Flag to cancel ongoing mining when a new block is received from network
     pub mining_cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// Orphan blocks pool: blocks waiting for their parent
+    /// Key: block hash, Value: (block, received_timestamp)
+    pub orphan_blocks: HashMap<String, (Block, i64)>,
 }
 
 pub type NodeHandle = Arc<Mutex<NodeState>>;

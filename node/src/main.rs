@@ -73,6 +73,7 @@ async fn main() {
         p2p: p2p_service.manager(),
         eth_to_netcoin_tx: HashMap::new(),
         mining_cancel_flag: mining_cancel_flag.clone(),
+        orphan_blocks: HashMap::new(),
     };
 
     let node_handle = Arc::new(Mutex::new(node));

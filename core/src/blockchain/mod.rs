@@ -106,14 +106,36 @@ impl Blockchain {
             ));
         }
 
-        // 2) merkle check
+        // 2) Proof-of-Work: verify hash meets difficulty requirement
+        let required_prefix = "0".repeat(block.header.difficulty as usize);
+        if !block.hash.starts_with(&required_prefix) {
+            return Err(anyhow!(
+                "invalid PoW: hash {} does not meet difficulty {} (needs {} leading zeros)",
+                block.hash,
+                block.header.difficulty,
+                block.header.difficulty
+            ));
+        }
+
+        // 3) Difficulty adjustment: verify block uses correct difficulty
+        let expected_difficulty = self.calculate_adjusted_difficulty(block.header.index)?;
+        if block.header.difficulty != expected_difficulty {
+            return Err(anyhow!(
+                "incorrect difficulty at block {}: got {}, expected {} (hash rate adjustment)",
+                block.header.index,
+                block.header.difficulty,
+                expected_difficulty
+            ));
+        }
+
+        // 4) merkle check
         let txids: Vec<String> = block.transactions.iter().map(|t| t.txid.clone()).collect();
         let merkle = compute_merkle_root(&txids);
         if merkle != block.header.merkle_root {
             return Err(anyhow!("merkle mismatch"));
         }
 
-        // 3) previous exists (unless genesis)
+        // 5) previous exists (unless genesis)
         if block.header.index > 0 {
             let prev_key = format!("b:{}", block.header.previous_hash);
             if self.db.get(prev_key.as_bytes())?.is_none() {
@@ -124,7 +146,7 @@ impl Blockchain {
             }
         }
 
-        // 4) transactions validation: signatures + UTXO references
+        // 6) transactions validation: signatures + UTXO references
         // We'll create a WriteBatch and atomically apply changes
         let mut batch = WriteBatch::default();
 
@@ -668,5 +690,253 @@ impl Blockchain {
         }
 
         Ok(seen_txids.len())
+    }
+
+    /// Calculate total chain work (cumulative difficulty) from genesis to given block
+    /// Higher difficulty blocks contribute more work
+    pub fn calculate_chain_work(&self, block_hash: &str) -> Result<u64> {
+        let mut total_work = 0u64;
+        let mut current_hash = block_hash.to_string();
+
+        loop {
+            let block = self.load_block(&current_hash)?;
+            if block.is_none() {
+                break;
+            }
+
+            let block = block.unwrap();
+            // Each difficulty level represents 16x more work (hexadecimal)
+            // Work = 16^difficulty
+            let block_work = 16u64.saturating_pow(block.header.difficulty);
+            total_work = total_work.saturating_add(block_work);
+
+            if block.header.index == 0 {
+                break; // Reached genesis
+            }
+
+            current_hash = block.header.previous_hash.clone();
+        }
+
+        Ok(total_work)
+    }
+
+    /// Get block height (index) for a given block hash
+    pub fn get_block_height(&self, block_hash: &str) -> Result<Option<u64>> {
+        if let Some(block) = self.load_block(block_hash)? {
+            Ok(Some(block.header.index))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Load complete block by hash
+    pub fn load_block(&self, hash: &str) -> Result<Option<Block>> {
+        if let Some(blob) = self.db.get(format!("b:{}", hash).as_bytes())? {
+            let (block, _): (Block, usize) = bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
+            return Ok(Some(block));
+        }
+        Ok(None)
+    }
+
+    /// Find common ancestor between two blocks
+    fn find_common_ancestor(&self, hash_a: &str, hash_b: &str) -> Result<Option<String>> {
+        let mut blocks_a = Vec::new();
+        let mut current = hash_a.to_string();
+
+        // Collect all blocks from hash_a to genesis
+        while let Some(block) = self.load_block(&current)? {
+            blocks_a.push(current.clone());
+            if block.header.index == 0 {
+                break;
+            }
+            current = block.header.previous_hash.clone();
+        }
+
+        // Walk from hash_b to genesis and find first common block
+        let mut current = hash_b.to_string();
+        while let Some(block) = self.load_block(&current)? {
+            if blocks_a.contains(&current) {
+                return Ok(Some(current));
+            }
+            if block.header.index == 0 {
+                break;
+            }
+            current = block.header.previous_hash.clone();
+        }
+
+        Ok(None)
+    }
+
+    /// Reorganize chain to new tip if it has more work
+    /// Returns true if reorg happened, false if current chain is already best
+    pub fn reorganize_if_needed(&mut self, new_block_hash: &str) -> Result<bool> {
+        let current_tip = match &self.chain_tip {
+            Some(tip) => tip.clone(),
+            None => {
+                // No current chain, accept any valid block
+                return Ok(false);
+            }
+        };
+
+        // Calculate chain work for both tips
+        let current_work = self.calculate_chain_work(&current_tip)?;
+        let new_work = self.calculate_chain_work(new_block_hash)?;
+
+        log::info!(
+            "Chain work comparison: current={} (hash={}), new={} (hash={})",
+            current_work,
+            &current_tip[..16],
+            new_work,
+            &new_block_hash[..16]
+        );
+
+        // Keep current chain if it has equal or more work
+        if current_work >= new_work {
+            log::info!("Current chain has more work, keeping it");
+            return Ok(false);
+        }
+
+        log::warn!(
+            "🔄 REORGANIZATION NEEDED: new chain has more work ({} vs {})",
+            new_work,
+            current_work
+        );
+
+        // Find common ancestor
+        let ancestor = self.find_common_ancestor(&current_tip, new_block_hash)?;
+        if ancestor.is_none() {
+            return Err(anyhow!("No common ancestor found for reorganization"));
+        }
+
+        let ancestor = ancestor.unwrap();
+        log::info!("Common ancestor: {}", &ancestor[..16]);
+
+        // Collect blocks to rollback (from current tip to ancestor)
+        let mut rollback_blocks = Vec::new();
+        let mut current = current_tip.clone();
+        while current != ancestor {
+            let block = self
+                .load_block(&current)?
+                .ok_or_else(|| anyhow!("Block not found during reorg: {}", current))?;
+            rollback_blocks.push(block.clone());
+            current = block.header.previous_hash.clone();
+        }
+
+        // Collect blocks to apply (from ancestor to new tip)
+        let mut apply_blocks = Vec::new();
+        let mut current = new_block_hash.to_string();
+        while current != ancestor {
+            let block = self
+                .load_block(&current)?
+                .ok_or_else(|| anyhow!("Block not found during reorg: {}", current))?;
+            apply_blocks.push(block.clone());
+            current = block.header.previous_hash.clone();
+        }
+        apply_blocks.reverse(); // Apply from ancestor to new tip
+
+        log::warn!(
+            "Reorganizing: rolling back {} blocks, applying {} blocks",
+            rollback_blocks.len(),
+            apply_blocks.len()
+        );
+
+        // Rollback: reverse UTXO changes
+        self.rollback_blocks(&rollback_blocks)?;
+
+        // Apply: replay new chain
+        self.replay_blocks(&apply_blocks)?;
+
+        // Update chain tip
+        let mut batch = WriteBatch::default();
+        batch.put(b"tip", new_block_hash.as_bytes());
+        put_batch(&self.db, batch)?;
+        self.chain_tip = Some(new_block_hash.to_string());
+
+        log::warn!(
+            "✅ Reorganization complete: new tip = {}",
+            &new_block_hash[..16]
+        );
+
+        Ok(true)
+    }
+
+    /// Rollback UTXO changes from a list of blocks (reverse order)
+    fn rollback_blocks(&mut self, blocks: &[Block]) -> Result<()> {
+        let mut batch = WriteBatch::default();
+
+        for block in blocks {
+            log::info!("Rolling back block {}", block.header.index);
+
+            // Process transactions in reverse order
+            for tx in block.transactions.iter().rev() {
+                // Delete UTXOs created by this transaction
+                for i in 0..tx.outputs.len() {
+                    let ukey = format!("u:{}:{}", tx.txid, i);
+                    batch.delete(ukey.as_bytes());
+                }
+
+                // Restore UTXOs spent by this transaction (skip coinbase)
+                if !tx.inputs.is_empty() {
+                    for input in &tx.inputs {
+                        // Restore the UTXO that was spent
+                        let spent_tx = self
+                            .load_tx(&input.txid)?
+                            .ok_or_else(|| anyhow!("Cannot find spent tx: {}", input.txid))?;
+
+                        if let Some(output) = spent_tx.outputs.get(input.vout as usize) {
+                            let utxo = Utxo::new(
+                                input.txid.clone(),
+                                input.vout,
+                                output.to.clone(),
+                                output.amount(),
+                            );
+                            let ublob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
+                            batch.put(
+                                format!("u:{}:{}", input.txid, input.vout).as_bytes(),
+                                &ublob,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        put_batch(&self.db, batch)?;
+        Ok(())
+    }
+
+    /// Replay blocks to apply UTXO changes (forward order)
+    fn replay_blocks(&mut self, blocks: &[Block]) -> Result<()> {
+        for block in blocks {
+            log::info!("Replaying block {}", block.header.index);
+
+            // We already have the block stored, just need to update UTXO set
+            let mut batch = WriteBatch::default();
+
+            for tx in &block.transactions {
+                // Create new UTXOs
+                for (i, output) in tx.outputs.iter().enumerate() {
+                    let utxo = Utxo::new(
+                        tx.txid.clone(),
+                        i as u32,
+                        output.to.clone(),
+                        output.amount(),
+                    );
+                    let ublob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
+                    batch.put(format!("u:{}:{}", tx.txid, i).as_bytes(), &ublob);
+                }
+
+                // Spend UTXOs (skip coinbase)
+                if !tx.inputs.is_empty() {
+                    for input in &tx.inputs {
+                        batch.delete(format!("u:{}:{}", input.txid, input.vout).as_bytes());
+                    }
+                }
+            }
+
+            put_batch(&self.db, batch)?;
+        }
+
+        Ok(())
     }
 }

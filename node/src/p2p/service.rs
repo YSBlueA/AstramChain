@@ -96,6 +96,7 @@ impl P2PService {
                     .mining_cancel_flag
                     .store(true, std::sync::atomic::Ordering::SeqCst);
 
+                // Try to insert the block
                 match state.bc.validate_and_insert_block(&block) {
                     Ok(_) => {
                         info!(
@@ -120,9 +121,47 @@ impl P2PService {
                                 removed_count
                             );
                         }
+
+                        // Check if this block triggers a chain reorganization
+                        match state.bc.reorganize_if_needed(&block.hash) {
+                            Ok(true) => {
+                                info!("🔄 Chain reorganization completed");
+                            }
+                            Ok(false) => {
+                                // No reorg needed, current chain is best
+                            }
+                            Err(e) => {
+                                warn!("⚠️  Reorganization check failed: {:?}", e);
+                            }
+                        }
+
+                        // Try to process orphan blocks that may now be valid
+                        Self::process_orphan_blocks(&mut state);
+
                         info!("⛏️  Mining cancelled, restarting with updated chain...");
                     }
-                    Err(e) => warn!("❌ Invalid block from p2p: {:?}", e),
+                    Err(e) => {
+                        // Block validation failed - check if it's an orphan
+                        let error_msg = format!("{:?}", e);
+                        
+                        if error_msg.contains("previous header not found") {
+                            // This is an orphan block - save it for later
+                            let now = chrono::Utc::now().timestamp();
+                            state.orphan_blocks.insert(block.hash.clone(), (block.clone(), now));
+                            
+                            info!(
+                                "📦 Orphan block received (index={}, hash={}), storing for later (orphan pool size: {})",
+                                block.header.index,
+                                &block.hash[..16],
+                                state.orphan_blocks.len()
+                            );
+                            
+                            // Request the parent block
+                            // TODO: implement getdata request for parent block
+                        } else {
+                            warn!("❌ Invalid block from p2p: {:?}", e);
+                        }
+                    }
                 }
             });
         });
@@ -156,6 +195,83 @@ impl P2PService {
                 }
             });
         });
+    }
+
+    /// Process orphan blocks that may now be valid
+    fn process_orphan_blocks(state: &mut crate::NodeState) {
+        let mut processed_any = true;
+        let max_iterations = 100; // Prevent infinite loops
+        let mut iterations = 0;
+
+        while processed_any && iterations < max_iterations {
+            processed_any = false;
+            iterations += 1;
+
+            // Find orphan blocks whose parent now exists
+            let orphans_to_try: Vec<_> = state
+                .orphan_blocks
+                .iter()
+                .map(|(hash, (block, _))| (hash.clone(), block.clone()))
+                .collect();
+
+            for (hash, block) in orphans_to_try {
+                // Check if parent exists now
+                if let Ok(Some(_)) = state.bc.load_block(&block.header.previous_hash) {
+                    // Parent exists! Try to validate and insert
+                    match state.bc.validate_and_insert_block(&block) {
+                        Ok(_) => {
+                            info!(
+                                "✅ Orphan block now valid: index={} hash={}",
+                                block.header.index, &hash[..16]
+                            );
+                            state.blockchain.push(block.clone());
+                            state.orphan_blocks.remove(&hash);
+                            processed_any = true;
+
+                            // Remove transactions from mempool
+                            let block_txids: std::collections::HashSet<String> = block
+                                .transactions
+                                .iter()
+                                .map(|tx| tx.txid.clone())
+                                .collect();
+                            state.pending.retain(|tx| !block_txids.contains(&tx.txid));
+
+                            // Check for reorganization
+                            let _ = state.bc.reorganize_if_needed(&hash);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "⚠️  Orphan block still invalid: index={} hash={}, error: {:?}",
+                                block.header.index, &hash[..16], e
+                            );
+                            // Keep in orphan pool for now
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up old orphan blocks (older than 1 hour)
+        let now = chrono::Utc::now().timestamp();
+        let one_hour = 3600;
+        state.orphan_blocks.retain(|hash, (block, timestamp)| {
+            let age = now - *timestamp;
+            if age > one_hour {
+                info!(
+                    "🗑️  Removing old orphan block: index={} hash={} (age: {}s)",
+                    block.header.index,
+                    &hash[..16],
+                    age
+                );
+                false
+            } else {
+                true
+            }
+        });
+
+        if !state.orphan_blocks.is_empty() {
+            info!("📦 Orphan pool size: {}", state.orphan_blocks.len());
+        }
     }
 
     fn start_header_sync(&self, node_handle: NodeHandle) {
