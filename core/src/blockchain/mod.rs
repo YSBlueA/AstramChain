@@ -42,17 +42,52 @@ impl Blockchain {
                 {
                     // Calculate difficulty for the next block based on current chain state
                     let next_index = block.header.index + 1;
-                    // Create temporary instance to call calculate_adjusted_difficulty
-                    let temp_bc = Blockchain {
-                        db: open_db(db_path)?,
-                        chain_tip: chain_tip.clone(),
-                        difficulty: block.header.difficulty,
-                        block_interval: 120,
-                    };
+                    // Create temporary instance WITHOUT opening DB again
+                    // We'll calculate difficulty manually here to avoid double-opening DB
 
-                    temp_bc
-                        .calculate_adjusted_difficulty(next_index)
-                        .unwrap_or(block.header.difficulty)
+                    // Simple difficulty adjustment logic inline
+                    if next_index % 30 == 0 && next_index > 0 {
+                        // Adjustment point - get last 30 blocks to calculate
+                        let start_index = next_index.saturating_sub(30);
+                        if let Ok(Some(start_blob)) =
+                            db.get(format!("i:{}", start_index).as_bytes())
+                        {
+                            if let Ok(start_hash) = String::from_utf8(start_blob) {
+                                if let Ok(Some(start_header_blob)) =
+                                    db.get(format!("b:{}", start_hash).as_bytes())
+                                {
+                                    if let Ok((start_block, _)) =
+                                        bincode::decode_from_slice::<Block, _>(
+                                            &start_header_blob,
+                                            *BINCODE_CONFIG,
+                                        )
+                                    {
+                                        let time_taken =
+                                            block.header.timestamp - start_block.header.timestamp;
+                                        let expected_time = 120 * 30; // block_interval * 30
+
+                                        if time_taken < expected_time / 2 {
+                                            block.header.difficulty + 1
+                                        } else if time_taken > expected_time * 2 {
+                                            block.header.difficulty.saturating_sub(1).max(1)
+                                        } else {
+                                            block.header.difficulty
+                                        }
+                                    } else {
+                                        block.header.difficulty
+                                    }
+                                } else {
+                                    block.header.difficulty
+                                }
+                            } else {
+                                block.header.difficulty
+                            }
+                        } else {
+                            block.header.difficulty
+                        }
+                    } else {
+                        block.header.difficulty
+                    }
                 } else {
                     log::warn!("Failed to decode tip block, using default difficulty");
                     2

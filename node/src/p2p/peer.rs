@@ -1,3 +1,4 @@
+use crate::p2p::messages::HandshakeInfo;
 use bytes::BytesMut;
 use futures::SinkExt;
 use tokio::io::{ReadHalf, WriteHalf};
@@ -10,6 +11,7 @@ pub struct Peer {
     pub id: PeerId,
     pub reader: FramedRead<ReadHalf<TcpStream>, LengthDelimitedCodec>,
     pub writer: FramedWrite<WriteHalf<TcpStream>, LengthDelimitedCodec>,
+    pub handshake_info: Option<HandshakeInfo>,
 }
 
 impl Peer {
@@ -17,7 +19,12 @@ impl Peer {
         let (read_half, write_half) = tokio::io::split(stream);
         let reader = FramedRead::new(read_half, LengthDelimitedCodec::new());
         let writer = FramedWrite::new(write_half, LengthDelimitedCodec::new());
-        Self { id, reader, writer }
+        Self {
+            id,
+            reader,
+            writer,
+            handshake_info: None,
+        }
     }
 
     pub async fn next_bytes(&mut self) -> anyhow::Result<Option<BytesMut>> {

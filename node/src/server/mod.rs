@@ -84,6 +84,29 @@ pub async fn run_server(node: NodeHandle) {
             })))
         });
 
+    // GET /health - Health check endpoint for DNS server
+    let health_check = warp::path!("health")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+            let height = if let Some(tip_hash) = &state.bc.chain_tip {
+                if let Ok(Some(header)) = state.bc.load_header(tip_hash) {
+                    header.index + 1
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "status": "ok",
+                "height": height,
+                "timestamp": chrono::Utc::now().timestamp()
+            })))
+        });
+
     // GET /counts - lightweight counts for blocks and transactions (DB)
     let get_counts = warp::path("counts")
         .and(warp::get())
@@ -544,6 +567,7 @@ pub async fn run_server(node: NodeHandle) {
         .or(get_counts)
         .or(get_status)
         .or(debug_counts)
+        .or(health_check)
         .or(post_tx)
         .or(relay_tx)
         .or(status)

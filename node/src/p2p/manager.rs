@@ -1,4 +1,4 @@
-use crate::p2p::messages::{InventoryType, P2pMessage};
+use crate::p2p::messages::{HandshakeInfo, InventoryType, P2pMessage};
 use crate::p2p::peer::{Peer, PeerId};
 use bincode::{Decode, Encode};
 use bytes::Bytes;
@@ -26,11 +26,15 @@ pub struct SavedPeer {
 
 pub const MAX_OUTBOUND: usize = 8;
 pub const PEERS_FILE: &str = "peers.json";
+pub const PROTOCOL_VERSION: u32 = 1;
+pub const NETWORK_ID: &str = "netcoin-mainnet";
+pub const CHAIN_ID: u64 = 1;
 
 type Shared<T> = Arc<Mutex<T>>;
 pub struct PeerManager {
     peers: Shared<HashMap<PeerId, UnboundedSender<P2pMessage>>>,
     peer_heights: Shared<HashMap<PeerId, u64>>,
+    peer_handshakes: Shared<HashMap<PeerId, HandshakeInfo>>,
     my_height: Arc<Mutex<u64>>,
     /// callback when a new block is received
     on_block: Arc<Mutex<Option<Arc<dyn Fn(block::Block) + Send + Sync>>>>,
@@ -50,6 +54,7 @@ impl PeerManager {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
             peer_heights: Arc::new(Mutex::new(HashMap::new())),
+            peer_handshakes: Arc::new(Mutex::new(HashMap::new())),
             my_height: Arc::new(Mutex::new(0)),
             on_block: Arc::new(Mutex::new(None)),
             on_tx: Arc::new(Mutex::new(None)),
@@ -84,6 +89,16 @@ impl PeerManager {
 
     pub fn get_my_height(&self) -> u64 {
         *self.my_height.lock()
+    }
+
+    /// Get handshake info for a specific peer
+    pub fn get_peer_handshake(&self, peer_id: &str) -> Option<HandshakeInfo> {
+        self.peer_handshakes.lock().get(peer_id).cloned()
+    }
+
+    /// Get all peer handshake infos
+    pub fn get_all_peer_handshakes(&self) -> HashMap<PeerId, HandshakeInfo> {
+        self.peer_handshakes.lock().clone()
     }
 
     /// inbound connections accept loop (spawn)
@@ -135,6 +150,7 @@ impl PeerManager {
             id: peer_id.clone(),
             reader,
             writer,
+            handshake_info: None,
         };
 
         let peer_id_clone = peer.id.clone();
@@ -154,12 +170,23 @@ impl PeerManager {
 
         info!("Registered peer {}", peer_id_clone);
 
-        // Send my Version message to the peer immediately
+        // Send handshake immediately
         if let Some(tx) = self.peers.lock().get(&peer_id_clone) {
             let my_height = self.get_my_height();
-            let _ = tx.send(P2pMessage::Version {
-                version: env!("CARGO_PKG_VERSION").to_string(),
+            let handshake_info = HandshakeInfo {
+                protocol_version: PROTOCOL_VERSION,
+                software_version: env!("CARGO_PKG_VERSION").to_string(),
+                supported_features: vec![
+                    "blocks".to_string(),
+                    "transactions".to_string(),
+                    "headers".to_string(),
+                ],
+                network_id: NETWORK_ID.to_string(),
+                chain_id: CHAIN_ID,
                 height: my_height,
+            };
+            let _ = tx.send(P2pMessage::Handshake {
+                info: handshake_info,
             });
         }
 
@@ -264,6 +291,94 @@ impl PeerManager {
     async fn handle_message(&self, peer_id: PeerId, msg: P2pMessage) {
         use P2pMessage::*;
         match msg {
+            Handshake { info } => {
+                info!(
+                    "Handshake from {}: protocol={}, version={}, network={}, chain={}, height={}, features={:?}",
+                    peer_id,
+                    info.protocol_version,
+                    info.software_version,
+                    info.network_id,
+                    info.chain_id,
+                    info.height,
+                    info.supported_features
+                );
+
+                // Validate protocol compatibility
+                if info.protocol_version != PROTOCOL_VERSION {
+                    warn!(
+                        "Peer {} has incompatible protocol version {}",
+                        peer_id, info.protocol_version
+                    );
+                    // Could disconnect here
+                }
+
+                if info.network_id != NETWORK_ID {
+                    warn!(
+                        "Peer {} is on different network: {}",
+                        peer_id, info.network_id
+                    );
+                    // Could disconnect here
+                }
+
+                if info.chain_id != CHAIN_ID {
+                    warn!("Peer {} has different chain_id: {}", peer_id, info.chain_id);
+                    // Could disconnect here
+                }
+
+                // Store peer info
+                self.peer_heights
+                    .lock()
+                    .insert(peer_id.clone(), info.height);
+                self.peer_handshakes
+                    .lock()
+                    .insert(peer_id.clone(), info.clone());
+
+                // Send handshake ack with our info
+                if let Some(tx) = self.peers.lock().get(&peer_id) {
+                    let my_height = self.get_my_height();
+                    let my_info = HandshakeInfo {
+                        protocol_version: PROTOCOL_VERSION,
+                        software_version: env!("CARGO_PKG_VERSION").to_string(),
+                        supported_features: vec![
+                            "blocks".to_string(),
+                            "transactions".to_string(),
+                            "headers".to_string(),
+                        ],
+                        network_id: NETWORK_ID.to_string(),
+                        chain_id: CHAIN_ID,
+                        height: my_height,
+                    };
+                    let _ = tx.send(HandshakeAck { info: my_info });
+                }
+
+                // Start syncing headers
+                if let Some(tx) = self.peers.lock().get(&peer_id) {
+                    let locator = vec![];
+                    let _ = tx.send(GetHeaders {
+                        locator_hashes: locator,
+                        stop_hash: None,
+                    });
+                }
+            }
+
+            HandshakeAck { info } => {
+                info!(
+                    "HandshakeAck from {}: protocol={}, version={}, network={}, chain={}, height={}",
+                    peer_id,
+                    info.protocol_version,
+                    info.software_version,
+                    info.network_id,
+                    info.chain_id,
+                    info.height
+                );
+
+                // Store peer info
+                self.peer_heights
+                    .lock()
+                    .insert(peer_id.clone(), info.height);
+                self.peer_handshakes.lock().insert(peer_id.clone(), info);
+            }
+
             Version { version, height } => {
                 info!("{} sent version v{} height {}", peer_id, version, height);
                 self.peer_heights.lock().insert(peer_id.clone(), height);

@@ -15,6 +15,7 @@ use netcoin_node::NodeState;
 use netcoin_node::p2p::service::P2PService;
 use netcoin_node::server::run_server;
 use primitive_types::U256;
+use serde::Deserialize;
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +25,23 @@ use std::sync::atomic::Ordering as OtherOrdering;
 use std::sync::{Arc, Mutex};
 use tokio::signal;
 use tokio::time::{Duration, sleep};
+
+#[derive(Debug, Clone, Deserialize)]
+struct DnsNodeInfo {
+    address: String,
+    port: u16,
+    version: String,
+    height: u64,
+    last_seen: i64,
+    first_seen: i64,
+    uptime_hours: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct DnsNodesResponse {
+    nodes: Vec<DnsNodeInfo>,
+    count: usize,
+}
 
 #[tokio::main]
 async fn main() {
@@ -50,12 +68,31 @@ async fn main() {
 
     print!("Initialize Block chain...\n");
 
+    // Check for stale LOCK file and remove it if necessary
+    let lock_path = std::path::Path::new(&db_path).join("LOCK");
+    if lock_path.exists() {
+        println!("⚠️  Found existing LOCK file, attempting to clean up...");
+
+        // Try to remove stale lock file
+        match fs::remove_file(&lock_path) {
+            Ok(_) => {
+                println!("✅ Removed stale LOCK file");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to remove LOCK file: {}", e);
+                eprintln!("Another instance may be running. Please stop it first.");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Initialize core Blockchain (RocksDB-backed)
-    let mut bc = match Blockchain::new(db_path.as_str()) {
+    let bc = match Blockchain::new(db_path.as_str()) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("Failed to open blockchain DB: {}", e);
-            // try to create empty instance (this depends on core API)
+            eprintln!("If another instance is running, please stop it first.");
             std::process::exit(1);
         }
     };
@@ -89,7 +126,79 @@ async fn main() {
         netcoin_node::server::run_eth_rpc_server(eth_rpc_node).await;
     });
 
-    start_services(node_handle, miner_address).await;
+    // Graceful shutdown flag
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_flag_clone = shutdown_flag.clone();
+
+    // Setup signal handler for graceful shutdown
+    tokio::spawn(async move {
+        match signal::ctrl_c().await {
+            Ok(()) => {
+                println!("\n⚠️  Shutdown signal received, cleaning up...");
+                shutdown_flag_clone.store(true, OtherOrdering::SeqCst);
+            }
+            Err(err) => {
+                eprintln!("Error setting up signal handler: {}", err);
+            }
+        }
+    });
+
+    let (task_handles, server_handle) =
+        start_services(node_handle.clone(), miner_address, shutdown_flag.clone()).await;
+
+    // Wait for all background tasks to complete
+    println!("⏳ Waiting for all tasks to complete...");
+    for handle in task_handles {
+        let _ = handle.await;
+    }
+
+    // Abort HTTP server (it runs indefinitely)
+    server_handle.abort();
+    println!("🛭 HTTP server stopped");
+
+    // Give more time for all resources to be released
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Cleanup: Close database properly
+    {
+        println!("📦 Closing database...");
+
+        // Check Arc reference count
+        let arc_count = Arc::strong_count(&node_handle);
+        println!("🔍 Arc strong references remaining: {}", arc_count);
+
+        // First, try to flush the DB while we still have a reference
+        {
+            if let Ok(mut state) = node_handle.lock() {
+                // Flush WAL and compact
+                if let Err(e) = state.bc.db.flush() {
+                    log::warn!("Failed to flush DB: {}", e);
+                } else {
+                    println!("✅ Database flushed");
+                }
+
+                // Cancel IO operations
+                state.bc.db.cancel_all_background_work(true);
+                println!("✅ Background work cancelled");
+            }
+        }
+
+        // Give DB time to complete all operations
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Drop the node_handle to release our reference
+        drop(node_handle);
+
+        println!("✅ All references released");
+    }
+
+    // Final wait to ensure LOCK file is released by OS
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    println!("\n👋 Netcoin node stopped gracefully");
+
+    // Force process exit to ensure all resources are released
+    std::process::exit(0);
     /*
     // Get current blockchain height from DB and set it in P2P manager
     let my_height: u64 = if let Some(tip_hash) = &bc.chain_tip {
@@ -314,21 +423,366 @@ async fn main() {
     */
 }
 
-async fn start_services(node_handle: NodeHandle, miner_address: String) {
+/// Measure network latency to a peer by attempting a quick TCP connection
+async fn measure_latency(address: &str) -> Option<u64> {
+    let start = std::time::Instant::now();
+
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => {
+            let latency = start.elapsed().as_millis() as u64;
+            Some(latency)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScoredPeer {
+    address: String,
+    height: u64,
+    uptime_hours: f64,
+    latency_ms: u64,
+    score: f64,
+}
+
+/// Fetch best nodes from DNS server, excluding self
+async fn fetch_best_nodes_from_dns(
+    my_address: &str,
+    my_port: u16,
+    limit: usize,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let dns_url =
+        std::env::var("DNS_SERVER_URL").unwrap_or_else(|_| "http://localhost:8053".to_string());
+    let client = reqwest::Client::new();
+    let nodes_url = format!("{}/nodes?limit={}", dns_url, limit * 3); // Fetch more to test latency
+
+    info!("Fetching best nodes from DNS server at {}", dns_url);
+
+    let response = client.get(&nodes_url).send().await?;
+
+    if response.status().is_success() {
+        let result: DnsNodesResponse = response.json().await?;
+        info!("Retrieved {} nodes from DNS server", result.count);
+
+        // Filter out self
+        let candidates: Vec<DnsNodeInfo> = result
+            .nodes
+            .into_iter()
+            .filter(|node| !(node.address == my_address && node.port == my_port))
+            .collect();
+
+        info!(
+            "Testing latency for {} candidate nodes...",
+            candidates.len()
+        );
+
+        // Measure latency for each candidate in parallel
+        let mut scored_peers = Vec::new();
+
+        for node in candidates {
+            let addr = format!("{}:{}", node.address, node.port);
+            let latency = measure_latency(&addr).await;
+
+            if let Some(latency_ms) = latency {
+                // Calculate composite score:
+                // - 30% height (normalized)
+                // - 20% uptime (capped at 168h)
+                // - 50% network latency (lower is better)
+
+                // For scoring, we need to normalize. We'll do final scoring after collecting all
+                scored_peers.push(ScoredPeer {
+                    address: addr,
+                    height: node.height,
+                    uptime_hours: node.uptime_hours,
+                    latency_ms,
+                    score: 0.0, // Will calculate after we have all data
+                });
+
+                info!(
+                    "  {} - height: {}, uptime: {:.1}h, latency: {}ms",
+                    scored_peers.last().unwrap().address,
+                    node.height,
+                    node.uptime_hours,
+                    latency_ms
+                );
+            } else {
+                info!("  {}:{} - unreachable", node.address, node.port);
+            }
+        }
+
+        if scored_peers.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Normalize and calculate final scores
+        let max_height = scored_peers.iter().map(|p| p.height).max().unwrap_or(1) as f64;
+        let min_latency = scored_peers.iter().map(|p| p.latency_ms).min().unwrap_or(1) as f64;
+        let max_latency = scored_peers
+            .iter()
+            .map(|p| p.latency_ms)
+            .max()
+            .unwrap_or(1000) as f64;
+
+        for peer in &mut scored_peers {
+            let height_score = (peer.height as f64 / max_height.max(1.0)) * 0.3;
+            let uptime_score = (peer.uptime_hours.min(168.0) / 168.0) * 0.2;
+
+            // Latency score: lower latency = higher score
+            let latency_normalized = if max_latency > min_latency {
+                1.0 - ((peer.latency_ms as f64 - min_latency) / (max_latency - min_latency))
+            } else {
+                1.0
+            };
+            let latency_score = latency_normalized * 0.5;
+
+            peer.score = height_score + uptime_score + latency_score;
+        }
+
+        // Sort by score (descending)
+        scored_peers.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Log top peers
+        info!("\n🎯 Best peers by composite score:");
+        for (i, peer) in scored_peers.iter().take(limit).enumerate() {
+            info!(
+                "  {}. {} - score: {:.3} (height: {}, uptime: {:.1}h, latency: {}ms)",
+                i + 1,
+                peer.address,
+                peer.score,
+                peer.height,
+                peer.uptime_hours,
+                peer.latency_ms
+            );
+        }
+
+        let best_peers: Vec<String> = scored_peers
+            .into_iter()
+            .take(limit)
+            .map(|p| p.address)
+            .collect();
+
+        Ok(best_peers)
+    } else {
+        let error_text = response.text().await?;
+        Err(format!("Failed to fetch nodes from DNS server: {}", error_text).into())
+    }
+}
+
+/// Register this node with the DNS server
+async fn register_with_dns(node_handle: NodeHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let dns_url =
+        std::env::var("DNS_SERVER_URL").unwrap_or_else(|_| "http://localhost:8053".to_string());
+    let node_address = std::env::var("NODE_ADDRESS").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let node_port = std::env::var("NODE_PORT").unwrap_or_else(|_| "8335".to_string());
+
+    let height = {
+        let state = node_handle.lock().unwrap();
+        if let Some(tip_hash) = &state.bc.chain_tip {
+            if let Ok(Some(header)) = state.bc.load_header(tip_hash) {
+                header.index + 1
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+
+    let client = reqwest::Client::new();
+    let register_url = format!("{}/register", dns_url);
+
+    let payload = serde_json::json!({
+        "address": node_address,
+        "port": node_port.parse::<u16>().unwrap_or(8335),
+        "version": "0.1.0",
+        "height": height
+    });
+
+    info!("Registering node with DNS server at {}", dns_url);
+
+    let response = client.post(&register_url).json(&payload).send().await?;
+
+    if response.status().is_success() {
+        let result: serde_json::Value = response.json().await?;
+        info!("Successfully registered with DNS server: {:?}", result);
+        Ok(())
+    } else {
+        let error_text = response.text().await?;
+        Err(format!("Failed to register with DNS server: {}", error_text).into())
+    }
+}
+
+async fn start_services(
+    node_handle: NodeHandle,
+    miner_address: String,
+    shutdown_flag: Arc<AtomicBool>,
+) -> (
+    Vec<tokio::task::JoinHandle<()>>,
+    tokio::task::JoinHandle<()>,
+) {
     println!("🚀 my address {}", miner_address);
+
+    let mut task_handles = Vec::new();
+
+    let my_node_address = std::env::var("NODE_ADDRESS").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let my_node_port = std::env::var("NODE_PORT")
+        .unwrap_or_else(|_| "8335".to_string())
+        .parse::<u16>()
+        .unwrap_or(8335);
+
+    // Register with DNS server
+    let dns_node_handle = node_handle.clone();
+    let shutdown_flag_dns = shutdown_flag.clone();
+    let dns_task = tokio::spawn(async move {
+        // Initial registration
+        if let Err(e) = register_with_dns(dns_node_handle.clone()).await {
+            log::warn!("Failed to register with DNS server: {}", e);
+        }
+
+        // Re-register every 5 minutes to keep the node alive in DNS
+        let mut interval = tokio::time::interval(Duration::from_secs(300));
+        interval.tick().await; // Skip first immediate tick
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if shutdown_flag_dns.load(OtherOrdering::SeqCst) {
+                        info!("DNS registration task shutting down...");
+                        break;
+                    }
+                    if let Err(e) = register_with_dns(dns_node_handle.clone()).await {
+                        log::warn!("Failed to re-register with DNS server: {}", e);
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    // Check shutdown flag every second for quick response
+                    if shutdown_flag_dns.load(OtherOrdering::SeqCst) {
+                        info!("DNS registration task shutting down...");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    task_handles.push(dns_task);
+
+    // Connect to best nodes from DNS server
+    let p2p_handle = {
+        let state = node_handle.lock().unwrap();
+        state.p2p.clone()
+    };
+
+    let my_addr_clone = my_node_address.clone();
+    let shutdown_flag_p2p = shutdown_flag.clone();
+    let p2p_task = tokio::spawn(async move {
+        // Wait a bit for DNS registration to complete
+        sleep(Duration::from_secs(2)).await;
+
+        // Initial connection to best nodes
+        match fetch_best_nodes_from_dns(&my_addr_clone, my_node_port, 10).await {
+            Ok(peer_addrs) => {
+                info!("🌐 Connecting to {} best nodes from DNS", peer_addrs.len());
+                for addr in peer_addrs {
+                    let p2p_clone = p2p_handle.clone();
+                    let addr_clone = addr.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = p2p_clone.connect_peer(&addr_clone).await {
+                            log::warn!("Failed to connect to peer {}: {:?}", addr_clone, e);
+                        } else {
+                            info!("✅ Connected to peer: {}", addr_clone);
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch best nodes from DNS: {}", e);
+            }
+        }
+
+        // Periodically refresh connections to best nodes (every 10 minutes)
+        let mut interval = tokio::time::interval(Duration::from_secs(600));
+        interval.tick().await; // Skip first immediate tick
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if shutdown_flag_p2p.load(OtherOrdering::SeqCst) {
+                        info!("P2P connection refresh task shutting down...");
+                        break;
+                    }
+                    match fetch_best_nodes_from_dns(&my_addr_clone, my_node_port, 10).await {
+                Ok(peer_addrs) => {
+                    info!(
+                        "🔄 Refreshing connections to {} best nodes",
+                        peer_addrs.len()
+                    );
+                    for addr in peer_addrs {
+                        let p2p_clone = p2p_handle.clone();
+                        let addr_clone = addr.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = p2p_clone.connect_peer(&addr_clone).await {
+                                log::debug!(
+                                    "Peer connection refresh failed for {}: {:?}",
+                                    addr_clone,
+                                    e
+                                );
+                            }
+                        });
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to refresh nodes from DNS: {}", e);
+                }
+            }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    // Check shutdown flag every second for quick response
+                    if shutdown_flag_p2p.load(OtherOrdering::SeqCst) {
+                        info!("P2P connection refresh task shutting down...");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    task_handles.push(p2p_task);
 
     let nh: Arc<Mutex<NodeState>> = node_handle.clone();
     // start HTTP server in background thread (warp is async so run in tokio)
-    let server_handle = {
-        tokio::spawn(async move {
-            run_server(nh).await;
-        })
-    };
+    let server_handle = tokio::spawn(async move {
+        run_server(nh).await;
+    });
 
     println!("🚀 mining starting...");
 
-    // mining/miner loop: every 10s attempt to mine pending txs
+    // Mining loop - run in main task, not spawned
+    mining_loop(node_handle.clone(), miner_address, shutdown_flag.clone()).await;
+
+    // Return background tasks, but not server (we'll abort it)
+    (task_handles, server_handle)
+}
+
+async fn mining_loop(
+    node_handle: NodeHandle,
+    miner_address: String,
+    shutdown_flag: Arc<AtomicBool>,
+) {
     loop {
+        // Check shutdown flag
+        if shutdown_flag.load(OtherOrdering::SeqCst) {
+            info!("⚠️  Shutdown flag detected, stopping mining loop...");
+            break;
+        }
+
         // Snapshot pending txs + mining params while holding the lock briefly
         let (
             snapshot_txs,
