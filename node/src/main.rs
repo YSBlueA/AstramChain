@@ -111,6 +111,12 @@ async fn main() {
         eth_to_netcoin_tx: HashMap::new(),
         mining_cancel_flag: mining_cancel_flag.clone(),
         orphan_blocks: HashMap::new(),
+        mining_active: Arc::new(AtomicBool::new(false)),
+        current_difficulty: Arc::new(Mutex::new(1)),
+        current_hashrate: Arc::new(Mutex::new(0.0)),
+        blocks_mined: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        node_start_time: std::time::Instant::now(),
+        miner_address: Arc::new(Mutex::new(miner_address.clone())),
     };
 
     let node_handle = Arc::new(Mutex::new(node));
@@ -290,6 +296,14 @@ async fn main() {
                 seen_tx: HashSet::new(),
                 p2p: p2p.clone(),
                 eth_to_netcoin_tx: HashMap::new(),
+                mining_cancel_flag: mining_cancel_flag.clone(),
+                orphan_blocks: HashMap::new(),
+                mining_active: Arc::new(AtomicBool::new(false)),
+                current_difficulty: Arc::new(Mutex::new(1)),
+                current_hashrate: Arc::new(Mutex::new(0.0)),
+                blocks_mined: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                node_start_time: std::time::Instant::now(),
+                miner_address: Arc::new(Mutex::new(miner_address.clone())),
             };
             let node_handle = Arc::new(Mutex::new(node));
 
@@ -362,6 +376,14 @@ async fn main() {
         seen_tx: HashSet::new(),
         p2p: p2p.clone(),
         eth_to_netcoin_tx: HashMap::new(),
+        mining_cancel_flag: mining_cancel_flag.clone(),
+        orphan_blocks: HashMap::new(),
+        mining_active: Arc::new(AtomicBool::new(false)),
+        current_difficulty: Arc::new(Mutex::new(1)),
+        current_hashrate: Arc::new(Mutex::new(0.0)),
+        blocks_mined: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        node_start_time: std::time::Instant::now(),
+        miner_address: Arc::new(Mutex::new(miner_address.clone())),
     };
     let node_handle = Arc::new(Mutex::new(node));
 
@@ -795,6 +817,9 @@ async fn mining_loop(
         ) = {
             let mut state = node_handle.lock().unwrap();
 
+            // Mark mining as active
+            state.mining_active.store(true, OtherOrdering::SeqCst);
+
             // Reset cancel flag at the start of each mining round
             state.mining_cancel_flag.store(false, OtherOrdering::SeqCst);
 
@@ -828,6 +853,9 @@ async fn mining_loop(
                     state.bc.difficulty, diff, next_index
                 );
             }
+
+            // Update current difficulty in state
+            *state.current_difficulty.lock().unwrap() = diff;
 
             // Calculate total fees from pending transactions
             let mut fee_sum = U256::zero();
@@ -895,6 +923,9 @@ async fn mining_loop(
             coinbase_reward, base_reward, total_fees
         );
 
+        // Record mining start time for hashrate calculation
+        let mining_start = std::time::Instant::now();
+
         // prepare parameters for blocking mining call
         let prev_hash = prev_hash.clone();
         let difficulty_local = difficulty;
@@ -946,6 +977,21 @@ async fn mining_loop(
                             "✅ Mined new block index={} hash={}",
                             block.header.index, block.hash
                         );
+
+                        // Update mining statistics
+                        state
+                            .blocks_mined
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+                        // Calculate hashrate (rough estimate)
+                        let mining_duration = mining_start.elapsed().as_secs_f64();
+                        if mining_duration > 0.0 {
+                            // Estimate: 2^difficulty hashes attempted in mining_duration seconds
+                            let estimated_hashes = 2_u64.pow(difficulty_local) as f64;
+                            let hashrate = estimated_hashes / mining_duration;
+                            *state.current_hashrate.lock().unwrap() = hashrate;
+                        }
+
                         let block_to_broadcast = block.clone();
 
                         state.blockchain.push(block);
@@ -971,10 +1017,17 @@ async fn mining_loop(
                 eprintln!("⛏️ Mining error: {}", e);
                 // requeue pending txs
                 let mut state = node_handle.lock().unwrap();
+                state.mining_active.store(false, OtherOrdering::SeqCst);
                 for tx in snapshot_txs.into_iter() {
                     state.pending.push(tx);
                 }
             }
+        }
+
+        // Mark mining as inactive before sleep
+        {
+            let state = node_handle.lock().unwrap();
+            state.mining_active.store(false, OtherOrdering::SeqCst);
         }
 
         // wait a bit before next cycle

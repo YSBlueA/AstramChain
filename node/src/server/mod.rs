@@ -155,23 +155,38 @@ pub async fn run_server(node: NodeHandle) {
                 .map(|hash| hex::encode(hash))
                 .unwrap_or_else(|| "none".to_string());
 
+            // Get mining info
+            let is_mining = state.mining_active.load(std::sync::atomic::Ordering::SeqCst);
+            let current_difficulty = *state.current_difficulty.lock().unwrap();
+            let hashrate = *state.current_hashrate.lock().unwrap();
+            let blocks_mined_count = state.blocks_mined.load(std::sync::atomic::Ordering::SeqCst);
+            
+            // Calculate uptime
+            let uptime_secs = state.node_start_time.elapsed().as_secs();
+
+            // Get wallet info
+            let miner_address = state.miner_address.lock().unwrap().clone();
+            let wallet_balance = state.bc.get_address_balance_from_db(&miner_address).unwrap_or(U256::zero());
+
             log::info!(
-                "🔍 Status requested - Height: {}, Peers: {}, Pending TX: {}",
+                "🔍 Status requested - Height: {}, Peers: {}, Pending TX: {}, Mining: {}",
                 block_height,
                 connected_peers,
-                pending_tx
+                pending_tx,
+                is_mining
             );
 
             Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
                 "node": {
                     "version": "0.1.0",
-                    "uptime_seconds": 0, // TODO: Add start time tracking
+                    "uptime_seconds": uptime_secs,
                 },
                 "blockchain": {
                     "height": block_height,
                     "memory_blocks": memory_blocks,
                     "chain_tip": chain_tip,
                     "my_height": my_height,
+                    "difficulty": current_difficulty,
                 },
                 "mempool": {
                     "pending_transactions": pending_tx,
@@ -180,6 +195,16 @@ pub async fn run_server(node: NodeHandle) {
                 "network": {
                     "connected_peers": connected_peers,
                     "peer_heights": peer_heights,
+                },
+                "mining": {
+                    "active": is_mining,
+                    "hashrate": hashrate,
+                    "difficulty": current_difficulty,
+                    "blocks_mined": blocks_mined_count,
+                },
+                "wallet": {
+                    "address": miner_address,
+                    "balance": format!("0x{:x}", wallet_balance),
                 },
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             })))
@@ -559,9 +584,18 @@ pub async fn run_server(node: NodeHandle) {
         });
 
     // -------------------------------
+    // GET / - Dashboard HTML
+    let dashboard = warp::path::end()
+        .and(warp::get())
+        .map(|| {
+            warp::reply::html(include_str!("../../web/dashboard.html"))
+        });
+
+    // -------------------------------
     // combine routes
     // combine routes
-    let routes = get_chain
+    let routes = dashboard
+        .or(get_chain)
         .or(get_chain_memory)
         .or(get_chain_db)
         .or(get_counts)

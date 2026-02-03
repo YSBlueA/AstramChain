@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetCoin Node Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+            text-align: center;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .loading {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 4rem;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 1rem;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error-message {
+            background-color: #fee;
+            border: 2px solid #c33;
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: center;
+            color: #c33;
+        }
+
+        .error-message h3 {
+            margin-bottom: 1rem;
+        }
+
+        .retry-btn {
+            margin-top: 1rem;
+            padding: 0.75rem 1.5rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+
+        .retry-btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+        }
+
+        .card h2 {
+            font-size: 1.4rem;
+            margin-bottom: 1.25rem;
+            color: #2c3e50;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .info-grid {
+            display: grid;
+            gap: 1rem;
+        }
+
+        .info-item {
+            display: flex;
+            flex-direction: column;
+            padding: 0.75rem;
+            background: #f8f9fa;
+            border-radius: 6px;
+            transition: background-color 0.2s;
+        }
+
+        .info-item:hover {
+            background: #e9ecef;
+        }
+
+        .info-item.highlight {
+            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+            border-left: 4px solid #667eea;
+        }
+
+        .info-item .label {
+            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 0.25rem;
+            font-weight: 500;
+        }
+
+        .info-item .value {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: #2c3e50;
+        }
+
+        .value.hash {
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            word-break: break-all;
+        }
+
+        .value.status-online {
+            color: #27ae60;
+        }
+
+        .mining-card {
+            border: 3px solid #eee;
+        }
+
+        .mining-card.active {
+            border-color: #27ae60;
+            background: linear-gradient(to bottom right, #ffffff, #e8f5e9);
+        }
+
+        .wallet-card {
+            border: 3px solid #f39c12;
+            background: linear-gradient(to bottom right, #ffffff, #fef5e7);
+        }
+
+        .mining-active {
+            color: #27ae60;
+            animation: pulse 2s infinite;
+        }
+
+        .mining-inactive {
+            color: #95a5a6;
+        }
+
+        .balance {
+            color: #f39c12;
+            font-size: 1.5rem !important;
+            font-weight: 800 !important;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .peer-list {
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 2px solid #eee;
+        }
+
+        .peer-list h3 {
+            font-size: 1rem;
+            margin-bottom: 0.75rem;
+            color: #555;
+        }
+
+        .peer-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem;
+            background: #f8f9fa;
+            border-radius: 6px;
+            margin-bottom: 0.5rem;
+            transition: background-color 0.2s;
+        }
+
+        .peer-item:hover {
+            background: #e9ecef;
+        }
+
+        .peer-id {
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            color: #555;
+        }
+
+        .peer-height {
+            font-weight: 600;
+            color: #667eea;
+            background: #e3f2fd;
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+        }
+
+        .no-peers {
+            padding: 1.5rem;
+            text-align: center;
+            color: #999;
+            font-style: italic;
+            background: #f8f9fa;
+            border-radius: 6px;
+            margin-top: 1rem;
+        }
+
+        .controls {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            display: flex;
+            gap: 1rem;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+
+        .auto-refresh-toggle {
+            background: white;
+            padding: 1rem 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .auto-refresh-toggle label {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            cursor: pointer;
+            font-weight: 500;
+            color: #2c3e50;
+        }
+
+        .auto-refresh-toggle input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .refresh-btn {
+            padding: 1rem 2rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .refresh-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+        }
+
+        .refresh-btn:active {
+            transform: translateY(0);
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: 1rem;
+            }
+
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+
+            .controls {
+                position: static;
+                margin-top: 2rem;
+                align-items: stretch;
+            }
+
+            .auto-refresh-toggle {
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖥️ NetCoin Node Dashboard</h1>
+
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <p>노드 상태를 불러오는 중...</p>
+        </div>
+
+        <div id="error" class="error-message" style="display: none;">
+            <h3>❌ 노드에 연결할 수 없습니다</h3>
+            <p id="error-message"></p>
+            <button class="retry-btn" onclick="fetchStatus()">다시 시도</button>
+        </div>
+
+        <div id="dashboard" class="dashboard" style="display: none;">
+            <!-- Node Info -->
+            <div class="card">
+                <h2>⚙️ 노드 정보</h2>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="label">버전</span>
+                        <span class="value" id="node-version">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">상태</span>
+                        <span class="value status-online">🟢 온라인</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">실행 시간</span>
+                        <span class="value" id="node-uptime">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">마지막 업데이트</span>
+                        <span class="value" id="node-timestamp">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mining Status -->
+            <div class="card mining-card" id="mining-card">
+                <h2>⛏️ 채굴 상태</h2>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <span class="label">상태</span>
+                        <span class="value" id="mining-status">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">해시레이트</span>
+                        <span class="value" id="mining-hashrate">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">현재 난이도</span>
+                        <span class="value" id="mining-difficulty">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">채굴된 블록</span>
+                        <span class="value" id="mining-blocks">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Wallet Info -->
+            <div class="card wallet-card">
+                <h2>💰 지갑 정보</h2>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="label">주소</span>
+                        <span class="value hash" id="wallet-address">-</span>
+                    </div>
+                    <div class="info-item highlight">
+                        <span class="label">잔액</span>
+                        <span class="value balance" id="wallet-balance">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Blockchain Status -->
+            <div class="card">
+                <h2>⛓️ 블록체인 상태</h2>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <span class="label">현재 높이</span>
+                        <span class="value" id="blockchain-height">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">메모리 블록</span>
+                        <span class="value" id="blockchain-memory">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">동기화 높이</span>
+                        <span class="value" id="blockchain-sync">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">난이도</span>
+                        <span class="value" id="blockchain-difficulty">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">체인 팁 해시</span>
+                        <span class="value hash" id="blockchain-tip">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mempool Status -->
+            <div class="card">
+                <h2>📋 멤풀 상태</h2>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <span class="label">대기 중인 트랜잭션</span>
+                        <span class="value" id="mempool-pending">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">확인된 트랜잭션</span>
+                        <span class="value" id="mempool-seen">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Network Status -->
+            <div class="card">
+                <h2>🌐 네트워크 상태</h2>
+                <div class="info-grid">
+                    <div class="info-item highlight">
+                        <span class="label">연결된 피어</span>
+                        <span class="value" id="network-peers">-</span>
+                    </div>
+                </div>
+                <div class="peer-list" id="peer-list-container">
+                    <h3>📡 피어 목록</h3>
+                    <div id="peer-list"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="auto-refresh-toggle">
+                <label>
+                    <input type="checkbox" id="auto-refresh" checked>
+                    <span>자동 새로고침 (5초)</span>
+                </label>
+            </div>
+            <button class="refresh-btn" onclick="fetchStatus()">🔄 수동 새로고침</button>
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval = null;
+
+        function formatUptime(seconds) {
+            if (!seconds) return 'N/A';
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            
+            if (hours > 0) {
+                return `${hours}시간 ${minutes}분`;
+            } else if (minutes > 0) {
+                return `${minutes}분 ${secs}초`;
+            } else {
+                return `${secs}초`;
+            }
+        }
+
+        function formatHashrate(hashrate) {
+            if (!hashrate || hashrate === 0) return '0 H/s';
+            
+            if (hashrate >= 1e12) {
+                return `${(hashrate / 1e12).toFixed(2)} TH/s`;
+            } else if (hashrate >= 1e9) {
+                return `${(hashrate / 1e9).toFixed(2)} GH/s`;
+            } else if (hashrate >= 1e6) {
+                return `${(hashrate / 1e6).toFixed(2)} MH/s`;
+            } else if (hashrate >= 1e3) {
+                return `${(hashrate / 1e3).toFixed(2)} KH/s`;
+            } else {
+                return `${hashrate.toFixed(2)} H/s`;
+            }
+        }
+
+        function formatBalance(balanceHex) {
+            if (!balanceHex) return '0 NTC';
+            
+            try {
+                const hex = balanceHex.startsWith('0x') ? balanceHex.slice(2) : balanceHex;
+                const wei = BigInt('0x' + hex);
+                const ntc = Number(wei) / 1e18;
+                return `${ntc.toFixed(4)} NTC`;
+            } catch (e) {
+                console.error('Error formatting balance:', e);
+                return '0 NTC';
+            }
+        }
+
+        function formatHash(hash) {
+            if (!hash || hash === 'none') return 'N/A';
+            if (hash.length > 16) {
+                return hash.substring(0, 8) + '...' + hash.substring(hash.length - 8);
+            }
+            return hash;
+        }
+
+        function formatTimestamp(timestamp) {
+            if (!timestamp) return 'N/A';
+            const date = new Date(timestamp);
+            return date.toLocaleString('ko-KR');
+        }
+
+        async function fetchStatus() {
+            try {
+                document.getElementById('loading').style.display = 'flex';
+                document.getElementById('error').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'none';
+
+                const response = await fetch('/status');
+                if (!response.ok) {
+                    throw new Error('Failed to fetch status');
+                }
+
+                const data = await response.json();
+                
+                // Node info
+                document.getElementById('node-version').textContent = data.node?.version || 'N/A';
+                document.getElementById('node-uptime').textContent = formatUptime(data.node?.uptime_seconds);
+                document.getElementById('node-timestamp').textContent = formatTimestamp(data.timestamp);
+
+                // Mining status
+                const miningCard = document.getElementById('mining-card');
+                const isMining = data.mining?.active;
+                if (isMining) {
+                    miningCard.classList.add('active');
+                } else {
+                    miningCard.classList.remove('active');
+                }
+                
+                const miningStatus = document.getElementById('mining-status');
+                miningStatus.textContent = isMining ? '⚡ 채굴 중' : '⏸️ 대기 중';
+                miningStatus.className = 'value ' + (isMining ? 'mining-active' : 'mining-inactive');
+                
+                document.getElementById('mining-hashrate').textContent = formatHashrate(data.mining?.hashrate || 0);
+                document.getElementById('mining-difficulty').textContent = data.mining?.difficulty || data.blockchain?.difficulty || 0;
+                document.getElementById('mining-blocks').textContent = data.mining?.blocks_mined || 0;
+
+                // Wallet info
+                document.getElementById('wallet-address').textContent = data.wallet?.address || 'N/A';
+                document.getElementById('wallet-balance').textContent = formatBalance(data.wallet?.balance);
+
+                // Blockchain status
+                document.getElementById('blockchain-height').textContent = data.blockchain?.height || 0;
+                document.getElementById('blockchain-memory').textContent = data.blockchain?.memory_blocks || 0;
+                document.getElementById('blockchain-sync').textContent = data.blockchain?.my_height || 0;
+                document.getElementById('blockchain-difficulty').textContent = data.blockchain?.difficulty || 1;
+                document.getElementById('blockchain-tip').textContent = formatHash(data.blockchain?.chain_tip);
+
+                // Mempool status
+                document.getElementById('mempool-pending').textContent = data.mempool?.pending_transactions || 0;
+                document.getElementById('mempool-seen').textContent = data.mempool?.seen_transactions || 0;
+
+                // Network status
+                const peerCount = data.network?.connected_peers || 0;
+                document.getElementById('network-peers').textContent = peerCount;
+
+                // Peer list
+                const peerListContainer = document.getElementById('peer-list');
+                if (data.network?.peer_heights && Object.keys(data.network.peer_heights).length > 0) {
+                    const peers = Object.entries(data.network.peer_heights);
+                    peerListContainer.innerHTML = peers.map(([id, height]) => `
+                        <div class="peer-item">
+                            <span class="peer-id">${id}</span>
+                            <span class="peer-height">블록 높이: ${height}</span>
+                        </div>
+                    `).join('');
+                } else {
+                    peerListContainer.innerHTML = '<div class="no-peers">🔍 연결된 피어가 없습니다</div>';
+                }
+
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'grid';
+            } catch (error) {
+                console.error('Failed to fetch node status:', error);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').style.display = 'block';
+                document.getElementById('error-message').textContent = error.message || '노드 상태를 가져올 수 없습니다';
+            }
+        }
+
+        function toggleAutoRefresh() {
+            const checkbox = document.getElementById('auto-refresh');
+            if (checkbox.checked) {
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
+            }
+        }
+
+        function startAutoRefresh() {
+            stopAutoRefresh();
+            refreshInterval = setInterval(fetchStatus, 5000);
+        }
+
+        function stopAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+                refreshInterval = null;
+            }
+        }
+
+        // Initialize
+        document.getElementById('auto-refresh').addEventListener('change', toggleAutoRefresh);
+        
+        // Initial fetch
+        fetchStatus();
+        startAutoRefresh();
+    </script>
+</body>
+</html>

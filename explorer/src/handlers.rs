@@ -300,17 +300,3 @@ pub async fn get_address_info(
 
     HttpResponse::Ok().json(info)
 }
-
-// 노드 상태 조회 엔드포인트
-pub async fn get_node_status() -> HttpResponse {
-    let rpc = NodeRpcClient::new("http://127.0.0.1:8333");
-
-    match rpc.fetch_node_status().await {
-        Ok(status) => HttpResponse::Ok().json(status),
-        Err(e) => HttpResponse::ServiceUnavailable().json(serde_json::json!({
-            "error": "Failed to connect to node",
-            "message": e.to_string(),
-            "status": "offline"
-        })),
-    }
-}

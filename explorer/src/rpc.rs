@@ -487,22 +487,6 @@ impl NodeRpcClient {
         transactions
     }
 
-    /// 노드 상태 정보 조회
-    pub async fn fetch_node_status(&self) -> Result<serde_json::Value, String> {
-        let url = format!("{}/status", self.node_url);
-
-        match reqwest::get(&url).await {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
-                Ok(status) => {
-                    info!("✅ Fetched node status from {}", self.node_url);
-                    Ok(status)
-                }
-                Err(e) => Err(format!("Failed to parse node status: {}", e)),
-            },
-            Err(e) => Err(format!("Network error fetching node status: {}", e)),
-        }
-    }
-
     /// Resolve Ethereum transaction hash to NetCoin txid
     pub async fn resolve_eth_hash(&self, eth_hash: &str) -> Result<String, String> {
         let url = format!("{}/eth_mapping/{}", self.node_url, eth_hash);

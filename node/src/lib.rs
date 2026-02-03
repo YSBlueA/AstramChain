@@ -23,6 +23,14 @@ pub struct NodeState {
     /// Orphan blocks pool: blocks waiting for their parent
     /// Key: block hash, Value: (block, received_timestamp)
     pub orphan_blocks: HashMap<String, (Block, i64)>,
+    /// Mining status information
+    pub mining_active: Arc<std::sync::atomic::AtomicBool>,
+    pub current_difficulty: Arc<Mutex<u32>>,
+    pub current_hashrate: Arc<Mutex<f64>>,
+    pub blocks_mined: Arc<std::sync::atomic::AtomicU64>,
+    pub node_start_time: std::time::Instant,
+    /// Miner wallet address for this node
+    pub miner_address: Arc<Mutex<String>>,
 }
 
 pub type NodeHandle = Arc<Mutex<NodeState>>;
