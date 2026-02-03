@@ -49,7 +49,8 @@ Write-Info "Release Package Information:"
 Write-Host ""
 
 if ($CurrentPlatform -eq "Windows") {
-    $version = (Get-Content "Cargo.toml" | Select-String 'version = "(.+)"').Matches.Groups[1].Value
+    $versionMatch = Get-Content "node/Cargo.toml" | Select-String 'version = "(.+)"' | Select-Object -First 1
+    $version = if ($versionMatch) { $versionMatch.Matches.Groups[1].Value } else { "unknown" }
     $releaseDir = "release\windows"
     $archiveName = "netcoin-windows-v$version.zip"
     

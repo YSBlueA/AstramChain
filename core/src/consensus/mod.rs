@@ -86,10 +86,14 @@ pub fn mine_block_with_coinbase(
 
         nonce += 1;
 
-        // ⏸️ 10,000 nonces, check cancellation flag
-        if nonce % 10_000 == 0 {
+        // ⏸️ 100,000 nonces, check cancellation flag and show progress
+        if nonce % 100_000 == 0 {
             if cancel_flag.load(Ordering::Relaxed) {
                 return Err(anyhow!("Mining cancelled"));
+            }
+            // Show mining progress every 100k hashes
+            if nonce % 1_000_000 == 0 {
+                log::debug!("⛏️  Mining progress: {} hashes tried (difficulty: {})", nonce, difficulty);
             }
         }
     }

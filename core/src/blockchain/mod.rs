@@ -188,17 +188,32 @@ impl Blockchain {
             ));
         }
 
-        // 3) Difficulty check: verify block uses current blockchain difficulty
-        // Note: We don't recalculate difficulty here because it may have changed
-        // between when mining started and when the block is inserted.
-        // Instead, we verify the block uses the difficulty that was set when mining began.
-        if block.header.difficulty != self.difficulty {
-            return Err(anyhow!(
-                "incorrect difficulty at block {}: got {}, expected {} (current blockchain difficulty)",
-                block.header.index,
-                block.header.difficulty,
-                self.difficulty
-            ));
+        // 3) Difficulty check: verify block difficulty is within reasonable range
+        // During sync, we accept the block's difficulty if it meets PoW requirements
+        // The difficulty in the header represents what was required when the block was mined
+        // We validate that the PoW (checked above) matches the claimed difficulty
+        // For additional safety, ensure difficulty doesn't regress too much
+        if block.header.index > 0 {
+            // Load previous block to check difficulty progression
+            let prev_key = format!("b:{}", block.header.previous_hash);
+            if let Ok(Some(prev_bytes)) = self.db.get(prev_key.as_bytes()) {
+                if let Ok((prev_header, _)) = bincode::decode_from_slice::<BlockHeader, _>(&prev_bytes, *BINCODE_CONFIG) {
+                    // Allow difficulty to change by at most 2x in either direction
+                    let min_allowed = prev_header.difficulty.saturating_sub(2);
+                    let max_allowed = prev_header.difficulty + 2;
+                    
+                    if block.header.difficulty < min_allowed || block.header.difficulty > max_allowed {
+                        return Err(anyhow!(
+                            "difficulty at block {} out of allowed range: got {}, previous {}, allowed range: {}-{}",
+                            block.header.index,
+                            block.header.difficulty,
+                            prev_header.difficulty,
+                            min_allowed,
+                            max_allowed
+                        ));
+                    }
+                }
+            }
         }
 
         // 4) merkle check

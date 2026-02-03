@@ -69,18 +69,67 @@ impl P2PService {
     fn register_handlers(&self, node_handle: NodeHandle) {
         let p2p = self.manager.clone();
 
-        // getheaders handler
+        // getheaders handler - load headers from DB
         let nh = node_handle.clone();
-        p2p.set_on_getheaders(move |_, _| {
+        p2p.set_on_getheaders(move |locator_hashes, _stop_hash| {
             let state = nh.lock().unwrap();
-            let mut headers = state
-                .blockchain
-                .iter()
-                .rev()
+            let mut headers = Vec::new();
+
+            // Get chain tip
+            let tip_hash = match &state.bc.chain_tip {
+                Some(h) => h.clone(),
+                None => return headers,
+            };
+
+            // Build full chain from tip backwards
+            let mut chain = Vec::new();
+            let mut current_hash = Some(tip_hash);
+            
+            while let Some(hash) = current_hash {
+                if let Ok(Some(header)) = state.bc.load_header(&hash) {
+                    chain.push(header.clone());
+                    if header.index == 0 {
+                        break;
+                    }
+                    current_hash = Some(header.previous_hash.clone());
+                } else {
+                    break;
+                }
+            }
+            
+            // Reverse to get genesis-first order
+            chain.reverse();
+
+            // Determine starting point
+            let start_index = if locator_hashes.is_empty() {
+                // No locator - start from genesis
+                0
+            } else {
+                // Find first matching locator
+                let mut found_index = 0;
+                for loc_hash in &locator_hashes {
+                    if let Ok(hash_hex) = hex::encode(loc_hash).parse::<String>() {
+                        if let Some(pos) = chain.iter().position(|h| {
+                            if let Ok(computed) = netcoin_core::block::compute_header_hash(h) {
+                                computed == hash_hex
+                            } else {
+                                false
+                            }
+                        }) {
+                            found_index = pos + 1; // Start from next block
+                            break;
+                        }
+                    }
+                }
+                found_index
+            };
+
+            // Return up to 200 headers starting from start_index
+            headers = chain.into_iter()
+                .skip(start_index)
                 .take(200)
-                .map(|b| b.header.clone())
-                .collect::<Vec<_>>();
-            headers.reverse();
+                .collect();
+
             headers
         });
 
@@ -104,6 +153,9 @@ impl P2PService {
                             block.header.index, block.hash
                         );
                         state.blockchain.push(block.clone());
+
+                        // Update P2P manager height
+                        state.p2p.set_my_height(block.header.index + 1);
 
                         // Remove transactions from pending pool that are in the new block
                         let block_txids: std::collections::HashSet<String> = block
@@ -187,13 +239,48 @@ impl P2PService {
                         info!("📝 Mempool size: {} transactions", state.pending.len());
                     }
                     Ok(false) => {
-                        warn!("❌ Invalid transaction signature: {}", tx.txid);
+                        warn!("❌ Transaction {} has invalid signatures", tx.txid);
                     }
                     Err(e) => {
-                        warn!("❌ Transaction validation error {}: {:?}", tx.txid, e);
+                        warn!("❌ Transaction {} validation error: {:?}", tx.txid, e);
                     }
                 }
             });
+        });
+
+        // getdata handler - send requested blocks/transactions
+        let nh4 = node_handle.clone();
+        let p2p_clone = p2p.clone();
+        p2p.set_on_getdata(move |peer_id, object_type, hashes| {
+            use crate::p2p::messages::InventoryType;
+            
+            let state = nh4.lock().unwrap();
+            let p2p_inner = p2p_clone.clone();
+            
+            match object_type {
+                InventoryType::Block => {
+                    // Load and send requested blocks
+                    for hash_bytes in hashes {
+                        if let Ok(hash_hex) = hex::encode(&hash_bytes).parse::<String>() {
+                            // Try to load block from DB
+                            if let Ok(Some(block)) = state.bc.load_block(&hash_hex) {
+                                // Send block to peer
+                                let peer_id_clone = peer_id.clone();
+                                let p2p_for_send = p2p_inner.clone();
+                                tokio::spawn(async move {
+                                    p2p_for_send.send_block_to_peer(&peer_id_clone, &block).await;
+                                });
+                            }
+                        }
+                    }
+                }
+                InventoryType::Transaction => {
+                    // TODO: Send transactions from mempool
+                }
+                InventoryType::Error => {
+                    // Ignore error type
+                }
+            }
         });
     }
 
@@ -227,6 +314,9 @@ impl P2PService {
                             state.blockchain.push(block.clone());
                             state.orphan_blocks.remove(&hash);
                             processed_any = true;
+
+                            // Update P2P manager height
+                            state.p2p.set_my_height(block.header.index + 1);
 
                             // Remove transactions from mempool
                             let block_txids: std::collections::HashSet<String> = block

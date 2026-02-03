@@ -170,7 +170,8 @@ For issues and documentation, visit: https://github.com/yourorg/netcoin
 Set-Content -Path "$ReleaseDir/README.md" -Value $ReadmeContent
 
 # Create version info
-$Version = (Get-Content "Cargo.toml" | Select-String 'version = "(.+)"').Matches.Groups[1].Value
+$VersionMatch = Get-Content "node/Cargo.toml" | Select-String 'version = "(.+)"' | Select-Object -First 1
+$Version = if ($VersionMatch) { $VersionMatch.Matches.Groups[1].Value } else { "unknown" }
 $VersionInfo = @"
 NetCoin v$Version
 Built: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")

@@ -121,6 +121,22 @@ async fn main() {
 
     let node_handle = Arc::new(Mutex::new(node));
 
+    // Set current blockchain height in P2P manager
+    let my_height = {
+        let state = node_handle.lock().unwrap();
+        if let Some(tip_hash) = &state.bc.chain_tip {
+            if let Ok(Some(header)) = state.bc.load_header(tip_hash) {
+                header.index + 1
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+    p2p_service.manager().set_my_height(my_height);
+    info!("📊 Local blockchain height set to: {}", my_height);
+
     p2p_service
         .start("0.0.0.0:8335".to_string(), node_handle.clone())
         .await
@@ -479,7 +495,7 @@ async fn fetch_best_nodes_from_dns(
     limit: usize,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let dns_url =
-        std::env::var("DNS_SERVER_URL").unwrap_or_else(|_| "http://localhost:8053".to_string());
+        std::env::var("DNS_SERVER_URL").unwrap_or_else(|_| "http://172.30.1.89:8053".to_string());//"http://localhost:8053".to_string());
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5)) // 5초 타임아웃
         .build()?;
@@ -604,8 +620,8 @@ async fn fetch_best_nodes_from_dns(
 /// Register this node with the DNS server
 async fn register_with_dns(node_handle: NodeHandle) -> Result<(), Box<dyn std::error::Error>> {
     let dns_url =
-        std::env::var("DNS_SERVER_URL").unwrap_or_else(|_| "http://localhost:8053".to_string());
-    let node_address = std::env::var("NODE_ADDRESS").unwrap_or_else(|_| "127.0.0.1".to_string());
+        std::env::var("DNS_SERVER_URL").unwrap_or_else(|_| "http://172.30.1.89:8053".to_string());//"http://localhost:8053".to_string());
+    let node_address = std::env::var("NODE_ADDRESS").unwrap_or_else(|_| "172.30.1.89".to_string());//"127.0.0.1".to_string());
     let node_port = std::env::var("NODE_PORT").unwrap_or_else(|_| "8335".to_string());
 
     let height = {
@@ -645,6 +661,127 @@ async fn register_with_dns(node_handle: NodeHandle) -> Result<(), Box<dyn std::e
         let error_text = response.text().await?;
         Err(format!("Failed to register with DNS server: {}", error_text).into())
     }
+}
+
+/// Synchronize blockchain with peers
+async fn sync_blockchain(
+    node_handle: NodeHandle,
+    p2p_handle: Arc<netcoin_node::p2p::manager::PeerManager>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    info!("🔄 Starting blockchain synchronization...");
+
+    let my_height = {
+        let state = node_handle.lock().unwrap();
+        if let Some(tip_hash) = &state.bc.chain_tip {
+            if let Ok(Some(header)) = state.bc.load_header(tip_hash) {
+                header.index + 1
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+
+    info!("📊 Local blockchain height: {}", my_height);
+
+    // Get peer heights
+    let peer_heights = p2p_handle.get_peer_heights();
+    
+    if peer_heights.is_empty() {
+        info!("⚠️  No peers connected yet, skipping sync");
+        return Ok(());
+    }
+
+    let max_peer_height = peer_heights.values().max().copied().unwrap_or(0);
+    info!("📊 Maximum peer height: {}", max_peer_height);
+
+    if my_height >= max_peer_height {
+        info!("✅ Blockchain is already up to date (height: {})", my_height);
+        return Ok(());
+    }
+
+    let blocks_behind = max_peer_height - my_height;
+    info!("⬇️  Need to sync {} blocks (from {} to {})", blocks_behind, my_height, max_peer_height);
+
+    // For initial sync (when we have no blocks), request genesis block first
+    if my_height == 0 {
+        info!("🔄 Requesting genesis block from peers...");
+        // Request with empty locator to get blocks from the beginning
+        p2p_handle.request_headers_from_peers(vec![], None);
+    } else {
+        // Request headers from our current tip
+        let mut locator_hashes = Vec::new();
+        {
+            let state = node_handle.lock().unwrap();
+            if let Some(tip_hash) = &state.bc.chain_tip {
+                if let Ok(bytes) = hex::decode(tip_hash) {
+                    locator_hashes.push(bytes);
+                }
+            }
+        }
+        info!("🔄 Requesting headers from peers...");
+        p2p_handle.request_headers_from_peers(locator_hashes, None);
+    }
+
+    // Wait for blocks to arrive (give peers time to respond)
+    // Increase timeout for larger syncs
+    let sync_timeout = Duration::from_secs(60);
+    let sync_start = std::time::Instant::now();
+    let mut last_height = my_height;
+    let sync_timeout = Duration::from_secs(60);
+    let sync_start = std::time::Instant::now();
+    let mut last_height = my_height;
+    
+    loop {
+        sleep(Duration::from_secs(2)).await;
+        
+        let current_height = {
+            let state = node_handle.lock().unwrap();
+            if let Some(tip_hash) = &state.bc.chain_tip {
+                if let Ok(Some(header)) = state.bc.load_header(tip_hash) {
+                    header.index + 1
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        // Check if we made progress
+        if current_height > last_height {
+            info!("📥 Sync progress: {} / {} blocks", current_height, max_peer_height);
+            last_height = current_height;
+            
+            // Request more headers if we're still behind
+            if current_height < max_peer_height {
+                let mut locator_hashes = Vec::new();
+                {
+                    let state = node_handle.lock().unwrap();
+                    if let Some(tip_hash) = &state.bc.chain_tip {
+                        if let Ok(bytes) = hex::decode(tip_hash) {
+                            locator_hashes.push(bytes);
+                        }
+                    }
+                }
+                p2p_handle.request_headers_from_peers(locator_hashes, None);
+            }
+        }
+
+        if current_height >= max_peer_height {
+            info!("✅ Blockchain synchronized to height {}", current_height);
+            break;
+        }
+
+        if sync_start.elapsed() > sync_timeout {
+            info!("⚠️  Sync timeout reached. Current height: {} (target: {})", current_height, max_peer_height);
+            info!("💡 Will continue syncing in background via periodic header requests");
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 async fn start_services(
@@ -709,6 +846,7 @@ async fn start_services(
 
     let my_addr_clone = my_node_address.clone();
     let shutdown_flag_p2p = shutdown_flag.clone();
+    let p2p_handle_for_task = p2p_handle.clone();
     let p2p_task = tokio::spawn(async move {
         // Wait a bit for DNS registration to complete
         sleep(Duration::from_secs(2)).await;
@@ -718,7 +856,7 @@ async fn start_services(
             Ok(peer_addrs) => {
                 info!("🌐 Connecting to {} best nodes from DNS", peer_addrs.len());
                 for addr in peer_addrs {
-                    let p2p_clone = p2p_handle.clone();
+                    let p2p_clone = p2p_handle_for_task.clone();
                     let addr_clone = addr.clone();
                     tokio::spawn(async move {
                         if let Err(e) = p2p_clone.connect_peer(&addr_clone).await {
@@ -752,7 +890,7 @@ async fn start_services(
                         peer_addrs.len()
                     );
                     for addr in peer_addrs {
-                        let p2p_clone = p2p_handle.clone();
+                        let p2p_clone = p2p_handle_for_task.clone();
                         let addr_clone = addr.clone();
                         tokio::spawn(async move {
                             if let Err(e) = p2p_clone.connect_peer(&addr_clone).await {
@@ -782,13 +920,24 @@ async fn start_services(
     });
     task_handles.push(p2p_task);
 
+    // Wait for initial P2P connections to establish
+    info!("⏳ Waiting for P2P connections to establish...");
+    sleep(Duration::from_secs(5)).await;
+
+    // Step 5: Synchronize blockchain with peers
+    info!("📡 Step 5: Synchronizing blockchain with peers...");
+    if let Err(e) = sync_blockchain(node_handle.clone(), p2p_handle.clone()).await {
+        log::warn!("Blockchain sync encountered error: {}", e);
+    }
+
     let nh: Arc<Mutex<NodeState>> = node_handle.clone();
     // start HTTP server in background thread (warp is async so run in tokio)
     let server_handle = tokio::spawn(async move {
         run_server(nh).await;
     });
 
-    println!("🚀 mining starting...");
+    // Step 6: Start mining
+    println!("⛏️  Step 6: Starting mining...");
 
     // Mining loop - run in main task, not spawned
     mining_loop(node_handle.clone(), miner_address, shutdown_flag.clone()).await;
@@ -932,6 +1081,8 @@ async fn mining_loop(
         // Record mining start time for hashrate calculation
         let mining_start = std::time::Instant::now();
 
+        log::info!("⛏️  Starting mining task for block {} with difficulty {}...", index_snapshot, difficulty);
+
         // prepare parameters for blocking mining call
         let prev_hash = prev_hash.clone();
         let difficulty_local = difficulty;
@@ -988,8 +1139,12 @@ async fn mining_loop(
 
                         let block_to_broadcast = block.clone();
 
-                        state.blockchain.push(block);
+                        state.blockchain.push(block.clone());
                         // pending already cleared earlier
+                        
+                        // Update P2P manager height
+                        state.p2p.set_my_height(block.header.index + 1);
+                        
                         println!("✅ Block mined! Broadcasting...");
 
                         // -------------------------

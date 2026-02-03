@@ -47,6 +47,13 @@ pub struct PeerManager {
             >,
         >,
     >,
+    on_getdata: Arc<
+        Mutex<
+            Option<
+                Arc<dyn Fn(PeerId, InventoryType, Vec<Vec<u8>>) + Send + Sync>,
+            >,
+        >,
+    >,
 }
 
 impl PeerManager {
@@ -59,6 +66,7 @@ impl PeerManager {
             on_block: Arc::new(Mutex::new(None)),
             on_tx: Arc::new(Mutex::new(None)),
             on_getheaders: Arc::new(Mutex::new(None)),
+            on_getdata: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -81,6 +89,13 @@ impl PeerManager {
         F: Fn(Vec<Vec<u8>>, Option<Vec<u8>>) -> Vec<block::BlockHeader> + Send + Sync + 'static,
     {
         *self.on_getheaders.lock() = Some(Arc::new(cb));
+    }
+
+    pub fn set_on_getdata<F>(&self, cb: F)
+    where
+        F: Fn(PeerId, InventoryType, Vec<Vec<u8>>) + Send + Sync + 'static,
+    {
+        *self.on_getdata.lock() = Some(Arc::new(cb));
     }
 
     pub fn set_my_height(&self, height: u64) {
@@ -457,6 +472,9 @@ impl PeerManager {
                 hashes,
             } => {
                 info!("{} requested {} items", peer_id, hashes.len());
+                if let Some(cb) = &*self.on_getdata.lock() {
+                    (cb)(peer_id.clone(), object_type, hashes);
+                }
             }
 
             Block { block } => {
@@ -493,6 +511,12 @@ impl PeerManager {
         if let Some(tx) = self.peers.lock().get(peer_id) {
             let _ = tx.send(msg);
         }
+    }
+
+    pub async fn send_block_to_peer(&self, peer_id: &PeerId, block: &block::Block) {
+        self.send_to_peer(peer_id, P2pMessage::Block {
+            block: block.clone(),
+        });
     }
 
     pub fn load_saved_peers(&self) -> Vec<SavedPeer> {
