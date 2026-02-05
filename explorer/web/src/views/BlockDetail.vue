@@ -9,6 +9,12 @@
           <span class="value monospace">{{ block.hash }}</span>
         </div>
         <div class="detail-item">
+          <span class="label">Confirmations</span>
+          <span class="value" :class="getConfirmationClass(block.confirmations)">
+            {{ block.confirmations }} {{ getConfirmationStatus(block.confirmations) }}
+          </span>
+        </div>
+        <div class="detail-item">
           <span class="label">Previous Hash</span>
           <span class="value monospace">{{ block.previous_hash }}</span>
         </div>
@@ -71,6 +77,16 @@ export default {
       const date = new Date(timestamp);
       return date.toLocaleString("ko-KR");
     },
+    getConfirmationClass(confirmations) {
+      if (confirmations === 0) return 'status-unconfirmed';
+      if (confirmations < 6) return 'status-pending';
+      return 'status-confirmed';
+    },
+    getConfirmationStatus(confirmations) {
+      if (confirmations === 0) return '(Unconfirmed)';
+      if (confirmations < 6) return '(Low Confidence)';
+      return '(Confirmed)';
+    },
     goToBlocks() {
       this.$router.push("/blocks");
     },
@@ -122,6 +138,21 @@ h1 {
 .monospace {
   font-family: "Courier New", monospace;
   font-size: 0.85rem;
+}
+
+.status-unconfirmed {
+  color: #e74c3c;
+  font-weight: bold;
+}
+
+.status-pending {
+  color: #f39c12;
+  font-weight: bold;
+}
+
+.status-confirmed {
+  color: #27ae60;
+  font-weight: bold;
 }
 
 .actions {

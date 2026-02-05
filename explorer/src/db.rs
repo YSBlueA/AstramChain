@@ -50,7 +50,14 @@ impl ExplorerDB {
         let key = format!("b:{}", height);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let block: BlockInfo = serde_json::from_slice(&data)?;
+                let mut block: BlockInfo = serde_json::from_slice(&data)?;
+                // Calculate confirmations based on current chain height
+                let current_height = self.get_block_count()?;
+                block.confirmations = if current_height > height {
+                    current_height - height
+                } else {
+                    0
+                };
                 Ok(Some(block))
             }
             None => Ok(None),
@@ -137,7 +144,18 @@ impl ExplorerDB {
         let key = format!("t:{}", hash);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let tx: TransactionInfo = serde_json::from_slice(&data)?;
+                let mut tx: TransactionInfo = serde_json::from_slice(&data)?;
+                // Calculate confirmations if transaction is in a block
+                if let Some(block_height) = tx.block_height {
+                    let current_height = self.get_block_count()?;
+                    tx.confirmations = if current_height > block_height {
+                        Some(current_height - block_height)
+                    } else {
+                        Some(0)
+                    };
+                } else {
+                    tx.confirmations = None; // Pending transaction
+                }
                 Ok(Some(tx))
             }
             None => Ok(None),

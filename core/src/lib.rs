@@ -1,5 +1,6 @@
 pub mod block;
 pub mod blockchain;
+pub mod checkpoint;
 pub mod config;
 pub mod consensus;
 pub mod crypto;

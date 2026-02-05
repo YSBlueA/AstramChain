@@ -327,6 +327,7 @@ impl NodeRpcClient {
                     difficulty: block.header.difficulty,
                     nonce: block.header.nonce,
                     previous_hash: block.header.previous_hash.clone(),
+                    confirmations: 0, // Will be calculated when queried from DB
                 }
             })
             .collect();
@@ -384,6 +385,7 @@ impl NodeRpcClient {
                         timestamp,
                         block_height: Some(block.header.index),
                         status: "confirmed".to_string(),
+                        confirmations: Some(0), // Will be calculated when queried
                     });
 
                     // Coinbase outputs를 UTXO 맵에 추가
@@ -537,6 +539,7 @@ impl NodeRpcClient {
                         timestamp,
                         block_height: Some(block.header.index),
                         status: "confirmed".to_string(),
+                        confirmations: Some(0), // Will be calculated when queried
                     });
 
                     // 사용된 inputs를 UTXO 맵에서 제거

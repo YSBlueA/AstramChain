@@ -13,6 +13,19 @@ pub struct HealthResponse {
     pub timestamp: String,
 }
 
+/// Reorg alert information for security monitoring
+#[derive(Debug, Serialize)]
+pub struct ReorgAlert {
+    pub severity: String, // "warning" (depth 6-49) or "critical" (depth 50+)
+    pub depth: u64,
+    pub old_tip_height: u64,
+    pub old_tip_hash: String,
+    pub new_tip_height: u64,
+    pub new_tip_hash: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+
 #[derive(Debug, Deserialize)]
 pub struct PaginationParams {
     pub page: Option<u32>,

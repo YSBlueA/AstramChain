@@ -82,6 +82,12 @@
           </span>
         </div>
         <div class="detail-item">
+          <span class="label">Confirmations</span>
+          <span class="value" :class="getConfirmationClass(transaction.confirmations)">
+            {{ getConfirmationText(transaction.confirmations) }}
+          </span>
+        </div>
+        <div class="detail-item">
           <span class="label">Block Height</span>
           <span class="value">
             {{
@@ -242,6 +248,19 @@ export default {
       }
 
       return num.toLocaleString("en-US");
+    },
+    getConfirmationClass(confirmations) {
+      if (confirmations === null || confirmations === undefined) return 'status-unconfirmed';
+      if (confirmations === 0) return 'status-unconfirmed';
+      if (confirmations < 6) return 'status-pending';
+      return 'status-confirmed';
+    },
+    getConfirmationText(confirmations) {
+      if (confirmations === null || confirmations === undefined) return 'Pending (0 confirmations)';
+      if (confirmations === 0) return '0 (Unconfirmed)';
+      if (confirmations < 6) return `${confirmations} (Low Confidence)`;
+      return `${confirmations} (Confirmed)`;
+    },
     },
     goToTransactions() {
       this.$router.push("/transactions");
@@ -430,6 +449,21 @@ h1 {
 
 .coinbase-from {
   color: #f59e0b;
+  font-weight: bold;
+}
+
+.status-unconfirmed {
+  color: #e74c3c;
+  font-weight: bold;
+}
+
+.status-pending {
+  color: #f39c12;
+  font-weight: bold;
+}
+
+.status-confirmed {
+  color: #27ae60;
   font-weight: bold;
 }
 </style>

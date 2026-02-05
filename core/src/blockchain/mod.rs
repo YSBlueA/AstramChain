@@ -23,7 +23,10 @@ pub struct Blockchain {
     pub db: DB,
     pub chain_tip: Option<String>, // tip hash hex
     pub difficulty: u32,
-    pub block_interval: i64, // Target block generation interval (seconds)
+    pub block_interval: i64,  // Target block generation interval (seconds)
+    pub max_reorg_depth: u64, // Maximum allowed reorganization depth (security)
+    pub max_future_block_time: i64, // Maximum seconds a block can be in the future
+    pub enable_deep_reorg_alerts: bool, // Alert on deep reorgs (vs hard reject)
 }
 
 impl Blockchain {
@@ -107,7 +110,10 @@ impl Blockchain {
             db,
             chain_tip,
             difficulty,
-            block_interval: 120, // Target: 2 minutes per block
+            block_interval: 120,            // Target: 2 minutes per block
+            max_reorg_depth: 100, // Maximum 100 blocks deep reorganization (security limit)
+            max_future_block_time: 7200, // Max 2 hours in the future (clock drift tolerance)
+            enable_deep_reorg_alerts: true, // Alert on suspicious reorgs
         })
     }
 
@@ -197,12 +203,16 @@ impl Blockchain {
             // Load previous block to check difficulty progression
             let prev_key = format!("b:{}", block.header.previous_hash);
             if let Ok(Some(prev_bytes)) = self.db.get(prev_key.as_bytes()) {
-                if let Ok((prev_header, _)) = bincode::decode_from_slice::<BlockHeader, _>(&prev_bytes, *BINCODE_CONFIG) {
+                if let Ok((prev_header, _)) =
+                    bincode::decode_from_slice::<BlockHeader, _>(&prev_bytes, *BINCODE_CONFIG)
+                {
                     // Allow difficulty to change by at most 2x in either direction
                     let min_allowed = prev_header.difficulty.saturating_sub(2);
                     let max_allowed = prev_header.difficulty + 2;
-                    
-                    if block.header.difficulty < min_allowed || block.header.difficulty > max_allowed {
+
+                    if block.header.difficulty < min_allowed
+                        || block.header.difficulty > max_allowed
+                    {
                         return Err(anyhow!(
                             "difficulty at block {} out of allowed range: got {}, previous {}, allowed range: {}-{}",
                             block.header.index,
@@ -223,6 +233,11 @@ impl Blockchain {
             return Err(anyhow!("merkle mismatch"));
         }
 
+        // 4.5) Median-Time-Past validation (prevent timestamp manipulation)
+        if block.header.index > 0 {
+            self.validate_median_time_past(block)?;
+        }
+
         // 5) previous exists (unless genesis)
         if block.header.index > 0 {
             let prev_key = format!("b:{}", block.header.previous_hash);
@@ -240,6 +255,19 @@ impl Blockchain {
 
         // 🔒 Security: Validate block-level constraints
         crate::security::validate_block_security(&block)?;
+
+        // 🔒 Policy: Check against checkpoint policy (not consensus, but node policy)
+        if !crate::checkpoint::validate_against_checkpoints(block.header.index, &block.hash) {
+            log::warn!(
+                "Block {} at height {} conflicts with checkpoint policy - rejecting",
+                &block.hash[..16],
+                block.header.index
+            );
+            return Err(anyhow!(
+                "Block violates checkpoint policy at height {}",
+                block.header.index
+            ));
+        }
 
         // For coinbase check
         if block.transactions.is_empty() {
@@ -441,6 +469,59 @@ impl Blockchain {
         Ok(0)
     }
 
+    /// Validate Median-Time-Past (MTP) - block timestamp must be greater than median of last 11 blocks
+    /// This prevents miners from lying about timestamps to manipulate difficulty
+    fn validate_median_time_past(&self, block: &Block) -> Result<()> {
+        const MTP_SPAN: usize = 11; // Bitcoin uses 11 blocks
+
+        let mut timestamps = Vec::new();
+        let mut current_hash = block.header.previous_hash.clone();
+
+        // Collect up to 11 previous block timestamps
+        for _ in 0..MTP_SPAN {
+            if let Some(blk) = self.load_block(&current_hash)? {
+                timestamps.push(blk.header.timestamp);
+                if blk.header.index == 0 {
+                    break; // Reached genesis
+                }
+                current_hash = blk.header.previous_hash.clone();
+            } else {
+                break;
+            }
+        }
+
+        if timestamps.is_empty() {
+            // No previous blocks, skip MTP check
+            return Ok(());
+        }
+
+        // Calculate median
+        timestamps.sort_unstable();
+        let median = if timestamps.len() % 2 == 0 {
+            (timestamps[timestamps.len() / 2 - 1] + timestamps[timestamps.len() / 2]) / 2
+        } else {
+            timestamps[timestamps.len() / 2]
+        };
+
+        // Block timestamp must be strictly greater than MTP
+        if block.header.timestamp <= median {
+            return Err(anyhow!(
+                "Block timestamp {} violates Median-Time-Past {} (must be > MTP)",
+                block.header.timestamp,
+                median
+            ));
+        }
+
+        log::debug!(
+            "MTP validation passed: block_time={}, median={}, samples={}",
+            block.header.timestamp,
+            median,
+            timestamps.len()
+        );
+
+        Ok(())
+    }
+
     /// Calculate adjusted difficulty based on recent block times
     /// Adjustment period: every 30 blocks
     /// Target: 120 seconds per block (2 minutes)
@@ -449,6 +530,13 @@ impl Blockchain {
         const ADJUSTMENT_INTERVAL: u64 = 30; // Adjust every 30 blocks
         const MIN_DIFFICULTY: u32 = 1;
         const MAX_DIFFICULTY: u32 = 10; // Reduced from 32
+        const SLOW_START_BLOCKS: u64 = 100; // First 100 blocks use slow start
+
+        // 🔒 Slow Start: Keep difficulty low for first N blocks to allow network to bootstrap
+        if current_index < SLOW_START_BLOCKS {
+            let slow_start_diff = 1 + (current_index / 20) as u32; // Gradually increase from 1
+            return Ok(slow_start_diff.min(3)); // Max difficulty 3 during slow start
+        }
 
         // No adjustment needed for early blocks
         if current_index < ADJUSTMENT_INTERVAL {
@@ -829,9 +917,38 @@ impl Blockchain {
             }
 
             let block = block.unwrap();
+
+            // 🔒 Security: Validate difficulty is reasonable (prevent invalid blocks)
+            if block.header.difficulty == 0 {
+                return Err(anyhow!(
+                    "Invalid block with difficulty 0 at height {}",
+                    block.header.index
+                ));
+            }
+
+            if block.header.difficulty > 32 {
+                return Err(anyhow!(
+                    "Invalid block with excessive difficulty {} at height {}",
+                    block.header.difficulty,
+                    block.header.index
+                ));
+            }
+
             // Each difficulty level represents 16x more work (hexadecimal)
             // Work = 16^difficulty
-            let block_work = 16u64.saturating_pow(block.header.difficulty);
+            // Use checked operations to prevent overflow
+            let block_work = match 16u64.checked_pow(block.header.difficulty) {
+                Some(work) => work,
+                None => {
+                    log::warn!(
+                        "Work calculation overflow at difficulty {}, using max u64",
+                        block.header.difficulty
+                    );
+                    u64::MAX
+                }
+            };
+
+            // Saturating add to prevent overflow
             total_work = total_work.saturating_add(block_work);
 
             if block.header.index == 0 {
@@ -934,6 +1051,47 @@ impl Blockchain {
 
         let ancestor = ancestor.unwrap();
         log::info!("Common ancestor: {}", &ancestor[..16]);
+
+        // 🔒 Security: Check reorganization depth to prevent 51% attacks
+        let current_header = self
+            .load_header(&current_tip)?
+            .ok_or_else(|| anyhow!("Cannot load current tip header"))?;
+        let ancestor_header = self
+            .load_header(&ancestor)?
+            .ok_or_else(|| anyhow!("Cannot load ancestor header"))?;
+
+        let current_height = current_header.index;
+        let fork_point_height = ancestor_header.index;
+        let reorg_depth = current_height - fork_point_height;
+
+        // 🔒 Security: Validate reorganization depth doesn't exceed consensus limit
+        crate::security::validate_reorg_depth(
+            current_height,
+            fork_point_height,
+            self.max_reorg_depth,
+        )?;
+
+        // 🔒 Policy: Check if reorg conflicts with checkpoint policy
+        let (checkpoint_allowed, checkpoint_reason) = 
+            crate::checkpoint::check_reorg_against_checkpoints(reorg_depth, current_height);
+        
+        if !checkpoint_allowed {
+            log::error!(
+                "🚨 Reorganization REJECTED by checkpoint policy: {}",
+                checkpoint_reason.unwrap_or_else(|| "Unknown reason".to_string())
+            );
+            return Err(anyhow!(
+                "Reorganization violates checkpoint policy (depth: {}, current height: {})",
+                reorg_depth,
+                current_height
+            ));
+        }
+
+        log::info!(
+            "✅ Reorganization passes checkpoint policy check (depth: {}, height: {})",
+            reorg_depth,
+            current_height
+        );
 
         // Collect blocks to rollback (from current tip to ancestor)
         let mut rollback_blocks = Vec::new();

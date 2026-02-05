@@ -21,6 +21,9 @@ pub struct BlockInfo {
     pub difficulty: u32,
     pub nonce: u64,
     pub previous_hash: String,
+    /// Number of confirmations (blocks built on top of this block)
+    /// 0 = unconfirmed, 1-5 = low confidence, 6+ = confirmed
+    pub confirmations: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +41,9 @@ pub struct TransactionInfo {
     pub timestamp: DateTime<Utc>,
     pub block_height: Option<u64>,
     pub status: String, // "confirmed", "pending"
+    /// Number of confirmations (None if pending, Some(n) if in a block)
+    /// 0 = just mined, 6+ = safe/confirmed
+    pub confirmations: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

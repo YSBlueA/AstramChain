@@ -10,6 +10,8 @@ pub const MIN_OUTPUT_VALUE: u64 = 1_000_000_000_000; // 1 Twei (0.000001 NTC) mi
 pub const MAX_TX_INPUTS: usize = 1000; // Prevent huge transactions
 pub const MAX_TX_OUTPUTS: usize = 1000;
 pub const MAX_FUTURE_TIMESTAMP: i64 = 7200; // 2 hours tolerance
+pub const MAX_REORG_DEPTH: u64 = 100; // Maximum blocks to reorganize (51% attack protection)
+pub const GENESIS_TIMESTAMP: i64 = 1738800000; // ~Feb 6, 2026 - blocks before this are invalid
 
 /// Validate transaction security constraints
 pub fn validate_transaction_security(tx: &Transaction, block_timestamp: i64) -> Result<()> {
@@ -104,6 +106,15 @@ pub fn validate_block_security(block: &Block) -> Result<()> {
         ));
     }
 
+    // Prevent pre-genesis blocks
+    if block.header.timestamp < GENESIS_TIMESTAMP {
+        return Err(anyhow!(
+            "block timestamp predates genesis: {} < {}",
+            block.header.timestamp,
+            GENESIS_TIMESTAMP
+        ));
+    }
+
     // 3. Coinbase must be first and only coinbase
     let coinbase = &block.transactions[0];
     if !coinbase.inputs.is_empty() {
@@ -114,6 +125,34 @@ pub fn validate_block_security(block: &Block) -> Result<()> {
         if tx.inputs.is_empty() {
             return Err(anyhow!("non-first transaction {} is coinbase-like", idx));
         }
+    }
+
+    Ok(())
+}
+
+/// Check if reorganization depth exceeds safety limit
+/// This prevents deep chain reorganizations that could indicate a 51% attack
+pub fn validate_reorg_depth(
+    current_height: u64,
+    fork_point_height: u64,
+    max_depth: u64,
+) -> Result<()> {
+    let reorg_depth = current_height.saturating_sub(fork_point_height);
+
+    if reorg_depth > max_depth {
+        return Err(anyhow!(
+            "🚨 REORG DEPTH EXCEEDED: attempted to reorganize {} blocks (max allowed: {}). This may indicate a 51% attack!",
+            reorg_depth,
+            max_depth
+        ));
+    }
+
+    if reorg_depth > max_depth / 2 {
+        log::warn!(
+            "⚠️  Large reorganization detected: {} blocks (limit: {}). Monitor for potential attack.",
+            reorg_depth,
+            max_depth
+        );
     }
 
     Ok(())
@@ -217,5 +256,45 @@ mod tests {
         let result = validate_transaction_security(&tx, 100);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("too large"));
+    }
+
+    #[test]
+    fn test_reorg_depth_validation() {
+        // Safe reorganization
+        assert!(validate_reorg_depth(110, 100, 100).is_ok());
+
+        // At limit
+        assert!(validate_reorg_depth(200, 100, 100).is_ok());
+
+        // Exceeds limit - should reject
+        assert!(validate_reorg_depth(210, 100, 100).is_err());
+
+        // No reorg needed
+        assert!(validate_reorg_depth(100, 100, 100).is_ok());
+    }
+
+    #[test]
+    fn test_genesis_timestamp_validation() {
+        use crate::block::{Block, BlockHeader};
+        use crate::transaction::Transaction;
+
+        let mut block = Block {
+            header: BlockHeader {
+                index: 1,
+                previous_hash: "0".repeat(64),
+                merkle_root: "0".repeat(64),
+                timestamp: GENESIS_TIMESTAMP - 1000, // Before genesis
+                nonce: 0,
+                difficulty: 1,
+            },
+            transactions: vec![Transaction::coinbase("addr", U256::from(50))],
+            hash: "0".repeat(64),
+        };
+
+        assert!(validate_block_security(&block).is_err());
+
+        // After genesis should be OK
+        block.header.timestamp = GENESIS_TIMESTAMP + 1000;
+        assert!(validate_block_security(&block).is_ok());
     }
 }
