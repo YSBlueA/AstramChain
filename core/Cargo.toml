@@ -34,3 +34,5 @@ libp2p = { version = "0.56.0", features = [
     "kad",
 ] }
 once_cell = "1.21.3"
+lazy_static = "1.5"
+parking_lot = "0.12"

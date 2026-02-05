@@ -36,6 +36,11 @@ pub const HANDSHAKE_TIMEOUT_SECS: u64 = 30; // Handshake must complete within 30
 pub const MAX_INV_PER_MESSAGE: usize = 50000; // Maximum inventory items per message
 pub const BLOCK_ANNOUNCE_RATE_LIMIT: u64 = 10; // Max block announcements per minute per peer
 
+// 🔒 Security: Peer diversity for Eclipse attack protection
+pub const MAX_PEERS_PER_SUBNET_24: usize = 2; // Max peers from same /24 subnet
+pub const MAX_PEERS_PER_SUBNET_16: usize = 4; // Max peers from same /16 subnet
+pub const MIN_OUTBOUND_SUBNET_DIVERSITY: usize = 3; // Require connections to at least 3 different /16 subnets
+
 type Shared<T> = Arc<Mutex<T>>;
 pub struct PeerManager {
     peers: Shared<HashMap<PeerId, UnboundedSender<P2pMessage>>>,
@@ -128,6 +133,85 @@ impl PeerManager {
         self.peer_handshakes.lock().clone()
     }
 
+    /// 🔒 Security: Extract subnet prefixes from IP address for diversity checking
+    fn get_subnet_prefixes(ip: &str) -> Option<(String, String)> {
+        let parts: Vec<&str> = ip.split('.').collect();
+        if parts.len() >= 3 {
+            let subnet_24 = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+            let subnet_16 = format!("{}.{}", parts[0], parts[1]);
+            Some((subnet_24, subnet_16))
+        } else {
+            None
+        }
+    }
+
+    /// 🔒 Security: Check if adding a peer from this IP would violate subnet diversity rules
+    /// Returns (allowed, reason) - protects against Eclipse attacks
+    fn check_subnet_diversity(&self, ip: &str) -> (bool, Option<String>) {
+        let (subnet_24, subnet_16) = match Self::get_subnet_prefixes(ip) {
+            Some(subnets) => subnets,
+            None => return (true, None), // Can't parse, allow
+        };
+
+        // Count existing peers in same subnets
+        let peer_ips = self.peer_ips.lock();
+        let mut subnet_24_count = 0;
+        let mut subnet_16_count = 0;
+
+        for existing_ip in peer_ips.keys() {
+            if let Some((existing_24, existing_16)) = Self::get_subnet_prefixes(existing_ip) {
+                if existing_24 == subnet_24 {
+                    subnet_24_count += 1;
+                }
+                if existing_16 == subnet_16 {
+                    subnet_16_count += 1;
+                }
+            }
+        }
+
+        // Check /24 subnet limit
+        if subnet_24_count >= MAX_PEERS_PER_SUBNET_24 {
+            return (
+                false,
+                Some(format!(
+                    "Too many peers from subnet {}.0/24 ({} peers, max: {})",
+                    subnet_24, subnet_24_count, MAX_PEERS_PER_SUBNET_24
+                )),
+            );
+        }
+
+        // Check /16 subnet limit
+        if subnet_16_count >= MAX_PEERS_PER_SUBNET_16 {
+            return (
+                false,
+                Some(format!(
+                    "Too many peers from subnet {}.0.0/16 ({} peers, max: {})",
+                    subnet_16, subnet_16_count, MAX_PEERS_PER_SUBNET_16
+                )),
+            );
+        }
+
+        (true, None)
+    }
+
+    /// 🔒 Security: Get current subnet diversity metrics
+    pub fn get_subnet_diversity_stats(&self) -> (usize, usize) {
+        use std::collections::HashSet;
+
+        let peer_ips = self.peer_ips.lock();
+        let mut subnet_24s = HashSet::new();
+        let mut subnet_16s = HashSet::new();
+
+        for ip in peer_ips.keys() {
+            if let Some((subnet_24, subnet_16)) = Self::get_subnet_prefixes(ip) {
+                subnet_24s.insert(subnet_24);
+                subnet_16s.insert(subnet_16);
+            }
+        }
+
+        (subnet_24s.len(), subnet_16s.len())
+    }
+
     /// inbound connections accept loop (spawn)
     pub async fn start_listener(self: Arc<Self>, bind_addr: &str) -> anyhow::Result<()> {
         let listener = TcpListener::bind(bind_addr).await?;
@@ -177,10 +261,23 @@ impl PeerManager {
             return Ok(()); // Silently drop connection
         }
 
+        // 🔒 Security: Check subnet diversity to prevent Eclipse attacks
+        let (diversity_ok, diversity_reason) = self.check_subnet_diversity(&peer_ip);
+        if !diversity_ok {
+            warn!(
+                "🚫 Rejecting connection from {} - subnet diversity violation: {}",
+                peer_id,
+                diversity_reason.unwrap_or_else(|| "Unknown".to_string())
+            );
+            return Ok(()); // Silently drop connection
+        }
+
+        let (subnet_24_count, subnet_16_count) = self.get_subnet_diversity_stats();
         info!(
-            "✅ Accepting connection from {} ({} existing connections from this IP)",
-            peer_id, peer_count
+            "✅ Accepting connection from {} ({} existing from IP, diversity: {}/24 subnets, {}/16 subnets)",
+            peer_id, peer_count, subnet_24_count, subnet_16_count
         );
+
         self.spawn_peer_loop(stream, peer_id).await?;
         Ok(())
     }

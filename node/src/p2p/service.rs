@@ -321,6 +321,10 @@ impl P2PService {
                                 
                                 // Add to mempool
                                 state.pending.push(tx.clone());
+                                
+                                // 🔒 Security: Enforce mempool limits after adding transaction
+                                state.enforce_mempool_limit();
+                                
                                 info!("📝 Mempool size: {} transactions", state.pending.len());
                                 
                                 true // Should relay to other peers

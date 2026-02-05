@@ -362,6 +362,8 @@ All 10 security features are now fully implemented:
 
 ## Security Audit Checklist
 
+**Core Features (v1.0 - v2.0):**
+
 - [x] Work calculation overflow protection
 - [x] Deep reorg depth limits
 - [x] Median-Time-Past timestamp validation
@@ -373,12 +375,149 @@ All 10 security features are now fully implemented:
 - [x] Network IP limiting and message validation
 - [x] Explorer confirmation display
 
+**Enhanced Features (v2.1):**
+
+- [x] Block validation failure tracking & statistics
+- [x] Mempool DoS protection with size/fee-based eviction
+- [x] Peer subnet diversity enforcement (Eclipse attack protection)
+
 **Legend:**
 
 - [x] Fully implemented and operational
 - [ ] Not implemented
 
-**Status: ALL 10 SECURITY FEATURES COMPLETE ✅**
+**Status: 13/13 SECURITY FEATURES COMPLETE ✅**
+
+## 11. Validation Failure Tracking & Statistics
+
+**Implementation:** `core/src/security.rs`, `core/src/blockchain/mod.rs`
+
+**Security Features:**
+
+- 17 categorized failure reasons with enum codes
+- Atomic counter statistics per failure type
+- Real-time metrics via `/status` API endpoint
+- Structured logging for debugging attacks
+- Zero-overhead lazy_static global stats
+
+**Failure Categories:**
+
+```rust
+HashMismatch, InvalidPoW, DifficultyOutOfRange, MerkleRootMismatch,
+TimestampTooOld, TimestampTooFuture, PreviousNotFound, EmptyBlock,
+InvalidCoinbase, SignatureFailure, UtxoNotFound, UtxoOwnershipFailure,
+DuplicateInput, InsufficientFee, CheckpointViolation, SecurityConstraint
+```
+
+**Protection Against:**
+
+- Blind attacks (visibility into attack patterns)
+- Network reconnaissance (track what attackers probe)
+- Performance degradation (identify bottleneck validations)
+
+**Code Location:**
+
+- [core/src/security.rs](core/src/security.rs#L19-L148)
+- [core/src/blockchain/mod.rs](core/src/blockchain/mod.rs) - Integrated at validation points
+
+## 12. Mempool DoS Protection
+
+**Implementation:** `node/src/lib.rs::enforce_mempool_limit()`
+
+**Security Features:**
+
+- Transaction count limit: 10,000 (`MAX_MEMPOOL_SIZE`)
+- Total size limit: 300MB (`MAX_MEMPOOL_BYTES`)
+- Time-based expiry: 24 hours (`MEMPOOL_EXPIRY_TIME`)
+- Fee-rate prioritization: Low-fee transactions evicted first
+- Minimum relay fee: 1 Gwei/byte (`MIN_RELAY_FEE_PER_BYTE`)
+- Automatic enforcement on every transaction addition
+
+**Eviction Strategy:**
+
+1. Remove transactions older than 24 hours
+2. Sort remaining by fee-per-byte (ascending)
+3. Evict lowest-fee txs until under count limit
+4. Continue eviction until under byte-size limit
+
+**Protection Against:**
+
+- Memory exhaustion via transaction spam
+- Low-fee transaction flooding
+- State bloat attacks
+- Resource starvation
+
+**Code Location:**
+
+- [node/src/lib.rs](node/src/lib.rs#L77-L168) - Enforcement logic
+- [node/src/main.rs](node/src/main.rs) - Applied after block failures and mining errors
+- [node/src/p2p/service.rs](node/src/p2p/service.rs) - Applied on P2P transaction receipt
+
+## 13. Peer Diversity & Eclipse Attack Protection
+
+**Implementation:** `node/src/p2p/manager.rs`
+
+**Security Features:**
+
+- **Subnet diversity limits:**
+  - Max 2 peers per /24 subnet (`MAX_PEERS_PER_SUBNET_24`)
+  - Max 4 peers per /16 subnet (`MAX_PEERS_PER_SUBNET_16`)
+  - Minimum 3 different /16 subnets for outbound (`MIN_OUTBOUND_SUBNET_DIVERSITY`)
+- **Automatic enforcement:**
+  - Connection rejection on subnet limit violation
+  - Real-time diversity metrics tracking
+  - Logged warnings with subnet information
+
+**Attack Prevention:**
+
+- **Eclipse attacks:** Prevents attacker from monopolizing connections
+- **Sybil attacks:** Limits multiple identities from same network
+- **Network partitioning:** Ensures geographic/ISP diversity
+- **Targeted isolation:** Stops subnet-based node isolation
+
+**Metrics Available:**
+
+- Unique /24 subnets connected
+- Unique /16 subnets connected
+- Exposed via `/status` API endpoint
+
+**Code Location:** [node/src/p2p/manager.rs](node/src/p2p/manager.rs#L151-L213)
+
+## Enhanced Security Constants
+
+### Mempool Protection (`node/src/lib.rs`)
+
+```rust
+pub const MAX_MEMPOOL_SIZE: usize = 10000;
+pub const MAX_MEMPOOL_BYTES: usize = 300_000_000; // 300MB
+pub const MEMPOOL_EXPIRY_TIME: i64 = 86400; // 24 hours
+pub const MIN_RELAY_FEE_PER_BYTE: u64 = 1_000_000; // 1 Gwei
+```
+
+### Subnet Diversity (`node/src/p2p/manager.rs`)
+
+```rust
+pub const MAX_PEERS_PER_SUBNET_24: usize = 2;
+pub const MAX_PEERS_PER_SUBNET_16: usize = 4;
+pub const MIN_OUTBOUND_SUBNET_DIVERSITY: usize = 3;
+```
+
+## Testing Recommendations (Extended)
+
+5. **Validation Statistics:**
+   - Send blocks with invalid PoW, check stats increment
+   - Send blocks with wrong timestamps, verify categorization
+   - Verify `/status` API shows failure breakdown
+
+6. **Mempool Stress Testing:**
+   - Send 10,001 transactions, verify eviction
+   - Send 500MB of low-fee txs, check byte-limit enforcement
+   - Wait 24+ hours, verify expired tx removal
+
+7. **Subnet Diversity:**
+   - Connect 3+ peers from same /24, verify 3rd rejected
+   - Connect 5+ peers from same /16, verify 5th rejected
+   - Verify diversity metrics in `/status` endpoint
 
 ## Security Contact
 
@@ -399,3 +538,23 @@ For security issues or vulnerabilities, please contact the development team thro
   - **Checkpoint integration:** Applied to block validation and reorganization
   - All 10 security features now fully operational
   - Production-ready security posture achieved
+
+- **v2.1 (2025-02-05):** Advanced monitoring and Eclipse protection ✅
+  - **Validation failure tracking:** 17 categorized failure reasons with atomic statistics
+  - **Mempool DoS protection:** Triple-layer defense (10K count, 300MB size, 24h expiry)
+  - **Peer subnet diversity:** /24 and /16 limits prevent Eclipse attacks
+
+  **New security constants:**
+  - `MAX_MEMPOOL_SIZE = 10000`
+  - `MAX_MEMPOOL_BYTES = 300_000_000`
+  - `MAX_PEERS_PER_SUBNET_24 = 2`
+  - `MAX_PEERS_PER_SUBNET_16 = 4`
+  - `MIN_OUTBOUND_SUBNET_DIVERSITY = 3`
+
+  **New API metrics in /status endpoint:**
+  - `validation_failures_total`: Total failed validations
+  - `validation_failures`: Array with per-category breakdown
+  - `mempool.max_size` and `mempool.max_bytes`: Mempool limits
+  - `network.subnet_diversity`: Unique subnet counts (IPv4 /24 and /16)
+
+  **Status:** 13/13 features complete ✅

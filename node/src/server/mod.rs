@@ -204,6 +204,13 @@ pub async fn run_server(node: NodeHandle) {
             let miner_address = state.miner_address.lock().unwrap().clone();
             let wallet_balance = state.bc.get_address_balance_from_db(&miner_address).unwrap_or(U256::zero());
 
+            // Get validation statistics
+            let validation_stats = netcoin_core::security::VALIDATION_STATS.get_stats();
+            let total_failures: u64 = validation_stats.iter().map(|(_, count)| count).sum();
+
+            // Get subnet diversity metrics
+            let (subnet_24_count, subnet_16_count) = state.p2p.get_subnet_diversity_stats();
+
             log::info!(
                 "🔍 Status requested - Height: {}, Peers: {}, Pending TX: {}, Mining: {}",
                 block_height,
@@ -227,10 +234,16 @@ pub async fn run_server(node: NodeHandle) {
                 "mempool": {
                     "pending_transactions": pending_tx,
                     "seen_transactions": seen_tx,
+                    "max_size": crate::MAX_MEMPOOL_SIZE,
+                    "max_bytes": crate::MAX_MEMPOOL_BYTES,
                 },
                 "network": {
                     "connected_peers": connected_peers,
                     "peer_heights": peer_heights,
+                    "subnet_diversity": {
+                        "unique_24_subnets": subnet_24_count,
+                        "unique_16_subnets": subnet_16_count,
+                    }
                 },
                 "mining": {
                     "active": is_mining,
@@ -241,6 +254,12 @@ pub async fn run_server(node: NodeHandle) {
                 "wallet": {
                     "address": miner_address,
                     "balance": format!("0x{:x}", wallet_balance),
+                },
+                "security": {
+                    "validation_failures_total": total_failures,
+                    "validation_failures": validation_stats.into_iter()
+                        .filter(|(_, count)| *count > 0)
+                        .collect::<Vec<_>>(),
                 },
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             })))

@@ -17,8 +17,7 @@ use netcoin_node::server::run_server;
 use primitive_types::U256;
 use serde::Deserialize;
 use serde_json::Value;
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering as OtherOrdering;
@@ -1265,6 +1264,8 @@ async fn mining_loop(
                         for tx in block.transactions.into_iter().skip(1) {
                             state.pending.push(tx);
                         }
+                        // 🔒 Security: Enforce mempool limits
+                        state.enforce_mempool_limit();
                     }
                 }
             }
@@ -1288,6 +1289,8 @@ async fn mining_loop(
                     for tx in snapshot_txs.into_iter() {
                         state.pending.push(tx);
                     }
+                    // 🔒 Security: Enforce mempool limits
+                    state.enforce_mempool_limit();
                 }
             }
         }
