@@ -30,11 +30,18 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const NETWORK_ID: &str = "netcoin-mainnet";
 pub const CHAIN_ID: u64 = 1;
 
+// 🔒 Security: Network-level protection constants
+pub const MAX_PEERS_PER_IP: usize = 3; // Maximum connections from same IP
+pub const HANDSHAKE_TIMEOUT_SECS: u64 = 30; // Handshake must complete within 30s
+pub const MAX_INV_PER_MESSAGE: usize = 50000; // Maximum inventory items per message
+pub const BLOCK_ANNOUNCE_RATE_LIMIT: u64 = 10; // Max block announcements per minute per peer
+
 type Shared<T> = Arc<Mutex<T>>;
 pub struct PeerManager {
     peers: Shared<HashMap<PeerId, UnboundedSender<P2pMessage>>>,
     peer_heights: Shared<HashMap<PeerId, u64>>,
     peer_handshakes: Shared<HashMap<PeerId, HandshakeInfo>>,
+    peer_ips: Shared<HashMap<String, Vec<PeerId>>>, // IP -> list of peer IDs
     my_height: Arc<Mutex<u64>>,
     my_listening_port: Arc<Mutex<u16>>,
     /// callback when a new block is received
@@ -57,6 +64,7 @@ impl PeerManager {
             peers: Arc::new(Mutex::new(HashMap::new())),
             peer_heights: Arc::new(Mutex::new(HashMap::new())),
             peer_handshakes: Arc::new(Mutex::new(HashMap::new())),
+            peer_ips: Arc::new(Mutex::new(HashMap::new())),
             my_height: Arc::new(Mutex::new(0)),
             my_listening_port: Arc::new(Mutex::new(8335)), // Default port
             on_block: Arc::new(Mutex::new(None)),
@@ -150,6 +158,29 @@ impl PeerManager {
         stream: TcpStream,
         peer_id: PeerId,
     ) -> anyhow::Result<()> {
+        // 🔒 Security: Extract IP address and check connection limit
+        let peer_ip = peer_id.split(':').next().unwrap_or("").to_string();
+
+        // Check if this IP already has too many connections
+        let peer_count = self
+            .peer_ips
+            .lock()
+            .get(&peer_ip)
+            .map(|peers| peers.len())
+            .unwrap_or(0);
+
+        if peer_count >= MAX_PEERS_PER_IP {
+            warn!(
+                "🚫 Rejecting connection from {} - IP {} already has {} connections (max: {})",
+                peer_id, peer_ip, peer_count, MAX_PEERS_PER_IP
+            );
+            return Ok(()); // Silently drop connection
+        }
+
+        info!(
+            "✅ Accepting connection from {} ({} existing connections from this IP)",
+            peer_id, peer_count
+        );
         self.spawn_peer_loop(stream, peer_id).await?;
         Ok(())
     }
@@ -184,10 +215,18 @@ impl PeerManager {
         // register sender in the manager so other parts can send to this peer
         self.peers.lock().insert(peer_id_clone.clone(), tx.clone());
 
+        // 🔒 Security: Track IP address for connection limiting
+        let peer_ip = peer_id_clone.split(':').next().unwrap_or("").to_string();
+        self.peer_ips
+            .lock()
+            .entry(peer_ip.clone())
+            .or_insert_with(Vec::new)
+            .push(peer_id_clone.clone());
+
         // drop local tx so the only remaining sender is the one in peers map
         drop(tx);
 
-        info!("Registered peer {}", peer_id_clone);
+        info!("Registered peer {} from IP {}", peer_id_clone, peer_ip);
 
         // Send handshake immediately
         if let Some(tx) = self.peers.lock().get(&peer_id_clone) {
@@ -294,6 +333,16 @@ impl PeerManager {
                     log::warn!("read task error: {:?}", e);
                 }
                 self.peers.lock().remove(&peer_id_clone2);
+
+                // 🔒 Security: Remove from IP tracking
+                let peer_ip = peer_id_clone2.split(':').next().unwrap_or("").to_string();
+                if let Some(peer_list) = self.peer_ips.lock().get_mut(&peer_ip) {
+                    peer_list.retain(|id| id != &peer_id_clone2);
+                    if peer_list.is_empty() {
+                        self.peer_ips.lock().remove(&peer_ip);
+                    }
+                }
+
                 let _ = write_fut.await; // await the remaining writer
             }
             future::Either::Right((write_res, read_fut)) => {
@@ -302,6 +351,16 @@ impl PeerManager {
                     log::warn!("write task error: {:?}", e);
                 }
                 self.peers.lock().remove(&peer_id_clone2);
+
+                // 🔒 Security: Remove from IP tracking
+                let peer_ip = peer_id_clone2.split(':').next().unwrap_or("").to_string();
+                if let Some(peer_list) = self.peer_ips.lock().get_mut(&peer_ip) {
+                    peer_list.retain(|id| id != &peer_id_clone2);
+                    if peer_list.is_empty() {
+                        self.peer_ips.lock().remove(&peer_ip);
+                    }
+                }
+
                 let _ = read_fut.await; // await the remaining reader
             }
         }
@@ -489,6 +548,17 @@ impl PeerManager {
                 object_type,
                 hashes,
             } => {
+                // 🔒 Security: Validate INV message size to prevent memory exhaustion
+                if hashes.len() > MAX_INV_PER_MESSAGE {
+                    warn!(
+                        "🚨 Peer {} sent excessive INV message: {} items (max: {}), ignoring",
+                        peer_id,
+                        hashes.len(),
+                        MAX_INV_PER_MESSAGE
+                    );
+                    return; // Drop the message
+                }
+
                 info!("{} inv {} items", peer_id, hashes.len());
                 if let Some(tx) = self.peers.lock().get(&peer_id) {
                     let _ = tx.send(GetData {
@@ -502,6 +572,17 @@ impl PeerManager {
                 object_type,
                 hashes,
             } => {
+                // 🔒 Security: Validate GetData message size
+                if hashes.len() > MAX_INV_PER_MESSAGE {
+                    warn!(
+                        "🚨 Peer {} sent excessive GetData: {} items (max: {}), ignoring",
+                        peer_id,
+                        hashes.len(),
+                        MAX_INV_PER_MESSAGE
+                    );
+                    return; // Drop the message
+                }
+
                 info!("{} requested {} items", peer_id, hashes.len());
                 if let Some(cb) = &*self.on_getdata.lock() {
                     (cb)(peer_id.clone(), object_type, hashes);

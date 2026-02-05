@@ -162,6 +162,7 @@ impl P2PService {
                             block.header.index, block.hash
                         );
                         state.blockchain.push(block.clone());
+                        state.enforce_memory_limit(); // 🔒 Security: Enforce memory limit
 
                         // Update P2P manager height
                         state.p2p.set_my_height(block.header.index + 1);
@@ -206,8 +207,31 @@ impl P2PService {
                         let error_msg = format!("{:?}", e);
                         
                         if error_msg.contains("previous header not found") {
-                            // This is an orphan block - save it for later
+                            // 🔒 Security: Check orphan pool size limit before adding
                             let now = chrono::Utc::now().timestamp();
+                            
+                            if state.orphan_blocks.len() >= crate::MAX_ORPHAN_BLOCKS {
+                                warn!(
+                                    "⚠️  Orphan pool full ({} blocks), dropping oldest orphan to accept new one",
+                                    state.orphan_blocks.len()
+                                );
+                                
+                                // Find and remove oldest orphan
+                                let oldest_hash = state.orphan_blocks
+                                    .iter()
+                                    .min_by_key(|(_, (_, timestamp))| *timestamp)
+                                    .map(|(h, _)| h.clone());
+                                
+                                if let Some(hash) = oldest_hash {
+                                    state.orphan_blocks.remove(&hash);
+                                }
+                            }
+                            
+                            // Clean up expired orphans (older than 30 minutes)
+                            state.orphan_blocks.retain(|_, (_, timestamp)| {
+                                now - *timestamp < crate::ORPHAN_TIMEOUT
+                            });
+                            
                             state.orphan_blocks.insert(block.hash.clone(), (block.clone(), now));
                             
                             info!(
@@ -385,6 +409,7 @@ impl P2PService {
                                 block.header.index, &hash[..16]
                             );
                             state.blockchain.push(block.clone());
+                            state.enforce_memory_limit(); // 🔒 Security: Enforce memory limit
                             state.orphan_blocks.remove(&hash);
                             processed_any = true;
 

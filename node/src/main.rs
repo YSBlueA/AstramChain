@@ -370,6 +370,7 @@ async fn main() {
                             Ok(_) => {
                                 info!("Block added via p2p");
                                 state.blockchain.push(block);
+                                state.enforce_memory_limit(); // 🔒 Security: Enforce memory limit
                             }
                             Err(e) => log::warn!("Received invalid block from p2p: {:?}", e),
                         }
@@ -452,6 +453,7 @@ async fn main() {
                     Ok(_) => {
                         info!("Block added via p2p");
                         state.blockchain.push(block);
+                        state.enforce_memory_limit(); // 🔒 Security: Enforce memory limit
                     }
                     Err(e) => log::warn!("Received invalid block from p2p: {:?}", e),
                 }
@@ -1234,6 +1236,7 @@ async fn mining_loop(
                         let block_to_broadcast = block.clone();
 
                         state.blockchain.push(block.clone());
+                        state.enforce_memory_limit(); // 🔒 Security: Enforce memory limit
                         // pending already cleared earlier
 
                         // Update P2P manager height

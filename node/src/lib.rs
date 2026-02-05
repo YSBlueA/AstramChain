@@ -7,7 +7,7 @@ pub use server::*;
 use netcoin_core::Blockchain;
 use netcoin_core::block::Block;
 use netcoin_core::transaction::Transaction;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub struct NodeState {
@@ -24,6 +24,7 @@ pub struct NodeState {
     pub mining_cancel_flag: Arc<std::sync::atomic::AtomicBool>,
     /// Orphan blocks pool: blocks waiting for their parent
     /// Key: block hash, Value: (block, received_timestamp)
+    /// 🔒 Security: Limited to MAX_ORPHAN_BLOCKS to prevent memory exhaustion attacks
     pub orphan_blocks: HashMap<String, (Block, i64)>,
     /// Mining status information
     pub mining_active: Arc<std::sync::atomic::AtomicBool>,
@@ -40,4 +41,33 @@ pub struct NodeState {
     pub my_public_address: Arc<Mutex<Option<String>>>,
 }
 
+/// Security constants for node limits
+pub const MAX_ORPHAN_BLOCKS: usize = 100; // Maximum orphan blocks to cache
+pub const MAX_MEMORY_BLOCKS: usize = 500; // Maximum blocks to keep in memory
+pub const ORPHAN_TIMEOUT: i64 = 1800; // 30 minutes - orphans older than this are dropped
+
 pub type NodeHandle = Arc<Mutex<NodeState>>;
+
+impl NodeState {
+    /// 🔒 Security: Enforce memory block limit by removing oldest blocks
+    /// Keeps only the most recent MAX_MEMORY_BLOCKS in memory
+    pub fn enforce_memory_limit(&mut self) {
+        if self.blockchain.len() > MAX_MEMORY_BLOCKS {
+            let excess = self.blockchain.len() - MAX_MEMORY_BLOCKS;
+            log::warn!(
+                "⚠️ Memory block limit reached: {} blocks (max: {}), removing {} oldest blocks",
+                self.blockchain.len(),
+                MAX_MEMORY_BLOCKS,
+                excess
+            );
+
+            // Remove oldest blocks (from the front)
+            self.blockchain.drain(0..excess);
+
+            log::info!(
+                "✅ Memory optimized: {} blocks remaining in memory",
+                self.blockchain.len()
+            );
+        }
+    }
+}
