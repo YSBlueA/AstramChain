@@ -1035,6 +1035,22 @@ async fn mining_loop(
     miner_address: String,
     shutdown_flag: Arc<AtomicBool>,
 ) {
+    let requested_backend = std::env::var("MINER_BACKEND")
+        .unwrap_or_else(|_| "cpu".to_string())
+        .to_lowercase();
+    let mut miner_backend = requested_backend.clone();
+
+    if miner_backend == "cuda" && !cfg!(feature = "cuda-miner") {
+        println!("⚠️  CUDA miner requested but not enabled; falling back to CPU");
+        miner_backend = "cpu".to_string();
+    }
+
+    if miner_backend == "cuda" {
+        println!("🟢 Using CUDA miner backend");
+    } else {
+        println!("🟢 Using CPU miner backend");
+    }
+
     loop {
         // Check shutdown flag
         if shutdown_flag.load(OtherOrdering::SeqCst) {
@@ -1185,9 +1201,31 @@ async fn mining_loop(
         let cancel_for_thread = cancel_flag.clone();
         let hashrate_for_thread = hashrate_shared.clone();
 
-        // Run CPU-bound mining in a blocking task so we don't block the tokio runtime
+        // Run mining in a blocking task so we don't block the tokio runtime
+        let backend = miner_backend.clone();
         let mined_block_res: anyhow::Result<Block> = tokio::task::spawn_blocking(move || {
-            // call into core/consensus
+            if backend == "cuda" {
+                #[cfg(feature = "cuda-miner")]
+                {
+                    return consensus::mine_block_with_coinbase_cuda(
+                        index_local,
+                        prev_hash,
+                        difficulty_local,
+                        txs_cloned,
+                        &miner_addr_cloned,
+                        coinbase_reward,
+                        cancel_for_thread,
+                        Some(hashrate_for_thread),
+                    );
+                }
+                #[cfg(not(feature = "cuda-miner"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "CUDA miner not enabled. Build with --features cuda-miner"
+                    ));
+                }
+            }
+
             consensus::mine_block_with_coinbase(
                 index_local,
                 prev_hash,

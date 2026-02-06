@@ -9,6 +9,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(feature = "cuda-miner")]
+pub mod cuda;
+
+#[cfg(feature = "cuda-miner")]
+pub use cuda::mine_block_with_coinbase_cuda;
+
 /// Find a valid nonce by updating header.nonce and returning (nonce, hash).
 /// Simple CPU single-threaded loop. Caller should run this in spawn_blocking.
 pub fn find_valid_nonce(header: &mut BlockHeader, difficulty: u32) -> Result<(u64, String)> {
