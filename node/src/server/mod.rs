@@ -4,9 +4,11 @@ pub use eth_rpc::run_eth_rpc_server;
 
 use crate::NodeHandle;
 use base64::{Engine as _, engine::general_purpose};
+use netcoin_core::block::Block;
 use netcoin_core::transaction::{BINCODE_CONFIG, Transaction};
 use netcoin_core::utxo::Utxo;
 use primitive_types::U256;
+use serde::Deserialize;
 use warp::Filter;
 use warp::{http::StatusCode, reply::with_status}; // bincode v2
 /// run_server expects NodeHandle (Arc<Mutex<NodeState>>)
@@ -501,6 +503,129 @@ pub async fn run_server(node: NodeHandle) {
             ))
         });
 
+    // -------------------------------
+    // GET /mempool - Pending transactions + fee summary
+    // -------------------------------
+    let get_mempool = warp::path("mempool")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let state = node.lock().unwrap();
+            let txs = state.pending.clone();
+
+            let mut total_fees = U256::zero();
+            for tx in &txs {
+                let mut input_sum = U256::zero();
+                let mut output_sum = U256::zero();
+
+                for inp in &tx.inputs {
+                    let ukey = format!("u:{}:{}", inp.txid, inp.vout);
+                    if let Ok(Some(blob)) = state.bc.db.get(ukey.as_bytes()) {
+                        if let Ok((utxo, _)) =
+                            bincode::decode_from_slice::<Utxo, _>(&blob, *BINCODE_CONFIG)
+                        {
+                            input_sum = input_sum + utxo.amount();
+                        }
+                    }
+                }
+
+                for out in &tx.outputs {
+                    output_sum = output_sum + out.amount();
+                }
+
+                if input_sum >= output_sum {
+                    total_fees = total_fees + (input_sum - output_sum);
+                }
+            }
+
+            let bincode_bytes = bincode::encode_to_vec(&txs, *BINCODE_CONFIG).unwrap();
+            let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
+
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "count": txs.len(),
+                "transactions_b64": encoded,
+                "total_fees": format!("0x{:x}", total_fees)
+            })))
+        });
+
+    // -------------------------------
+    // POST /mining/submit - Submit a mined block
+    // -------------------------------
+    #[derive(Deserialize)]
+    struct SubmitBlockRequest {
+        block_b64: String,
+    }
+
+    let submit_block = warp::path!("mining" / "submit")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(node_filter.clone())
+        .and_then(|req: SubmitBlockRequest, node: NodeHandle| async move {
+            let bytes = match general_purpose::STANDARD.decode(req.block_b64.as_bytes()) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "status": "error",
+                            "message": format!("invalid base64: {}", e)
+                        })),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+            };
+
+            let (block, _) = match bincode::decode_from_slice::<Block, _>(&bytes, *BINCODE_CONFIG)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "status": "error",
+                            "message": format!("invalid block bincode: {}", e)
+                        })),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+            };
+
+            let mut state = node.lock().unwrap();
+            match state.bc.validate_and_insert_block(&block) {
+                Ok(_) => {
+                    state.blockchain.push(block.clone());
+                    state.enforce_memory_limit();
+                    state.p2p.set_my_height(block.header.index + 1);
+
+                    let now = chrono::Utc::now().timestamp();
+                    state.recently_mined_blocks.insert(block.hash.clone(), now);
+                    state
+                        .recently_mined_blocks
+                        .retain(|_, &mut timestamp| now - timestamp < 300);
+
+                    let p2p_handle = state.p2p.clone();
+                    let block_to_broadcast = block.clone();
+                    tokio::spawn(async move {
+                        p2p_handle.broadcast_block(&block_to_broadcast).await;
+                    });
+
+                    Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "status": "ok",
+                            "hash": block.hash,
+                            "height": block.header.index
+                        })),
+                        StatusCode::OK,
+                    ))
+                }
+                Err(e) => Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "status": "error",
+                        "message": format!("block rejected: {}", e)
+                    })),
+                    StatusCode::BAD_REQUEST,
+                )),
+            }
+        });
+
     // GET /status
     let status = warp::path("status")
         .and(warp::get())
@@ -689,6 +814,8 @@ pub async fn run_server(node: NodeHandle) {
         .or(health_check)
         .or(post_tx)
         .or(relay_tx)
+        .or(get_mempool)
+        .or(submit_block)
         .or(status)
         .or(get_balance)
         .or(get_address_info)

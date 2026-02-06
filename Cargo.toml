@@ -1,3 +1,11 @@
 [workspace]
-members = ["core", "config", "node", "wallet-cli", "explorer", "netcoin-dns"]
+members = [
+    "core",
+    "config",
+    "node",
+    "wallet-cli",
+    "explorer",
+    "netcoin-dns",
+    "netcoin-stratum",
+]
 resolver = "3"
