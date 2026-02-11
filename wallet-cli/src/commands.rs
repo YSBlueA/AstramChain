@@ -9,19 +9,19 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 // ASRM unit constants (18 decimal places, same as Ethereum)
-const NATOSHI_PER_ASRM: u128 = 1_000_000_000_000_000_000; // 1 ASRM = 10^18 natoshi
+const RAM_PER_ASRM: u128 = 1_000_000_000_000_000_000; // 1 ASRM = 10^18 ram
 
-/// Convert ASRM to natoshi (smallest unit) as U256
-pub fn ASRM_to_natoshi(ASRM: f64) -> U256 {
-    let natoshi = (ASRM * NATOSHI_PER_ASRM as f64) as u128;
-    U256::from(natoshi)
+/// Convert ASRM to ram (smallest unit) as U256
+pub fn ASRM_to_ram(ASRM: f64) -> U256 {
+    let ram = (ASRM * RAM_PER_ASRM as f64) as u128;
+    U256::from(ram)
 }
 
-/// Convert natoshi (U256) to ASRM for display
-pub fn natoshi_to_ASRM(natoshi: U256) -> f64 {
+/// Convert ram (U256) to ASRM for display
+pub fn ram_to_ASRM(ram: U256) -> f64 {
     // Convert U256 to u128 (safe for reasonable amounts)
-    let natoshi_u128 = natoshi.low_u128();
-    natoshi_u128 as f64 / NATOSHI_PER_ASRM as f64
+    let ram_u128 = ram.low_u128();
+    ram_u128 as f64 / RAM_PER_ASRM as f64
 }
 
 #[derive(clap::Subcommand)]
@@ -126,7 +126,7 @@ pub fn get_balance(address: &str) {
         Ok(res) => {
             let json: Value = res.json().unwrap();
             // Parse balance as hex string (0x...) or number
-            let balance_natoshi = if let Some(s) = json["balance"].as_str() {
+            let balance_ram = if let Some(s) = json["balance"].as_str() {
                 if let Some(hex_str) = s.strip_prefix("0x") {
                     U256::from_str_radix(hex_str, 16).unwrap_or_else(|_| U256::zero())
                 } else {
@@ -138,14 +138,14 @@ pub fn get_balance(address: &str) {
                     .map(U256::from)
                     .unwrap_or_else(U256::zero)
             };
-            let balance_ASRM = natoshi_to_ASRM(balance_natoshi);
+            let balance_ASRM = ram_to_ASRM(balance_ram);
             println!("Balance: {} ASRM", balance_ASRM);
         }
         Err(e) => println!("[ERROR] Query failed: {}", e),
     }
 }
 
-pub fn send_transaction(to: &str, amount_natoshi: U256) {
+pub fn send_transaction(to: &str, amount_ram: U256) {
     let cfg = Config::load();
     let wallet = load_wallet();
     let client = Client::new();
@@ -196,16 +196,16 @@ pub fn send_transaction(to: &str, amount_natoshi: U256) {
             signature: None,
         });
         input_sum = input_sum + amt;
-        if input_sum >= amount_natoshi {
+        if input_sum >= amount_ram {
             break;
         }
     }
 
-    if input_sum < amount_natoshi {
+    if input_sum < amount_ram {
         println!(
             "[WARN] Insufficient balance: have {} ASRM, need {} ASRM",
-            natoshi_to_ASRM(input_sum),
-            natoshi_to_ASRM(amount_natoshi)
+            ram_to_ASRM(input_sum),
+            ram_to_ASRM(amount_ram)
         );
         return;
     }
@@ -221,21 +221,21 @@ pub fn send_transaction(to: &str, amount_natoshi: U256) {
     println!("Transaction Details:");
     println!("   Inputs: {} UTXO(s)", selected_inputs.len());
     println!("   Estimated size: {} bytes", estimated_tx_size);
-    println!("   Fee: {} ASRM ({} natoshi)", natoshi_to_ASRM(fee), fee);
+    println!("   Fee: {} ASRM ({} ram)", ram_to_ASRM(fee), fee);
 
     // Check if we have enough for amount + fee
-    if input_sum < amount_natoshi + fee {
+    if input_sum < amount_ram + fee {
         println!(
             "[WARN] Insufficient balance for amount + fee: have {} ASRM, need {} ASRM",
-            natoshi_to_ASRM(input_sum),
-            natoshi_to_ASRM(amount_natoshi + fee)
+            ram_to_ASRM(input_sum),
+            ram_to_ASRM(amount_ram + fee)
         );
         return;
     }
 
-    let mut outputs = vec![TransactionOutput::new(to.to_string(), amount_natoshi)];
+    let mut outputs = vec![TransactionOutput::new(to.to_string(), amount_ram)];
 
-    let change = input_sum - amount_natoshi - fee;
+    let change = input_sum - amount_ram - fee;
     if change > U256::zero() {
         outputs.push(TransactionOutput::new(wallet.address.clone(), change));
     } else {
@@ -278,10 +278,10 @@ pub fn send_transaction(to: &str, amount_natoshi: U256) {
     println!("[OK] Transaction created successfully!");
     println!("   TXID (internal): {}", tx.txid);
     println!("   ETH Hash (external): {}", tx.eth_hash);
-    println!("   Amount: {} ASRM", natoshi_to_ASRM(amount_natoshi));
-    println!("   Fee: {} ASRM ({} natoshi)", natoshi_to_ASRM(fee), fee);
+    println!("   Amount: {} ASRM", ram_to_ASRM(amount_ram));
+    println!("   Fee: {} ASRM ({} ram)", ram_to_ASRM(fee), fee);
     if change > U256::zero() {
-        println!("   Change: {} ASRM", natoshi_to_ASRM(change));
+        println!("   Change: {} ASRM", ram_to_ASRM(change));
     }
     println!(
         "Signature: {}",

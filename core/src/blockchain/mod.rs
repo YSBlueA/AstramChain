@@ -176,7 +176,8 @@ impl Blockchain {
         // 1) header hash match
         let computed = compute_header_hash(&block.header)?;
         if computed != block.hash {
-            crate::security::VALIDATION_STATS.increment(crate::security::BlockFailureReason::HashMismatch);
+            crate::security::VALIDATION_STATS
+                .increment(crate::security::BlockFailureReason::HashMismatch);
             log::warn!(
                 "🚫 Block validation failed [hash_mismatch]: height={} computed={} actual={}",
                 block.header.index,
@@ -193,7 +194,8 @@ impl Blockchain {
         // 2) Proof-of-Work: verify hash meets difficulty requirement
         let required_prefix = "0".repeat(block.header.difficulty as usize);
         if !block.hash.starts_with(&required_prefix) {
-            crate::security::VALIDATION_STATS.increment(crate::security::BlockFailureReason::InvalidPoW);
+            crate::security::VALIDATION_STATS
+                .increment(crate::security::BlockFailureReason::InvalidPoW);
             log::warn!(
                 "🚫 Block validation failed [invalid_pow]: height={} hash={} difficulty={}",
                 block.header.index,
@@ -227,7 +229,8 @@ impl Blockchain {
                     if block.header.difficulty < min_allowed
                         || block.header.difficulty > max_allowed
                     {
-                        crate::security::VALIDATION_STATS.increment(crate::security::BlockFailureReason::DifficultyOutOfRange);
+                        crate::security::VALIDATION_STATS
+                            .increment(crate::security::BlockFailureReason::DifficultyOutOfRange);
                         log::warn!(
                             "🚫 Block validation failed [difficulty_out_of_range]: height={} got={} prev={} allowed={}-{}",
                             block.header.index,
@@ -253,7 +256,8 @@ impl Blockchain {
         let txids: Vec<String> = block.transactions.iter().map(|t| t.txid.clone()).collect();
         let merkle = compute_merkle_root(&txids);
         if merkle != block.header.merkle_root {
-            crate::security::VALIDATION_STATS.increment(crate::security::BlockFailureReason::MerkleRootMismatch);
+            crate::security::VALIDATION_STATS
+                .increment(crate::security::BlockFailureReason::MerkleRootMismatch);
             log::warn!(
                 "🚫 Block validation failed [merkle_mismatch]: height={} computed={} header={}",
                 block.header.index,
@@ -272,7 +276,8 @@ impl Blockchain {
         if block.header.index > 0 {
             let prev_key = format!("b:{}", block.header.previous_hash);
             if self.db.get(prev_key.as_bytes())?.is_none() {
-                crate::security::VALIDATION_STATS.increment(crate::security::BlockFailureReason::PreviousNotFound);
+                crate::security::VALIDATION_STATS
+                    .increment(crate::security::BlockFailureReason::PreviousNotFound);
                 log::warn!(
                     "🚫 Block validation failed [previous_not_found]: height={} prev_hash={}",
                     block.header.index,
@@ -419,7 +424,7 @@ impl Blockchain {
 
             if fee < min_fee {
                 return Err(anyhow!(
-                    "transaction fee too low {}: got {} natoshi, need {} natoshi (base 100 Twei + {} bytes × 200 Gwei/byte)",
+                    "transaction fee too low {}: got {} ram, need {} ram (base 100 Twei + {} bytes × 200 Gwei/byte)",
                     tx.txid,
                     fee,
                     min_fee,
@@ -828,7 +833,7 @@ impl Blockchain {
         Ok(None)
     }
 
-    /// Calculate total transaction volume from all outputs in DB (in natoshi)
+    /// Calculate total transaction volume from all outputs in DB (in ram)
     pub fn calculate_total_volume(&self) -> Result<U256> {
         let mut total = U256::zero();
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
@@ -1108,9 +1113,9 @@ impl Blockchain {
         )?;
 
         // 🔒 Policy: Check if reorg conflicts with checkpoint policy
-        let (checkpoint_allowed, checkpoint_reason) = 
+        let (checkpoint_allowed, checkpoint_reason) =
             crate::checkpoint::check_reorg_against_checkpoints(reorg_depth, current_height);
-        
+
         if !checkpoint_allowed {
             log::error!(
                 "🚨 Reorganization REJECTED by checkpoint policy: {}",

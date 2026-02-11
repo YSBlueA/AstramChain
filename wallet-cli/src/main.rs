@@ -22,9 +22,9 @@ fn main() {
         Commands::GenerateEth => generate_eth_wallet(),
         Commands::Balance { address } => get_balance(&address),
         Commands::Send { to, amount } => {
-            let amount_natoshi = ASRM_to_natoshi(amount);
+            let amount_ram = ASRM_to_ram(amount);
             println!("Sending {} ASRM to {}", amount, to);
-            send_transaction(&to, amount_natoshi)
+            send_transaction(&to, amount_ram)
         }
         Commands::Config { subcommand } => match subcommand {
             ConfigCommands::View => {

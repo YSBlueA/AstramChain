@@ -360,7 +360,7 @@ pub async fn run_server(node: NodeHandle) {
                         return Ok::<_, warp::Rejection>(with_status(
                             warp::reply::json(&serde_json::json!({
                                 "status": "error",
-                                "message": format!("fee too low: got {} natoshi, need {} natoshi", fee, min_fee)
+                                "message": format!("fee too low: got {} ram, need {} ram", fee, min_fee)
                             })),
                             StatusCode::BAD_REQUEST,
                         ));

@@ -1,8 +1,7 @@
 #!/bin/bash
-# DNS ?œë²„ ?íƒœ ?•ì¸ ?¤í¬ë¦½íŠ¸
+# DNS server script to check the status of the Astram DNS server
 
-# DNS ?œë²„ ì£¼ì†Œ (?˜ê²½ ë³€???ëŠ” ê¸°ë³¸ê°??¬ìš©)
-# ?¬ìš© ?? DNS_SERVER=http://dns.Astram.com:8053 ./check-dns.sh
+# DNS_SERVER=http://dns.Astram.com:8053 ./check-dns.sh
 DNS_SERVER=${DNS_SERVER:-"http://161.33.19.183:8053"}
 
 echo "=== Astram DNS Server Status ==="

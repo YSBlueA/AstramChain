@@ -150,7 +150,7 @@ async fn eth_get_balance(
                 .get_address_balance_from_db(&address)
                 .unwrap_or_else(|_| U256::zero());
 
-            // natoshi and wei are now the same (both 10^18 decimals)
+            // ram and wei are now the same (both 10^18 decimals)
             // Convert U256 to hex string with 0x prefix
             return JsonRpcResponse::success(id, json!(format!("0x{:x}", balance)));
         }
@@ -612,11 +612,11 @@ async fn convert_eth_to_utxo_transaction(
     }
 
     // Use fee from Ethereum gas parameters (MetaMask already calculated this)
-    // MetaMask sends: gasPrice (in natoshi/gas) × gasLimit (in gas units)
+    // MetaMask sends: gasPrice (in ram/gas) × gasLimit (in gas units)
     let fee_from_eth = eth_tx.gas_price * U256::from(eth_tx.gas_limit);
 
     log::info!(
-        "ETH transaction fee: {} natoshi (gasPrice={}, gasLimit={})",
+        "ETH transaction fee: {} ram (gasPrice={}, gasLimit={})",
         fee_from_eth,
         eth_tx.gas_price,
         eth_tx.gas_limit
@@ -692,7 +692,7 @@ async fn convert_eth_to_utxo_transaction(
     let min_fee_required = Astram_core::config::calculate_min_fee(actual_tx_size);
 
     log::info!(
-        "Transaction size: {} bytes, ETH fee: {} natoshi, Astram min required: {} natoshi",
+        "Transaction size: {} bytes, ETH fee: {} ram, Astram min required: {} ram",
         actual_tx_size,
         fee_from_eth,
         min_fee_required
@@ -701,7 +701,7 @@ async fn convert_eth_to_utxo_transaction(
     // Verify fee is sufficient
     if fee_from_eth < min_fee_required {
         return Err(format!(
-            "Insufficient fee: provided {} natoshi, but need {} natoshi (base 100 Twei + {} bytes × 200 Gwei/byte)",
+            "Insufficient fee: provided {} ram, but need {} ram (base 100 Twei + {} bytes × 200 Gwei/byte)",
             fee_from_eth, min_fee_required, actual_tx_size
         ));
     }
@@ -720,7 +720,7 @@ async fn convert_eth_to_utxo_transaction(
     tx = tx.with_hashes();
 
     log::info!(
-        "Created UTXO tx: {} inputs, {} outputs, {} bytes, fee={} natoshi, txid={}",
+        "Created UTXO tx: {} inputs, {} outputs, {} bytes, fee={} ram, txid={}",
         tx.inputs.len(),
         tx.outputs.len(),
         actual_tx_size,
@@ -750,7 +750,7 @@ async fn eth_get_transaction_by_hash(
                 .unwrap_or(tx_hash);
 
             if let Ok(Some((tx, block_height))) = state.bc.get_transaction(Astram_txid) {
-                // natoshi and wei are now the same (both 10^18 decimals)
+                // ram and wei are now the same (both 10^18 decimals)
                 let amount = tx
                     .outputs
                     .get(0)
@@ -856,7 +856,7 @@ async fn eth_get_transaction_receipt(
                         "logs": [],
                         "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
                         "status": "0x1",
-                        "effectiveGasPrice": "0x2540be400", // 10 Gwei (10,000,000,000 natoshi/gas)
+                        "effectiveGasPrice": "0x2540be400", // 10 Gwei (10,000,000,000 ram/gas)
                     });
 
                     log::info!("[INFO] Returning receipt: {:?}", receipt);
@@ -883,20 +883,20 @@ async fn eth_get_transaction_receipt(
 
 fn eth_gas_price(id: Value) -> JsonRpcResponse {
     // Astram fee structure (EVM-compatible 18 decimals):
-    // - Base fee: 100,000,000,000,000 natoshi (100 Twei = 0.0001 ASRM)
-    // - Per-byte fee: 200,000,000,000 natoshi/byte (200 Gwei/byte)
+    // - Base fee: 100,000,000,000,000 ram (100 Twei = 0.0001 ASRM)
+    // - Per-byte fee: 200,000,000,000 ram/byte (200 Gwei/byte)
     // - Typical UTXO tx size: ~300-1000 bytes
-    // - Total typical fee: ~160,000,000,000,000-300,000,000,000,000 natoshi
+    // - Total typical fee: ~160,000,000,000,000-300,000,000,000,000 ram
     //
     // For Ethereum compatibility:
     // - Standard transfer gas: 21,000
-    // - Target fee for 300 byte tx: ~160,000,000,000,000 natoshi
-    // - Required gasPrice: 160,000,000,000,000 / 21,000 = ~7,619,047,619 natoshi/gas
+    // - Target fee for 300 byte tx: ~160,000,000,000,000 ram
+    // - Required gasPrice: 160,000,000,000,000 / 21,000 = ~7,619,047,619 ram/gas
     // - Use 10,000,000,000 (10 Gwei) for safety margin
     //
-    // This gives: 21,000 × 10,000,000,000 = 210,000,000,000,000 natoshi (~0.00021 ASRM)
+    // This gives: 21,000 × 10,000,000,000 = 210,000,000,000,000 ram (~0.00021 ASRM)
     // Hex: 10,000,000,000 = 0x2540BE400
-    JsonRpcResponse::success(id, json!("0x2540be400")) // 10 Gwei (10,000,000,000 natoshi/gas)
+    JsonRpcResponse::success(id, json!("0x2540be400")) // 10 Gwei (10,000,000,000 ram/gas)
 }
 
 fn eth_estimate_gas(id: Value) -> JsonRpcResponse {

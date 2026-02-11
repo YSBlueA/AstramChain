@@ -885,15 +885,15 @@ async fn start_services(
         .parse::<u16>()
         .unwrap_or(8335);
 
-    // Register with DNS server
+    // Register with DNS server (fail fast if registration fails)
+    if let Err(e) = register_with_dns(node_handle.clone()).await {
+        log::error!("DNS registration failed; shutting down node: {}", e);
+        std::process::exit(1);
+    }
+
     let dns_node_handle = node_handle.clone();
     let shutdown_flag_dns = shutdown_flag.clone();
     let dns_task = tokio::spawn(async move {
-        // Initial registration
-        if let Err(e) = register_with_dns(dns_node_handle.clone()).await {
-            log::warn!("Failed to register with DNS server: {}", e);
-        }
-
         // Re-register every 5 minutes to keep the node alive in DNS
         let mut interval = tokio::time::interval(Duration::from_secs(300));
         interval.tick().await; // Skip first immediate tick

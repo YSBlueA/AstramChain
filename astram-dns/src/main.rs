@@ -9,7 +9,12 @@ use chrono::Utc;
 use clap::Parser;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -192,6 +197,62 @@ impl AppState {
     }
 }
 
+fn is_public_ip(ip: IpAddr) -> bool {
+    fn is_ipv4_documentation(v4: std::net::Ipv4Addr) -> bool {
+        let [a, b, c, _] = v4.octets();
+        (a == 192 && b == 0 && c == 2)
+            || (a == 198 && b == 51 && c == 100)
+            || (a == 203 && b == 0 && c == 113)
+    }
+
+    fn is_ipv6_documentation(v6: std::net::Ipv6Addr) -> bool {
+        let segments = v6.segments();
+        segments[0] == 0x2001 && segments[1] == 0x0db8
+    }
+
+    fn is_ipv6_site_local(v6: std::net::Ipv6Addr) -> bool {
+        let segments = v6.segments();
+        (segments[0] & 0xffc0) == 0xfec0
+    }
+
+    match ip {
+        IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || is_ipv4_documentation(v4))
+        }
+        IpAddr::V6(v6) => {
+            !(v6.is_loopback()
+                || v6.is_unique_local()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                || v6.is_unicast_link_local()
+                || is_ipv6_site_local(v6)
+                || is_ipv6_documentation(v6))
+        }
+    }
+}
+
+async fn is_port_reachable(ip: IpAddr, port: u16) -> bool {
+    let socket = SocketAddr::new(ip, port);
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect(socket),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            true
+        }
+        _ => false,
+    }
+}
+
 // Register a node
 async fn register_node(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -201,6 +262,65 @@ async fn register_node(
     // Use the client's IP address from the connection, or use the provided address if given
     let client_ip = addr.ip().to_string();
     let node_address = req.address.unwrap_or(client_ip);
+
+    let node_ip: IpAddr = match node_address.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            let node_count = state.nodes.read().len();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(RegisterResponse {
+                    success: false,
+                    message: "Invalid node IP address".to_string(),
+                    node_count,
+                    registered_address: node_address,
+                    registered_port: req.port,
+                }),
+            );
+        }
+    };
+
+    if req.port == 0 {
+        let node_count = state.nodes.read().len();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RegisterResponse {
+                success: false,
+                message: "Invalid node port".to_string(),
+                node_count,
+                registered_address: node_address,
+                registered_port: req.port,
+            }),
+        );
+    }
+
+    if !is_public_ip(node_ip) {
+        let node_count = state.nodes.read().len();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RegisterResponse {
+                success: false,
+                message: "Node IP is not publicly reachable".to_string(),
+                node_count,
+                registered_address: node_address,
+                registered_port: req.port,
+            }),
+        );
+    }
+
+    if !is_port_reachable(node_ip, req.port).await {
+        let node_count = state.nodes.read().len();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RegisterResponse {
+                success: false,
+                message: "Node port is not reachable from DNS server".to_string(),
+                node_count,
+                registered_address: node_address,
+                registered_port: req.port,
+            }),
+        );
+    }
 
     let node_id = format!("{}:{}", node_address, req.port);
     let now = Utc::now().timestamp();
@@ -234,13 +354,16 @@ async fn register_node(
 
     let node_count = state.nodes.read().len();
 
-    Json(RegisterResponse {
-        success: true,
-        message: format!("Node {} registered successfully", node_id),
-        node_count,
-        registered_address: node_address.clone(),
-        registered_port: req.port,
-    })
+    (
+        StatusCode::OK,
+        Json(RegisterResponse {
+            success: true,
+            message: format!("Node {} registered successfully and is reachable", node_id),
+            node_count,
+            registered_address: node_address.clone(),
+            registered_port: req.port,
+        }),
+    )
 }
 
 // Get list of nodes
@@ -403,4 +526,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
