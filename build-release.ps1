@@ -102,7 +102,6 @@ param(
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DefaultBase = if ($env:APPDATA) { Join-Path $env:APPDATA "Astram" } else { Join-Path $env:USERPROFILE ".Astram" }
 $DefaultConfigFile = Join-Path $DefaultBase "config.json"
-$DefaultDataDir = Join-Path $DefaultBase "data"
 $DefaultWalletPath = Join-Path $DefaultBase "wallet.json"
 
 function Ensure-ConfigDefaults {
@@ -111,7 +110,6 @@ function Ensure-ConfigDefaults {
         $defaultConfig = @{
             wallet_path = $DefaultWalletPath
             node_rpc_url = "http://127.0.0.1:19533"
-            data_dir = $DefaultDataDir
         }
         $defaultConfig | ConvertTo-Json -Depth 3 | Set-Content -Path $DefaultConfigFile
     }
@@ -131,15 +129,6 @@ function Ensure-ConfigDefaults {
         $config | Add-Member -Force -NotePropertyName node_rpc_url -NotePropertyValue "http://127.0.0.1:19533"
         $changed = $true
     }
-    if (-not $config.data_dir -or [string]::IsNullOrWhiteSpace($config.data_dir)) {
-        $config | Add-Member -Force -NotePropertyName data_dir -NotePropertyValue $DefaultDataDir
-        $changed = $true
-    }
-
-    if (-not (Test-Path $config.data_dir)) {
-        $config.data_dir = $DefaultDataDir
-        $changed = $true
-    }
     if (-not (Test-Path $config.wallet_path)) {
         $config.wallet_path = $DefaultWalletPath
         $changed = $true
@@ -150,7 +139,6 @@ function Ensure-ConfigDefaults {
         $config | ConvertTo-Json -Depth 3 | Set-Content -Path $DefaultConfigFile
     }
 
-    New-Item -ItemType Directory -Force -Path $config.data_dir | Out-Null
     New-Item -ItemType Directory -Force -Path (Split-Path $config.wallet_path -Parent) | Out-Null
 
     return $config
@@ -190,28 +178,32 @@ if ($Component -eq 'node') {
 
 Set-Content -Path "$ReleaseDir/Astram.ps1" -Value $LauncherContent
 
-# Copy sample config
-Write-Info "Creating sample configuration..."
-$ConfigContent = @'
-# Astram Configuration Example
-# Copy this file and modify as needed
+# Create node settings config
+Write-Info "Creating node settings configuration..."
+$NodeSettingsContent = @'
+# Astram Node Settings
+# Update addresses and ports as needed
 
-# Node Settings
-NODE_PORT=19533
+# P2P listener
+P2P_BIND_ADDR=0.0.0.0
 P2P_PORT=8335
 
-# DNS Server
-DNS_PORT=8053
+# HTTP API server
+HTTP_BIND_ADDR=127.0.0.1
+HTTP_PORT=19533
 
-# Explorer
-EXPLORER_PORT=3000
+# Ethereum JSON-RPC server
+ETH_RPC_BIND_ADDR=127.0.0.1
+ETH_RPC_PORT=8545
 
-# Data Directory
-# Windows: %USERPROFILE%\.Astram
-DATA_DIR=%USERPROFILE%\.Astram
+# DNS discovery server
+DNS_SERVER_URL=http://161.33.19.183:8053
+
+# Data directory
+DATA_DIR=%USERPROFILE%\.Astram\data
 '@
 
-Set-Content -Path "$ReleaseDir/config/example.conf" -Value $ConfigContent
+Set-Content -Path "$ReleaseDir/config/nodeSettings.conf" -Value $NodeSettingsContent
 
 # Create README
 Write-Info "Creating README..."
@@ -256,10 +248,6 @@ $ReadmeContent = @'
 Astram stores blockchain data in: `%USERPROFILE%\.Astram`
 
 To reset the blockchain, delete this directory while no nodes are running.
-
-## Configuration
-
-See `config/example.conf` for configuration options.
 
 ## Support
 

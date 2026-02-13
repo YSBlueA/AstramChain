@@ -19,6 +19,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering as OtherOrdering;
 use std::sync::{Arc, Mutex};
@@ -42,6 +44,131 @@ struct DnsNodesResponse {
     count: usize,
 }
 
+#[derive(Debug, Clone)]
+struct NodeSettings {
+    data_dir: String,
+    p2p_bind_addr: String,
+    p2p_port: u16,
+    http_bind_addr: String,
+    http_port: u16,
+    eth_rpc_bind_addr: String,
+    eth_rpc_port: u16,
+    dns_server_url: String,
+}
+
+impl Default for NodeSettings {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            p2p_bind_addr: "0.0.0.0".to_string(),
+            p2p_port: 8335,
+            http_bind_addr: "127.0.0.1".to_string(),
+            http_port: 19533,
+            eth_rpc_bind_addr: "127.0.0.1".to_string(),
+            eth_rpc_port: 8545,
+            dns_server_url: "http://161.33.19.183:8053".to_string(),
+        }
+    }
+}
+
+fn default_data_dir() -> String {
+    let home = dirs::home_dir().expect("Cannot find home directory");
+
+    if cfg!(target_os = "windows") {
+        let base = dirs::data_dir().unwrap_or(home).join("Astram");
+        return base.join("data").to_string_lossy().into_owned();
+    }
+
+    home.join(".Astram")
+        .join("data")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn expand_path_value(value: &str) -> String {
+    let expanded = shellexpand::tilde(value).into_owned();
+    if expanded.contains("%USERPROFILE%") {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            return expanded.replace("%USERPROFILE%", &profile);
+        }
+    }
+    expanded
+}
+
+fn resolve_node_settings_path() -> PathBuf {
+    let exe_path = std::env::current_exe().ok().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join("config/nodeSettings.conf"))
+    });
+
+    if let Some(ref path) = exe_path {
+        if path.exists() {
+            return path.clone();
+        }
+    }
+
+    let cwd_path = PathBuf::from("config/nodeSettings.conf");
+    if cwd_path.exists() {
+        return cwd_path;
+    }
+
+    exe_path.unwrap_or(cwd_path)
+}
+
+fn load_node_settings() -> NodeSettings {
+    let mut settings = NodeSettings::default();
+    let path = resolve_node_settings_path();
+
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            for (line_no, raw_line) in contents.lines().enumerate() {
+                let line = raw_line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+
+                let (key, value) = match line.split_once('=') {
+                    Some(pair) => pair,
+                    None => {
+                        println!(
+                            "[WARN] Invalid node setting on line {}: {}",
+                            line_no + 1,
+                            raw_line
+                        );
+                        continue;
+                    }
+                };
+
+                let key = key.trim();
+                let value = value.trim();
+                match key {
+                    "DATA_DIR" => settings.data_dir = expand_path_value(value),
+                    "P2P_BIND_ADDR" => settings.p2p_bind_addr = value.to_string(),
+                    "P2P_PORT" => settings.p2p_port = value.parse().unwrap_or(settings.p2p_port),
+                    "HTTP_BIND_ADDR" => settings.http_bind_addr = value.to_string(),
+                    "HTTP_PORT" => settings.http_port = value.parse().unwrap_or(settings.http_port),
+                    "ETH_RPC_BIND_ADDR" => settings.eth_rpc_bind_addr = value.to_string(),
+                    "ETH_RPC_PORT" => {
+                        settings.eth_rpc_port = value.parse().unwrap_or(settings.eth_rpc_port)
+                    }
+                    "DNS_SERVER_URL" => settings.dns_server_url = value.to_string(),
+                    _ => println!("[WARN] Unknown node setting key: {}", key),
+                }
+            }
+        }
+        Err(err) => {
+            println!("[WARN] Node settings file not found at {:?}: {}", path, err);
+        }
+    }
+
+    settings.data_dir = expand_path_value(&settings.data_dir);
+    settings
+}
+
+fn to_socket_addr(addr: &str, port: u16, fallback: SocketAddr) -> SocketAddr {
+    format!("{}:{}", addr, port).parse().unwrap_or(fallback)
+}
+
 #[tokio::main]
 async fn main() {
     println!("[INFO] Astram node starting...");
@@ -51,6 +178,7 @@ async fn main() {
         .init();
 
     let cfg = Config::load();
+    let node_settings = Arc::new(load_node_settings());
 
     // Read wallet address from file (expand paths configured via CLI)
     let wallet_path = cfg.wallet_path_resolved();
@@ -63,7 +191,14 @@ async fn main() {
         .to_string();
 
     // DB path for core blockchain
-    let db_path = cfg.data_dir.clone();
+    let db_path = node_settings.data_dir.clone();
+    if let Err(err) = fs::create_dir_all(&db_path) {
+        eprintln!(
+            "[ERROR] Failed to create data directory {}: {}",
+            db_path, err
+        );
+        std::process::exit(1);
+    }
 
     print!("Initialize Block chain...\n");
 
@@ -138,13 +273,12 @@ async fn main() {
     p2p_service.manager().set_my_height(my_height);
     info!("[INFO] Local blockchain height set to: {}", my_height);
 
-    // Get listening port from environment or use default
-    let node_port_str = std::env::var("NODE_PORT").unwrap_or_else(|_| "8335".to_string());
-    let node_port: u16 = node_port_str.parse().unwrap_or(8335);
-    let bind_addr = format!("0.0.0.0:{}", node_port);
+    let bind_addr = format!("{}:{}", node_settings.p2p_bind_addr, node_settings.p2p_port);
 
     // Set listening port in P2P manager (for self-connection detection)
-    p2p_service.manager().set_my_listening_port(node_port);
+    p2p_service
+        .manager()
+        .set_my_listening_port(node_settings.p2p_port);
 
     p2p_service
         .start(bind_addr, node_handle.clone())
@@ -153,8 +287,13 @@ async fn main() {
 
     // Start Ethereum JSON-RPC server for MetaMask
     let eth_rpc_node = node_handle.clone();
+    let eth_rpc_addr = to_socket_addr(
+        &node_settings.eth_rpc_bind_addr,
+        node_settings.eth_rpc_port,
+        SocketAddr::from(([127, 0, 0, 1], 8545)),
+    );
     tokio::spawn(async move {
-        Astram_node::server::run_eth_rpc_server(eth_rpc_node).await;
+        Astram_node::server::run_eth_rpc_server(eth_rpc_node, eth_rpc_addr).await;
     });
 
     // Graceful shutdown flag
@@ -180,8 +319,13 @@ async fn main() {
         }
     });
 
-    let (task_handles, server_handle) =
-        start_services(node_handle.clone(), miner_address, shutdown_flag.clone()).await;
+    let (task_handles, server_handle) = start_services(
+        node_handle.clone(),
+        miner_address,
+        shutdown_flag.clone(),
+        node_settings.clone(),
+    )
+    .await;
 
     // Wait for all background tasks to complete
     println!("[INFO] Waiting for all tasks to complete...");
@@ -512,6 +656,7 @@ struct ScoredPeer {
 /// Fetch best nodes from DNS server, excluding self
 async fn fetch_best_nodes_from_dns(
     node_handle: NodeHandle,
+    settings: &NodeSettings,
     my_port: u16,
     limit: usize,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -521,8 +666,7 @@ async fn fetch_best_nodes_from_dns(
         state.my_public_address.lock().unwrap().clone()
     };
 
-    let dns_url =
-        std::env::var("DNS_SERVER_URL").unwrap_or_else(|_| "http://161.33.19.183:8053".to_string());
+    let dns_url = settings.dns_server_url.clone();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5)) // 5 second timeout
         .build()?;
@@ -670,11 +814,13 @@ async fn fetch_best_nodes_from_dns(
 }
 
 /// Register this node with the DNS server
-async fn register_with_dns(node_handle: NodeHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let dns_url =
-        std::env::var("DNS_SERVER_URL").unwrap_or_else(|_| "http://161.33.19.183:8053".to_string());
+async fn register_with_dns(
+    node_handle: NodeHandle,
+    settings: &NodeSettings,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dns_url = settings.dns_server_url.clone();
     // DNS server will automatically detect the IP address from the connection
-    let node_port = std::env::var("NODE_PORT").unwrap_or_else(|_| "8335".to_string());
+    let node_port = settings.p2p_port;
 
     let height = {
         let state = node_handle.lock().unwrap();
@@ -696,7 +842,7 @@ async fn register_with_dns(node_handle: NodeHandle) -> Result<(), Box<dyn std::e
 
     // address field is now optional - DNS server will detect it from the connection
     let payload = serde_json::json!({
-        "port": node_port.parse::<u16>().unwrap_or(8335),
+        "port": node_port,
         "version": "0.1.0",
         "height": height
     });
@@ -871,6 +1017,7 @@ async fn start_services(
     node_handle: NodeHandle,
     miner_address: String,
     shutdown_flag: Arc<AtomicBool>,
+    settings: Arc<NodeSettings>,
 ) -> (
     Vec<tokio::task::JoinHandle<()>>,
     tokio::task::JoinHandle<()>,
@@ -879,20 +1026,17 @@ async fn start_services(
 
     let mut task_handles = Vec::new();
 
-    let my_node_address = std::env::var("NODE_ADDRESS").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let my_node_port = std::env::var("NODE_PORT")
-        .unwrap_or_else(|_| "8335".to_string())
-        .parse::<u16>()
-        .unwrap_or(8335);
+    let my_node_port = settings.p2p_port;
 
     // Register with DNS server (fail fast if registration fails)
-    if let Err(e) = register_with_dns(node_handle.clone()).await {
+    if let Err(e) = register_with_dns(node_handle.clone(), &settings).await {
         log::error!("DNS registration failed; shutting down node: {}", e);
         std::process::exit(1);
     }
 
     let dns_node_handle = node_handle.clone();
     let shutdown_flag_dns = shutdown_flag.clone();
+    let settings_dns = settings.clone();
     let dns_task = tokio::spawn(async move {
         // Re-register every 5 minutes to keep the node alive in DNS
         let mut interval = tokio::time::interval(Duration::from_secs(300));
@@ -905,7 +1049,7 @@ async fn start_services(
                         info!("DNS registration task shutting down...");
                         break;
                     }
-                    if let Err(e) = register_with_dns(dns_node_handle.clone()).await {
+                    if let Err(e) = register_with_dns(dns_node_handle.clone(), &settings_dns).await {
                         log::warn!("Failed to re-register with DNS server: {}", e);
                     }
                 }
@@ -927,16 +1071,23 @@ async fn start_services(
         state.p2p.clone()
     };
 
-    let my_addr_clone = my_node_address.clone();
     let shutdown_flag_p2p = shutdown_flag.clone();
     let p2p_handle_for_task = p2p_handle.clone();
     let node_handle_for_p2p = node_handle.clone();
+    let settings_p2p = settings.clone();
     let p2p_task = tokio::spawn(async move {
         // Wait a bit for DNS registration to complete
         sleep(Duration::from_secs(2)).await;
 
         // Initial connection to best nodes
-        match fetch_best_nodes_from_dns(node_handle_for_p2p.clone(), my_node_port, 10).await {
+        match fetch_best_nodes_from_dns(
+            node_handle_for_p2p.clone(),
+            &settings_p2p,
+            my_node_port,
+            10,
+        )
+        .await
+        {
             Ok(peer_addrs) => {
                 info!(
                     "[INFO] Connecting to {} best nodes from DNS",
@@ -970,7 +1121,14 @@ async fn start_services(
                         info!("P2P connection refresh task shutting down...");
                         break;
                     }
-                    match fetch_best_nodes_from_dns(node_handle_for_p2p.clone(), my_node_port, 10).await {
+                    match fetch_best_nodes_from_dns(
+                        node_handle_for_p2p.clone(),
+                        &settings_p2p,
+                        my_node_port,
+                        10,
+                    )
+                    .await
+                    {
                 Ok(peer_addrs) => {
                     info!(
                         "[INFO] Refreshing connections to {} best nodes",
@@ -1018,9 +1176,14 @@ async fn start_services(
     }
 
     let nh: Arc<Mutex<NodeState>> = node_handle.clone();
+    let http_addr = to_socket_addr(
+        &settings.http_bind_addr,
+        settings.http_port,
+        SocketAddr::from(([127, 0, 0, 1], 19533)),
+    );
     // start HTTP server in background thread (warp is async so run in tokio)
     let server_handle = tokio::spawn(async move {
-        run_server(nh).await;
+        run_server(nh, http_addr).await;
     });
 
     // Step 6: Start mining

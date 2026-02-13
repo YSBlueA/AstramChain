@@ -106,7 +106,6 @@ shift || true
 
 DEFAULT_CONFIG_DIR="$HOME/.Astram"
 DEFAULT_CONFIG_FILE="$DEFAULT_CONFIG_DIR/config.json"
-DEFAULT_DATA_DIR="$DEFAULT_CONFIG_DIR/data"
 DEFAULT_WALLET_PATH="$DEFAULT_CONFIG_DIR/wallet.json"
 
 ensure_config_defaults() {
@@ -115,20 +114,19 @@ ensure_config_defaults() {
         cat > "$DEFAULT_CONFIG_FILE" << EOF
 {
   "wallet_path": "$DEFAULT_WALLET_PATH",
-  "node_rpc_url": "http://127.0.0.1:19533",
-  "data_dir": "$DEFAULT_DATA_DIR"
+    "node_rpc_url": "http://127.0.0.1:19533"
 }
 EOF
     fi
 
     if command -v python3 >/dev/null 2>&1; then
         local values
-        values=$(python3 - "$DEFAULT_CONFIG_FILE" "$DEFAULT_WALLET_PATH" "$DEFAULT_DATA_DIR" << 'PY'
+                values=$(python3 - "$DEFAULT_CONFIG_FILE" "$DEFAULT_WALLET_PATH" << 'PY'
 import json
 import os
 import sys
 
-config_path, default_wallet, default_data = sys.argv[1:4]
+config_path, default_wallet = sys.argv[1:3]
 
 try:
     with open(config_path, "r", encoding="utf-8") as f:
@@ -143,7 +141,6 @@ changed = False
 for key, default in (
     ("wallet_path", default_wallet),
     ("node_rpc_url", "http://127.0.0.1:19533"),
-    ("data_dir", default_data),
 ):
     val = data.get(key)
     if not isinstance(val, str) or not val.strip() or val.strip().startswith("~"):
@@ -151,12 +148,6 @@ for key, default in (
         changed = True
 
 wallet_path = os.path.expanduser(data.get("wallet_path", default_wallet))
-data_dir = os.path.expanduser(data.get("data_dir", default_data))
-
-if not os.path.exists(data_dir):
-    data["data_dir"] = default_data
-    data_dir = os.path.expanduser(default_data)
-    changed = True
 
 if not os.path.exists(wallet_path):
     data["wallet_path"] = default_wallet
@@ -169,17 +160,13 @@ if changed:
         json.dump(data, f, indent=2)
 
 print(wallet_path)
-print(data_dir)
 PY
         )
         WALLET_PATH=$(printf "%s\n" "$values" | sed -n '1p')
-        DATA_DIR=$(printf "%s\n" "$values" | sed -n '2p')
     else
         WALLET_PATH="$DEFAULT_WALLET_PATH"
-        DATA_DIR="$DEFAULT_DATA_DIR"
     fi
 
-    mkdir -p "$DATA_DIR"
     mkdir -p "$(dirname "$WALLET_PATH")"
 }
 
@@ -241,25 +228,29 @@ LAUNCHER_EOF
 
 chmod +x "$RELEASE_DIR/Astram.sh"
 
-# Copy sample config
-echo -e "${INFO}INFO  Creating sample configuration...${NC}"
-cat > "$RELEASE_DIR/config/example.conf" << 'CONFIG_EOF'
-# Astram Configuration Example
-# Copy this file and modify as needed
+# Create node settings config
+echo -e "${INFO}INFO  Creating node settings configuration...${NC}"
+cat > "$RELEASE_DIR/config/nodeSettings.conf" << 'CONFIG_EOF'
+# Astram Node Settings
+# Update addresses and ports as needed
 
-# Node Settings
-NODE_PORT=19533
+# P2P listener
+P2P_BIND_ADDR=0.0.0.0
 P2P_PORT=8335
 
-# DNS Server
-DNS_PORT=8053
+# HTTP API server
+HTTP_BIND_ADDR=127.0.0.1
+HTTP_PORT=19533
 
-# Explorer
-EXPLORER_PORT=3000
+# Ethereum JSON-RPC server
+ETH_RPC_BIND_ADDR=127.0.0.1
+ETH_RPC_PORT=8545
 
-# Data Directory
-# Linux/macOS: ~/.Astram
-DATA_DIR=~/.Astram
+# DNS discovery server
+DNS_SERVER_URL=http://161.33.19.183:8053
+
+# Data directory
+DATA_DIR=~/.Astram/data
 CONFIG_EOF
 
 # Create README
@@ -306,13 +297,9 @@ Astram stores blockchain data in: \`~/.Astram\`
 
 To reset the blockchain, delete this directory while no nodes are running.
 
-## Configuration
-
-See \`config/example.conf\` for configuration options.
-
 ## Support
 
-For issues and documentation, visit: https://github.com/yourorg/Astram
+For issues and documentation, visit: https://github.com/YSBlueA/AstramChain
 README_EOF
 
 # Create version info

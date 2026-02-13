@@ -4,6 +4,7 @@ use Astram_core::transaction::{BINCODE_CONFIG, Transaction, TransactionInput, Tr
 use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use warp::{Filter, Reply};
 
 #[derive(Debug, Deserialize)]
@@ -312,7 +313,10 @@ async fn eth_send_raw_transaction(
                 Astram_tx.txid
             );
             log::info!("[INFO] Transaction added to mempool: {}", Astram_tx.txid);
-            log::info!("[INFO] Current mapping size: {}", state.eth_to_Astram_tx.len());
+            log::info!(
+                "[INFO] Current mapping size: {}",
+                state.eth_to_Astram_tx.len()
+            );
 
             // Broadcast to peers
             let p2p_clone = state.p2p.clone();
@@ -1046,15 +1050,16 @@ pub fn eth_rpc_routes(
 }
 
 /// Run the Ethereum JSON-RPC server on port 8545 (standard Ethereum port)
-pub async fn run_eth_rpc_server(node: NodeHandle) {
+pub async fn run_eth_rpc_server(node: NodeHandle, bind_addr: SocketAddr) {
     let routes = eth_rpc_routes(node);
 
-    let addr = ([127, 0, 0, 1], 8545);
-    println!("[INFO] Ethereum JSON-RPC server running at http://127.0.0.1:8545");
+    println!(
+        "[INFO] Ethereum JSON-RPC server running at http://{}",
+        bind_addr
+    );
     println!("   Chain ID: 8888 (0x22b8)");
     println!("   Ready for MetaMask connection!");
     println!("   [INFO] CORS enabled for browser access");
 
-    warp::serve(routes).run(addr).await;
+    warp::serve(routes).run(bind_addr).await;
 }
-

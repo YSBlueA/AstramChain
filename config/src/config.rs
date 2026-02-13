@@ -5,7 +5,6 @@ use std::{fs, path::PathBuf};
 pub struct Config {
     pub wallet_path: String,
     pub node_rpc_url: String,
-    pub data_dir: String,
 }
 
 impl Config {
@@ -30,21 +29,6 @@ impl Config {
             .into_owned()
     }
 
-    /// Compute the default data directory depending on the target OS.
-    fn default_data_dir() -> String {
-        let home = dirs::home_dir().expect("Cannot find home directory");
-
-        if cfg!(target_os = "windows") {
-            let base = dirs::data_dir().unwrap_or(home).join("Astram");
-            return base.join("data").to_string_lossy().into_owned();
-        }
-
-        home.join(".Astram")
-            .join("data")
-            .to_string_lossy()
-            .into_owned()
-    }
-
     pub fn default_path() -> PathBuf {
         let home = dirs::home_dir().expect("Cannot find home directory");
         home.join(".Astram/config.json")
@@ -53,11 +37,6 @@ impl Config {
     /// Wallet path with tilde expansion applied.
     pub fn wallet_path_resolved(&self) -> PathBuf {
         Self::expand_path(&self.wallet_path)
-    }
-
-    /// Data directory with tilde expansion applied.
-    pub fn data_dir_resolved(&self) -> PathBuf {
-        Self::expand_path(&self.data_dir)
     }
 
     pub fn load() -> Self {
@@ -88,7 +67,6 @@ impl Config {
         match key {
             "wallet_path" => self.wallet_path = value.to_string(),
             "node_rpc_url" => self.node_rpc_url = value.to_string(),
-            "data_dir" => self.data_dir = value.to_string(),
             _ => {
                 println!("Unknown configuration key: {}", key);
                 return;
@@ -117,7 +95,6 @@ impl Default for Config {
         Self {
             wallet_path: Self::default_wallet_path(),
             node_rpc_url: "http://127.0.0.1:19533".to_string(),
-            data_dir: Self::default_data_dir(),
         }
     }
 }

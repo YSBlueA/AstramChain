@@ -11,8 +11,9 @@ use primitive_types::U256;
 use serde::Deserialize;
 use warp::Filter;
 use warp::{http::StatusCode, reply::with_status}; // bincode v2
+use std::net::SocketAddr;
 /// run_server expects NodeHandle (Arc<Mutex<NodeState>>)
-pub async fn run_server(node: NodeHandle) {
+pub async fn run_server(node: NodeHandle, bind_addr: SocketAddr) {
     let node_filter = {
         let node = node.clone();
         warp::any().map(move || node.clone())
@@ -825,9 +826,7 @@ pub async fn run_server(node: NodeHandle) {
         .with(warp::log("Astram::http"))
         .boxed();
 
-    println!("HTTP server running at http://127.0.0.1:19533");
-
-    let addr = ([127, 0, 0, 1], 19533);
-    warp::serve(routes).run(addr).await;
+    println!("HTTP server running at http://{}", bind_addr);
+    warp::serve(routes).run(bind_addr).await;
 }
 
