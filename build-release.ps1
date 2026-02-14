@@ -167,12 +167,24 @@ if ($Component -eq 'node' -and -not (Test-Path $config.wallet_path)) {
 
 Write-Host "Starting Astram $Component..." -ForegroundColor Green
 if ($Component -eq 'node') {
-    $proc = Start-Process -FilePath $exePath -ArgumentList $RemainingArgs -PassThru
-    Start-Sleep -Seconds 10
-    Start-Process "http://localhost:19533" | Out-Null
-    Wait-Process -Id $proc.Id
+    # Open browser in background after a delay
+    Start-Job -ScriptBlock {
+        Start-Sleep -Seconds 10
+        Start-Process "http://localhost:19533"
+    } | Out-Null
+    
+    # Run node in current console
+    if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
+        & $exePath @RemainingArgs
+    } else {
+        & $exePath
+    }
 } else {
-    & $exePath @RemainingArgs
+    if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
+        & $exePath @RemainingArgs
+    } else {
+        & $exePath
+    }
 }
 '@
 
