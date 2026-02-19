@@ -66,8 +66,8 @@
           >
             <div class="item-header">
               <span class="tx-hash">
-                <span v-if="tx.from === 'Block_Reward'" class="tx-type-badge coinbase">?�️ Mining</span>
-                <span v-else class="tx-type-badge transfer">?�� Transfer</span>
+                <span v-if="tx.from === 'Block_Reward'" class="tx-type-badge coinbase">⛏️ Mining</span>
+                <span v-else class="tx-type-badge transfer">💸 Transfer</span>
                 {{ truncateHash(tx.hash) }}
               </span>
               <span class="timestamp">{{ formatTime(tx.timestamp) }}</span>

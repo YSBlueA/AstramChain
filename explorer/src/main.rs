@@ -61,7 +61,7 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    let server_address = "127.0.0.1";
+    let server_address = "0.0.0.0";
     let server_port = 8080;
 
     info!(

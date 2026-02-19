@@ -94,8 +94,8 @@ pub fn mine_block_with_coinbase_cuda(
     let suffix_dev = DeviceBuffer::from_slice(&suffix)?;
 
     let mut found_flag = DeviceBuffer::from_slice(&[0u32])?;
-    let mut found_nonce = DeviceBuffer::from_slice(&[0u64])?;
-    let mut found_hash = DeviceBuffer::from_slice(&[0u8; 32])?;
+    let found_nonce = DeviceBuffer::from_slice(&[0u64])?;
+    let found_hash = DeviceBuffer::from_slice(&[0u8; 32])?;
 
     let batch_size = std::env::var("CUDA_BATCH_SIZE")
         .ok()

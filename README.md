@@ -33,7 +33,7 @@ The release scripts prompt for **CPU vs GPU** and create a runnable package.
 
 - **Node HTTP + Dashboard**: `http://127.0.0.1:19533`
 - **P2P**: `8335` (env: `NODE_PORT`)
-- **Explorer**: `http://127.0.0.1:3000`
+- **Explorer**: `http://127.0.0.1:8080`
 - **DNS Server**: `8053`
 
 ## Configuration
@@ -65,7 +65,7 @@ Network selection (mainnet/testnet):
 ## Dashboard and Explorer
 
 - **Node Dashboard**: `http://127.0.0.1:19533`
-- **Explorer**: `http://127.0.0.1:3000`
+- **Explorer**: `http://127.0.0.1:8080`
 
 The launcher opens the dashboard a few seconds after starting the node.
 
