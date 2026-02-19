@@ -237,22 +237,6 @@ fn is_public_ip(ip: IpAddr) -> bool {
     }
 }
 
-async fn is_port_reachable(ip: IpAddr, port: u16) -> bool {
-    let socket = SocketAddr::new(ip, port);
-    match tokio::time::timeout(
-        Duration::from_secs(3),
-        tokio::net::TcpStream::connect(socket),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => {
-            drop(stream);
-            true
-        }
-        _ => false,
-    }
-}
-
 // Register a node
 async fn register_node(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,

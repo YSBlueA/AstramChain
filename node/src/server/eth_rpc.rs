@@ -11,7 +11,8 @@ use warp::{Filter, Reply};
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     id: Value,
     method: String,
     params: Option<Vec<Value>>,
@@ -267,7 +268,7 @@ async fn eth_send_raw_transaction(
             );
 
             // Convert Ethereum transaction to Astram UTXO transaction
-            let Astram_tx = match convert_eth_to_utxo_transaction(eth_tx, node.clone()).await {
+            let astram_tx = match convert_eth_to_utxo_transaction(eth_tx, node.clone()).await {
                 Ok(tx) => tx,
                 Err(e) => {
                     log::error!("Failed to convert Ethereum tx to UTXO: {}", e);
@@ -281,12 +282,12 @@ async fn eth_send_raw_transaction(
 
             log::info!(
                 "[INFO] Converted to Astram UTXO transaction: txid={}, eth_hash={}",
-                Astram_tx.txid,
-                Astram_tx.eth_hash
+                astram_tx.txid,
+                astram_tx.eth_hash
             );
 
             // Verify signatures before taking mempool lock
-            if !Astram_tx.verify_signatures().unwrap_or(false) {
+            if !astram_tx.verify_signatures().unwrap_or(false) {
                 log::error!("Transaction signature verification failed");
                 return JsonRpcResponse::error(id, -32000, "Invalid signature".to_string());
             }
@@ -296,14 +297,14 @@ async fn eth_send_raw_transaction(
                 let mut mempool = node.mempool.lock().unwrap();
 
                 // Check if already seen
-                if mempool.seen_tx.contains_key(&Astram_tx.txid) {
-                    log::warn!("Transaction already seen: {}", Astram_tx.txid);
-                    return JsonRpcResponse::success(id, json!(Astram_tx.eth_hash));
+                if mempool.seen_tx.contains_key(&astram_tx.txid) {
+                    log::warn!("Transaction already seen: {}", astram_tx.txid);
+                    return JsonRpcResponse::success(id, json!(astram_tx.eth_hash));
                 }
 
                 // Security: Check for double-spending in mempool
                 let mut tx_utxos = std::collections::HashSet::new();
-                for inp in &Astram_tx.inputs {
+                for inp in &astram_tx.inputs {
                     tx_utxos.insert(format!("{}:{}", inp.txid, inp.vout));
                 }
 
@@ -313,7 +314,7 @@ async fn eth_send_raw_transaction(
                         if tx_utxos.contains(&pending_utxo) {
                             log::warn!(
                                 "Double-spend attempt via eth_sendRawTransaction: TX {} tries to use UTXO {} already used by pending TX {}",
-                                Astram_tx.txid,
+                                astram_tx.txid,
                                 pending_utxo,
                                 pending_tx.txid
                             );
@@ -331,32 +332,32 @@ async fn eth_send_raw_transaction(
 
                 // Add to pending
                 let now = chrono::Utc::now().timestamp();
-                mempool.seen_tx.insert(Astram_tx.txid.clone(), now);
-                mempool.pending.push(Astram_tx.clone());
+                mempool.seen_tx.insert(astram_tx.txid.clone(), now);
+                mempool.pending.push(astram_tx.clone());
             }
 
             // Store mapping: eth_hash -> txid
             node_meta
-                .eth_to_Astram_tx
+                .eth_to_astram_tx
                 .lock()
                 .unwrap()
-                .insert(Astram_tx.eth_hash.clone(), Astram_tx.txid.clone());
+                .insert(astram_tx.eth_hash.clone(), astram_tx.txid.clone());
 
             log::info!(
                 "[INFO] Stored mapping: ETH hash {} -> Astram txid {}",
-                Astram_tx.eth_hash,
-                Astram_tx.txid
+                astram_tx.eth_hash,
+                astram_tx.txid
             );
-            log::info!("[INFO] Transaction added to mempool: {}", Astram_tx.txid);
+            log::info!("[INFO] Transaction added to mempool: {}", astram_tx.txid);
             log::info!(
                 "[INFO] Current mapping size: {}",
-                node_meta.eth_to_Astram_tx.lock().unwrap().len()
+                node_meta.eth_to_astram_tx.lock().unwrap().len()
             );
 
             // Broadcast to peers
             let p2p_clone = p2p.clone();
-            let tx_clone = Astram_tx.clone();
-            let eth_hash_result = Astram_tx.eth_hash.clone();
+            let tx_clone = astram_tx.clone();
+            let eth_hash_result = astram_tx.eth_hash.clone();
 
             tokio::spawn(async move {
                 p2p_clone.broadcast_tx(&tx_clone).await;
@@ -382,7 +383,7 @@ struct EthereumTransaction {
     gas_limit: u64,
     to: String,
     value: U256,
-    data: Vec<u8>,
+    _data: Vec<u8>,
     v: u64,
     r: Vec<u8>,
     s: Vec<u8>,
@@ -494,7 +495,7 @@ fn decode_ethereum_transaction(tx_bytes: &[u8]) -> Result<EthereumTransaction, S
         gas_limit,
         to,
         value,
-        data,
+        _data: data,
         v,
         r,
         s,
@@ -779,15 +780,15 @@ async fn eth_get_transaction_by_hash(
             let tx_hash = tx_hash.strip_prefix("0x").unwrap_or(tx_hash);
 
             // Try to resolve Ethereum tx hash to Astram txid
-            let Astram_txid = {
-                let mapping = node_meta.eth_to_Astram_tx.lock().unwrap();
+            let astram_txid = {
+                let mapping = node_meta.eth_to_astram_tx.lock().unwrap();
                 mapping
                     .get(tx_hash)
                     .cloned()
                     .unwrap_or_else(|| tx_hash.to_string())
             };
             if let Ok(Some((tx, block_height))) =
-                node.bc.lock().unwrap().get_transaction(&Astram_txid)
+                node.bc.lock().unwrap().get_transaction(&astram_txid)
             {
                 // ram and wei are now the same (both 10^18 decimals)
                 let amount = tx

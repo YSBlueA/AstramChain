@@ -848,7 +848,6 @@ impl Blockchain {
     /// Get address balance (sum of unspent outputs) from DB
     pub fn get_address_balance_from_db(&self, address: &str) -> Result<U256> {
         let mut balance = U256::zero();
-        let mut utxo_count = 0;
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
 
         for item in iter {
@@ -860,7 +859,6 @@ impl Blockchain {
                 match bincode::decode_from_slice::<Utxo, _>(&value, *BINCODE_CONFIG) {
                     Ok((utxo, _)) => {
                         if utxo.to == address {
-                            utxo_count += 1;
                             let amount = utxo.amount();
                             balance = balance + amount;
                         }

@@ -3,9 +3,12 @@ name = "Astram-node"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "astram_node"
+
 [dependencies]
 Astram-core = { path = "../core" }
-Astram-config = { path = "../config" }
+astram-config = { path = "../config" }
 serde = "1.0.228"
 serde_json = "1.0.145"
 tokio = { version = "1", features = ["full"] }

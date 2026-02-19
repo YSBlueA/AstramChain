@@ -4,7 +4,7 @@ mod wallet;
 use clap::Parser;
 use commands::*;
 
-use Astram_config::config::Config;
+use astram_config::config::Config;
 
 #[derive(Parser)]
 #[command(name = "Astram-wallet")]
@@ -22,7 +22,7 @@ fn main() {
         Commands::GenerateEth => generate_eth_wallet(),
         Commands::Balance { address } => get_balance(&address),
         Commands::Send { to, amount } => {
-            let amount_ram = ASRM_to_ram(amount);
+            let amount_ram = asrm_to_ram(amount);
             println!("Sending {} ASRM to {}", amount, to);
             send_transaction(&to, amount_ram)
         }

@@ -1,10 +1,8 @@
 use crate::state::{AddressInfo, BlockInfo, TransactionInfo};
 use anyhow::Result;
-use chrono::Utc;
-use log::{error, info};
+use log::info;
 use primitive_types::U256;
 use rocksdb::{DB, Options, WriteBatch};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Explorer Database - 블록체인 데이터를 인덱싱하여 저장
@@ -380,6 +378,7 @@ impl ExplorerDB {
     }
 
     /// 데이터베이스 초기화 (재동기화용)
+    #[allow(dead_code)]
     pub fn clear_all(&self) -> Result<()> {
         info!("⚠️ Clearing all explorer data...");
 

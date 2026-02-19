@@ -1,6 +1,6 @@
 use crate::wallet::Wallet;
-use Astram_config::config::Config;
 use Astram_core::transaction::{BINCODE_CONFIG, Transaction, TransactionInput, TransactionOutput};
+use astram_config::config::Config;
 use primitive_types::U256;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -12,13 +12,13 @@ use std::path::PathBuf;
 const RAM_PER_ASRM: u128 = 1_000_000_000_000_000_000; // 1 ASRM = 10^18 ram
 
 /// Convert ASRM to ram (smallest unit) as U256
-pub fn ASRM_to_ram(ASRM: f64) -> U256 {
-    let ram = (ASRM * RAM_PER_ASRM as f64) as u128;
+pub fn asrm_to_ram(asrm: f64) -> U256 {
+    let ram = (asrm * RAM_PER_ASRM as f64) as u128;
     U256::from(ram)
 }
 
 /// Convert ram (U256) to ASRM for display
-pub fn ram_to_ASRM(ram: U256) -> f64 {
+pub fn ram_to_asrm(ram: U256) -> f64 {
     // Convert U256 to u128 (safe for reasonable amounts)
     let ram_u128 = ram.low_u128();
     ram_u128 as f64 / RAM_PER_ASRM as f64
@@ -138,8 +138,8 @@ pub fn get_balance(address: &str) {
                     .map(U256::from)
                     .unwrap_or_else(U256::zero)
             };
-            let balance_ASRM = ram_to_ASRM(balance_ram);
-            println!("Balance: {} ASRM", balance_ASRM);
+            let balance_asrm = ram_to_asrm(balance_ram);
+            println!("Balance: {} ASRM", balance_asrm);
         }
         Err(e) => println!("[ERROR] Query failed: {}", e),
     }
@@ -204,8 +204,8 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
     if input_sum < amount_ram {
         println!(
             "[WARN] Insufficient balance: have {} ASRM, need {} ASRM",
-            ram_to_ASRM(input_sum),
-            ram_to_ASRM(amount_ram)
+            ram_to_asrm(input_sum),
+            ram_to_asrm(amount_ram)
         );
         return;
     }
@@ -221,14 +221,14 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
     println!("Transaction Details:");
     println!("   Inputs: {} UTXO(s)", selected_inputs.len());
     println!("   Estimated size: {} bytes", estimated_tx_size);
-    println!("   Fee: {} ASRM ({} ram)", ram_to_ASRM(fee), fee);
+    println!("   Fee: {} ASRM ({} ram)", ram_to_asrm(fee), fee);
 
     // Check if we have enough for amount + fee
     if input_sum < amount_ram + fee {
         println!(
             "[WARN] Insufficient balance for amount + fee: have {} ASRM, need {} ASRM",
-            ram_to_ASRM(input_sum),
-            ram_to_ASRM(amount_ram + fee)
+            ram_to_asrm(input_sum),
+            ram_to_asrm(amount_ram + fee)
         );
         return;
     }
@@ -278,10 +278,10 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
     println!("[OK] Transaction created successfully!");
     println!("   TXID (internal): {}", tx.txid);
     println!("   ETH Hash (external): {}", tx.eth_hash);
-    println!("   Amount: {} ASRM", ram_to_ASRM(amount_ram));
-    println!("   Fee: {} ASRM ({} ram)", ram_to_ASRM(fee), fee);
+    println!("   Amount: {} ASRM", ram_to_asrm(amount_ram));
+    println!("   Fee: {} ASRM ({} ram)", ram_to_asrm(fee), fee);
     if change > U256::zero() {
-        println!("   Change: {} ASRM", ram_to_ASRM(change));
+        println!("   Change: {} ASRM", ram_to_asrm(change));
     }
     println!(
         "Signature: {}",

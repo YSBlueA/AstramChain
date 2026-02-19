@@ -1,9 +1,8 @@
 use crate::db::ExplorerDB;
 use crate::rpc::NodeRpcClient;
-use crate::state::{AddressInfo, BlockInfo, BlockchainStats, TransactionInfo};
+use crate::state::BlockchainStats;
 use actix_web::{HttpResponse, web};
 use chrono::Utc;
-use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -15,6 +14,7 @@ pub struct HealthResponse {
 }
 
 /// Reorg alert information for security monitoring
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct ReorgAlert {
     pub severity: String, // "warning" (depth 6-49) or "critical" (depth 50+)
@@ -25,7 +25,6 @@ pub struct ReorgAlert {
     pub new_tip_hash: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
-
 
 #[derive(Debug, Deserialize)]
 pub struct PaginationParams {
@@ -111,11 +110,18 @@ pub async fn get_transactions(
 ) -> HttpResponse {
     let page = query.page.unwrap_or(1);
     let limit = query.limit.unwrap_or(20);
-    log::info!("💾 API: Fetching transactions - page: {}, limit: {}", page, limit);
+    log::info!(
+        "💾 API: Fetching transactions - page: {}, limit: {}",
+        page,
+        limit
+    );
 
     match db.get_transactions(page, limit) {
         Ok(transactions) => {
-            log::info!("✅ API: Retrieved {} transactions from DB", transactions.len());
+            log::info!(
+                "✅ API: Retrieved {} transactions from DB",
+                transactions.len()
+            );
             let total = db.get_transaction_count().unwrap_or(0);
             HttpResponse::Ok().json(serde_json::json!({
                 "transactions": transactions,
@@ -187,9 +193,7 @@ pub async fn get_address_info(
     log::info!("📍 Explorer handler: Fetching address info for {}", address);
 
     match db.get_address_info(&address) {
-        Ok(Some(info)) => {
-            HttpResponse::Ok().json(info)
-        }
+        Ok(Some(info)) => HttpResponse::Ok().json(info),
         Ok(None) => {
             // 캐시되지 않은 경우, 새로 계산
             match db.update_address_info(&address) {
@@ -206,9 +210,7 @@ pub async fn get_address_info(
 }
 
 // Node status proxy
-pub async fn get_node_status(
-    rpc: web::Data<Arc<NodeRpcClient>>,
-) -> HttpResponse {
+pub async fn get_node_status(rpc: web::Data<Arc<NodeRpcClient>>) -> HttpResponse {
     match rpc.fetch_status().await {
         Ok(status) => HttpResponse::Ok().json(status),
         Err(e) => HttpResponse::ServiceUnavailable().json(serde_json::json!({

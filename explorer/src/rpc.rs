@@ -8,6 +8,7 @@ use primitive_types::U256;
 use reqwest;
 
 /// Parse U256 from hex string (with or without 0x prefix) or decimal string
+#[allow(dead_code)]
 fn parse_u256_from_json(value: &serde_json::Value) -> Option<U256> {
     if let Some(s) = value.as_str() {
         // Try hex first (0x prefix)
@@ -49,6 +50,7 @@ impl NodeRpcClient {
     }
 
     /// Lightweight counts endpoint
+    #[allow(dead_code)]
     pub async fn fetch_counts(&self) -> Result<(u64, u64), String> {
         let url = format!("{}/counts", self.node_url);
         match reqwest::get(&url).await {
@@ -65,6 +67,7 @@ impl NodeRpcClient {
     }
 
     /// Fetch total volume from Node DB
+    #[allow(dead_code)]
     pub async fn fetch_total_volume(&self) -> Result<U256, String> {
         let url = format!("{}/counts", self.node_url);
         match reqwest::get(&url).await {
@@ -83,6 +86,7 @@ impl NodeRpcClient {
     }
 
     /// Fetch address info from Node DB
+    #[allow(dead_code)]
     pub async fn fetch_address_info(
         &self,
         address: &str,
@@ -138,6 +142,7 @@ impl NodeRpcClient {
     }
 
     /// Query blockchain data from Node /blockchain/db (direct DB)
+    #[allow(dead_code)]
     pub async fn fetch_blocks(&self) -> Result<Vec<BlockInfo>, String> {
         let url = format!("{}/blockchain/db", self.node_url);
 
@@ -577,6 +582,7 @@ impl NodeRpcClient {
     }
 
     /// Resolve Ethereum transaction hash to Astram txid
+    #[allow(dead_code)]
     pub async fn resolve_eth_hash(&self, eth_hash: &str) -> Result<String, String> {
         let url = format!("{}/eth_mapping/{}", self.node_url, eth_hash);
 

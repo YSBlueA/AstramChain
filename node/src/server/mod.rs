@@ -923,12 +923,12 @@ pub async fn run_server(
             // Strip 0x prefix if present
             let eth_hash = eth_hash.strip_prefix("0x").unwrap_or(&eth_hash);
 
-            let mapping = node_meta.eth_to_Astram_tx.lock().unwrap();
+            let mapping = node_meta.eth_to_astram_tx.lock().unwrap();
             match mapping.get(eth_hash) {
-                Some(Astram_txid) => {
+                Some(astram_txid) => {
                     Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
                         "eth_hash": format!("0x{}", eth_hash),
-                        "Astram_txid": Astram_txid,
+                        "Astram_txid": astram_txid,
                         "found": true
                     })))
                 }

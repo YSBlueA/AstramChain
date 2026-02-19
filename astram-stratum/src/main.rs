@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use futures::{SinkExt, StreamExt};
-use Astram_config::config::Config;
+use astram_config::config::Config;
 use Astram_core::block::{Block, BlockHeader, compute_header_hash, compute_merkle_root};
 use Astram_core::config::initial_block_reward;
 use Astram_core::transaction::{BINCODE_CONFIG, Transaction};
@@ -56,7 +56,8 @@ struct MempoolResponse {
 #[derive(Deserialize)]
 struct SubmitBlockResponse {
     status: String,
-    hash: Option<String>,
+    #[serde(rename = "hash")]
+    _hash: Option<String>,
     message: Option<String>,
 }
 

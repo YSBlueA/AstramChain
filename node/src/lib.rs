@@ -47,7 +47,7 @@ pub struct NodeMeta {
     pub my_public_address: Arc<Mutex<Option<String>>>,
     pub node_start_time: std::time::Instant,
     /// Maps Ethereum transaction hash to Astram UTXO txid (for MetaMask compatibility)
-    pub eth_to_Astram_tx: Arc<Mutex<HashMap<String, String>>>,
+    pub eth_to_astram_tx: Arc<Mutex<HashMap<String, String>>>,
 }
 
 pub struct MiningState {

@@ -1,21 +1,19 @@
 // Use library exports instead of declaring local modules to avoid duplicate crate types
-use Astram_config::config::Config;
 use Astram_core::Blockchain;
-use Astram_core::block;
-use Astram_core::block::{Block, BlockHeader, compute_header_hash, compute_merkle_root};
-use Astram_core::config::{calculate_block_reward, initial_block_reward};
+use Astram_core::block::Block;
+use Astram_core::config::initial_block_reward;
 use Astram_core::consensus;
-use Astram_core::transaction::{BINCODE_CONFIG, Transaction};
+use Astram_core::transaction::BINCODE_CONFIG;
 use Astram_core::utxo::Utxo;
-use Astram_node::ChainState;
-use Astram_node::MempoolState;
-use Astram_node::MiningState;
-use Astram_node::NodeMeta;
-use Astram_node::NodeHandle;
-use Astram_node::NodeHandles;
-use Astram_node::p2p::service::P2PService;
-use Astram_node::server::run_server;
-use chrono::Utc;
+use astram_config::config::Config;
+use astram_node::ChainState;
+use astram_node::MempoolState;
+use astram_node::MiningState;
+use astram_node::NodeHandle;
+use astram_node::NodeHandles;
+use astram_node::NodeMeta;
+use astram_node::p2p::service::P2PService;
+use astram_node::server::run_server;
 use hex;
 use log::{info, warn};
 use primitive_types::U256;
@@ -35,10 +33,13 @@ use tokio::time::{Duration, sleep};
 struct DnsNodeInfo {
     address: String,
     port: u16,
-    version: String,
+    #[serde(rename = "version")]
+    _version: String,
     height: u64,
-    last_seen: i64,
-    first_seen: i64,
+    #[serde(rename = "last_seen")]
+    _last_seen: i64,
+    #[serde(rename = "first_seen")]
+    _first_seen: i64,
     uptime_hours: f64,
 }
 
@@ -248,7 +249,7 @@ async fn main() {
         miner_address: Arc::new(Mutex::new(miner_address.clone())),
         my_public_address: Arc::new(Mutex::new(None)),
         node_start_time: std::time::Instant::now(),
-        eth_to_Astram_tx: Arc::new(Mutex::new(HashMap::new())),
+        eth_to_astram_tx: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let node = NodeHandles {
@@ -295,7 +296,7 @@ async fn main() {
     let eth_rpc_p2p = p2p_handle.clone();
     let eth_rpc_meta = node_meta.clone();
     tokio::spawn(async move {
-        Astram_node::server::run_eth_rpc_server(
+        astram_node::server::run_eth_rpc_server(
             eth_rpc_node,
             eth_rpc_p2p,
             eth_rpc_meta,
@@ -314,7 +315,9 @@ async fn main() {
         match signal::ctrl_c().await {
             Ok(()) => {
                 println!("\n[WARN] Shutdown signal received, cleaning up...");
-                println!("[INFO] Note: Connection errors during shutdown are expected and can be ignored");
+                println!(
+                    "[INFO] Note: Connection errors during shutdown are expected and can be ignored"
+                );
                 shutdown_flag_clone.store(true, OtherOrdering::SeqCst);
 
                 // Cancel ongoing mining immediately
@@ -432,9 +435,7 @@ async fn fetch_best_nodes_from_dns(
     limit: usize,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // Get my public address from state
-    let my_address = {
-        node_meta.my_public_address.lock().unwrap().clone()
-    };
+    let my_address = { node_meta.my_public_address.lock().unwrap().clone() };
 
     let dns_url = settings.dns_server_url.clone();
     let client = reqwest::Client::builder()
@@ -586,7 +587,7 @@ async fn fetch_best_nodes_from_dns(
 /// Register this node with the DNS server (non-blocking version)
 /// Height is optional and only used for informational purposes
 async fn register_with_dns(
-    _node_handle: NodeHandle,  // Not used - we don't need to lock for DNS registration
+    _node_handle: NodeHandle, // Not used - we don't need to lock for DNS registration
     settings: &NodeSettings,
     height: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -609,9 +610,11 @@ async fn register_with_dns(
     if response.status().is_success() {
         #[derive(serde::Deserialize)]
         struct RegisterResponse {
-            success: bool,
+            #[serde(rename = "success")]
+            _success: bool,
             message: String,
-            node_count: usize,
+            #[serde(rename = "node_count")]
+            _node_count: usize,
             registered_address: String,
             registered_port: u16,
         }
@@ -631,7 +634,7 @@ async fn register_with_dns(
 /// Synchronize blockchain with peers
 async fn sync_blockchain(
     node_handle: NodeHandle,
-    p2p_handle: Arc<Astram_node::p2p::manager::PeerManager>,
+    p2p_handle: Arc<astram_node::p2p::manager::PeerManager>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("[INFO] Starting blockchain synchronization...");
 
@@ -700,9 +703,6 @@ async fn sync_blockchain(
     let sync_timeout = Duration::from_secs(60);
     let sync_start = std::time::Instant::now();
     let mut last_height = my_height;
-    let sync_timeout = Duration::from_secs(60);
-    let sync_start = std::time::Instant::now();
-    let mut last_height = my_height;
 
     loop {
         sleep(Duration::from_secs(2)).await;
@@ -763,7 +763,7 @@ async fn sync_blockchain(
 
 async fn start_services(
     node_handle: NodeHandle,
-    p2p_handle: Arc<Astram_node::p2p::manager::PeerManager>,
+    p2p_handle: Arc<astram_node::p2p::manager::PeerManager>,
     chain_state: Arc<Mutex<ChainState>>,
     node_meta: Arc<NodeMeta>,
     miner_address: String,
@@ -823,7 +823,7 @@ async fn start_services(
 
                     let tick_start = std::time::Instant::now();
                     info!("[DNS] ⏰ Re-registration tick START");
-                    
+
                     // Get current height for DNS (non-blocking attempt)
                     let height = if let Ok(bc) = dns_node_handle.bc.try_lock() {
                         info!("[DNS] bc.try_lock() success");
@@ -842,7 +842,7 @@ async fn start_services(
                     };
 
                     info!("[DNS] Height determined: {} (took {:?})", height, tick_start.elapsed());
-                    
+
                     // Spawn DNS registration asynchronously - never blocks mining
                     let dns_handle_clone = dns_node_handle.clone();
                     let settings_clone = settings_dns.clone();
@@ -906,13 +906,8 @@ async fn start_services(
         sleep(Duration::from_secs(2)).await;
 
         // Initial connection to best nodes
-        match fetch_best_nodes_from_dns(
-            node_meta_for_p2p.clone(),
-            &settings_p2p,
-            my_node_port,
-            10,
-        )
-        .await
+        match fetch_best_nodes_from_dns(node_meta_for_p2p.clone(), &settings_p2p, my_node_port, 10)
+            .await
         {
             Ok(peer_addrs) => {
                 info!(
@@ -1028,7 +1023,7 @@ async fn start_services(
 
 async fn mining_loop(
     node_handle: NodeHandle,
-    p2p_handle: Arc<Astram_node::p2p::manager::PeerManager>,
+    p2p_handle: Arc<astram_node::p2p::manager::PeerManager>,
     chain_state: Arc<Mutex<ChainState>>,
     miner_address: String,
     shutdown_flag: Arc<AtomicBool>,
@@ -1063,14 +1058,7 @@ async fn mining_loop(
 
         // Snapshot pending txs + mining params while holding the lock briefly
         println!("[DEBUG] Mining: Attempting to acquire WRITE lock...");
-        let (
-            snapshot_txs,
-            difficulty,
-            prev_hash,
-            index_snapshot,
-            cancel_flag,
-            hashrate_shared,
-        ) = {
+        let (snapshot_txs, difficulty, prev_hash, index_snapshot, cancel_flag, hashrate_shared) = {
             println!("[DEBUG] Mining: WRITE lock acquired");
 
             // Mark mining as active
@@ -1098,20 +1086,23 @@ async fn mining_loop(
 
                 // determine next index from tip header (so header.index is known before mining)
                 println!("[DEBUG] Mining: Loading tip header to determine next index");
-                let mut next_index: u64 = 0;
-                if let Some(tip_hash) = bc.chain_tip.clone() {
-                    println!("[DEBUG] Mining: Loading header for hash: {}", &tip_hash[..16]);
+                let next_index: u64 = if let Some(tip_hash) = bc.chain_tip.clone() {
+                    println!(
+                        "[DEBUG] Mining: Loading header for hash: {}",
+                        &tip_hash[..16]
+                    );
                     if let Ok(Some(prev_header)) = bc.load_header(&tip_hash) {
-                        next_index = prev_header.index + 1;
+                        let next_index = prev_header.index + 1;
                         println!("[DEBUG] Mining: Got next_index = {}", next_index);
+                        next_index
                     } else {
                         println!("[DEBUG] Mining: Failed to load header, using 0");
-                        next_index = 0;
+                        0
                     }
                 } else {
                     println!("[DEBUG] Mining: No chain_tip, using next_index = 0");
-                    next_index = 0;
-                }
+                    0
+                };
 
                 // Calculate difficulty for the next block (dynamic adjustment every 30 blocks)
                 let diff = bc
@@ -1152,7 +1143,7 @@ async fn mining_loop(
             println!("[DEBUG] Mining: READ lock acquired for fees");
             let mut fee_sum = U256::zero();
             let bc = state.bc.lock().unwrap();
-            
+
             for tx in &snapshot_txs {
                 // Calculate fee: input_sum - output_sum
                 let mut input_sum = U256::zero();
@@ -1181,7 +1172,7 @@ async fn mining_loop(
                     fee_sum += fee;
                 }
             }
-            
+
             fee_sum
         };
         println!("[DEBUG] Mining: READ lock released after fees");
@@ -1197,10 +1188,10 @@ async fn mining_loop(
         let coinbase_reward = base_reward + total_fees;
 
         if total_fees > U256::zero() {
-            let fees_ASRM = total_fees / U256::from(1_000_000_000_000_000_000u64);
+            let fees_asrm = total_fees / U256::from(1_000_000_000_000_000_000u64);
             println!(
                 "[INFO] Total fees in block: {} wei ({} ASRM)",
-                total_fees, fees_ASRM
+                total_fees, fees_asrm
             );
         }
         println!(
@@ -1268,7 +1259,7 @@ async fn mining_loop(
         })
         .await
         .expect("mining task panicked");
-        
+
         println!("[DEBUG] ✅ Mining task COMPLETED and returned to main thread!");
 
         match mined_block_res {
@@ -1278,7 +1269,12 @@ async fn mining_loop(
                 // The block is already valid as-is from mining.
 
                 println!("[DEBUG] Validating and inserting block into blockchain DB...");
-                match node_handle.bc.lock().unwrap().validate_and_insert_block(&block) {
+                match node_handle
+                    .bc
+                    .lock()
+                    .unwrap()
+                    .validate_and_insert_block(&block)
+                {
                     Ok(_) => {
                         println!(
                             "[OK]✅ Block saved to DB - index={} hash={}",
@@ -1357,7 +1353,10 @@ async fn mining_loop(
                 }
 
                 // Mark mining as inactive and reset hashrate
-                node_handle.mining.active.store(false, OtherOrdering::SeqCst);
+                node_handle
+                    .mining
+                    .active
+                    .store(false, OtherOrdering::SeqCst);
                 *node_handle.mining.current_hashrate.lock().unwrap() = 0.0;
 
                 // Only requeue txs if it wasn't a cancellation
@@ -1384,9 +1383,6 @@ async fn mining_loop(
         println!("[DEBUG] Mining cycle: Sleep completed, starting next iteration...");
     }
 }
-
-// Constants for ASRM token economics
-const HALVING_INTERVAL: u64 = 210_000; // blocks (approx 4 years at ~10 min/block)
 
 fn current_block_reward_snapshot() -> U256 {
     // For now, always return initial reward (genesis/early blocks)

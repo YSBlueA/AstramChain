@@ -119,17 +119,16 @@ impl P2PService {
                 // Find first matching locator
                 let mut found_index = 0;
                 for loc_hash in &locator_hashes {
-                    if let Ok(hash_hex) = hex::encode(loc_hash).parse::<String>() {
-                        if let Some(pos) = chain.iter().position(|h| {
-                            if let Ok(computed) = Astram_core::block::compute_header_hash(h) {
-                                computed == hash_hex
-                            } else {
-                                false
-                            }
-                        }) {
-                            found_index = pos + 1; // Start from next block
-                            break;
+                    let hash_hex = hex::encode(loc_hash);
+                    if let Some(pos) = chain.iter().position(|h| {
+                        if let Ok(computed) = Astram_core::block::compute_header_hash(h) {
+                            computed == hash_hex
+                        } else {
+                            false
                         }
+                    }) {
+                        found_index = pos + 1; // Start from next block
+                        break;
                     }
                 }
                 found_index
@@ -460,16 +459,15 @@ impl P2PService {
                 InventoryType::Block => {
                     // Load and send requested blocks
                     for hash_bytes in hashes {
-                        if let Ok(hash_hex) = hex::encode(&hash_bytes).parse::<String>() {
-                            // Try to load block from DB
-                            if let Ok(Some(block)) = state.bc.lock().unwrap().load_block(&hash_hex) {
-                                // Send block to peer
-                                let peer_id_clone = peer_id.clone();
-                                let p2p_for_send = p2p_inner.clone();
-                                tokio::spawn(async move {
-                                    p2p_for_send.send_block_to_peer(&peer_id_clone, &block).await;
-                                });
-                            }
+                        let hash_hex = hex::encode(&hash_bytes);
+                        // Try to load block from DB
+                        if let Ok(Some(block)) = state.bc.lock().unwrap().load_block(&hash_hex) {
+                            // Send block to peer
+                            let peer_id_clone = peer_id.clone();
+                            let p2p_for_send = p2p_inner.clone();
+                            tokio::spawn(async move {
+                                p2p_for_send.send_block_to_peer(&peer_id_clone, &block).await;
+                            });
                         }
                     }
                 }
