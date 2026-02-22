@@ -22,34 +22,13 @@ esac
 
 echo -e "${INFO}INFO  Detected platform: $PLATFORM${NC}"
 
-# Select build backend
-select_backend() {
-    echo -e "${INFO}INFO  Select build backend:${NC}"
-    echo "  1) CPU"
-    echo "  2) GPU (CUDA)"
-    read -r -p "Choose [1-2] (default: 1): " choice
-    case "$choice" in
-        2|gpu|GPU)
-            BUILD_BACKEND="cuda"
-            ;;
-        *)
-            BUILD_BACKEND="cpu"
-            ;;
-    esac
-    echo -e "${INFO}INFO  Build backend: $BUILD_BACKEND${NC}"
-}
+# GPU (CUDA) is the only supported miner backend
+echo -e "${INFO}INFO  Build backend: GPU (CUDA)${NC}"
+export MINER_BACKEND="cuda"
 
-select_backend
-
-NODE_BUILD_FLAGS="--no-default-features"
-EXPLORER_BUILD_FLAGS="--no-default-features"
-if [ "$BUILD_BACKEND" = "cuda" ]; then
-    NODE_BUILD_FLAGS="--features cuda-miner"
-    EXPLORER_BUILD_FLAGS="--features cuda-miner"
-    export MINER_BACKEND="cuda"
-else
-    export MINER_BACKEND="cpu"
-fi
+# Use default features (cuda-miner enabled by default)
+NODE_BUILD_FLAGS=""
+EXPLORER_BUILD_FLAGS=""
 
 # Clean previous release
 RELEASE_DIR="release/$PLATFORM"
@@ -266,10 +245,6 @@ P2P_PORT=8335
 # HTTP API server
 HTTP_BIND_ADDR=127.0.0.1
 HTTP_PORT=19533
-
-# Ethereum JSON-RPC server
-ETH_RPC_BIND_ADDR=127.0.0.1
-ETH_RPC_PORT=8545
 
 # DNS discovery server
 DNS_SERVER_URL=http://161.33.19.183:8053

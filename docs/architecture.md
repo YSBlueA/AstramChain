@@ -18,7 +18,6 @@ Astram is composed of four main runtime components:
 - Retargets mining difficulty every block from a rolling 30-block timing window toward a 120s target.
 - Runs the P2P stack for block and transaction propagation.
 - Exposes an HTTP API for basic chain queries and a dashboard.
-- Exposes an Ethereum JSON-RPC endpoint for tooling compatibility.
 
 ### Astram-dns
 
@@ -54,7 +53,6 @@ Key node settings include:
 
 - P2P bind address and port
 - HTTP API bind address and port
-- Ethereum JSON-RPC bind address and port
 - DNS server URL
 - Data directory
 
@@ -66,4 +64,4 @@ Key node settings include:
 ## Operational Notes
 
 - The node should run with a reachable P2P port for public DNS registration.
-- Default HTTP and JSON-RPC endpoints bind to localhost.
+- Default HTTP endpoint binds to localhost.

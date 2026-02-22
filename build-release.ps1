@@ -11,33 +11,13 @@ function Write-Error { Write-Host "ERROR $args" -ForegroundColor Red }
 Write-Info "Astram Release Builder for Windows"
 Write-Host ""
 
-function Select-Backend {
-    Write-Info "Select build backend:"
-    Write-Host "  1) CPU"
-    Write-Host "  2) GPU (CUDA)"
-    $choice = Read-Host "Choose [1-2] (default: 1)"
-    switch ($choice) {
-        "2" { return "cuda" }
-        "gpu" { return "cuda" }
-        "GPU" { return "cuda" }
-        default { return "cpu" }
-    }
-}
+# GPU (CUDA) is the only supported miner backend
+Write-Info "Build backend: GPU (CUDA)"
+$env:MINER_BACKEND = "cuda"
 
-$BuildBackend = Select-Backend
-Write-Info "Build backend: $BuildBackend"
-
+# Use default features (cuda-miner enabled by default)
 $NodeFeatureArgs = @()
 $ExplorerFeatureArgs = @()
-if ($BuildBackend -eq "cuda") {
-    $NodeFeatureArgs += @("--features", "cuda-miner")
-    $ExplorerFeatureArgs += @("--features", "cuda-miner")
-    $env:MINER_BACKEND = "cuda"
-} else {
-    $NodeFeatureArgs += @("--no-default-features")
-    $ExplorerFeatureArgs += @("--no-default-features")
-    $env:MINER_BACKEND = "cpu"
-}
 
 # Clean previous release
 $ReleaseDir = "release/windows"
@@ -183,6 +163,20 @@ function Ensure-ConfigDefaults {
 
 $config = Ensure-ConfigDefaults
 
+# Load build configuration (MINER_BACKEND)
+$BuildInfoFile = Join-Path $ScriptDir "BUILD_INFO.conf"
+if (Test-Path $BuildInfoFile) {
+    Get-Content $BuildInfoFile | ForEach-Object {
+        if ($_ -match "^([^=]+)=(.*)$") {
+            $key = $matches[1]
+            $value = $matches[2]
+            if ($key -eq "MINER_BACKEND") {
+                $env:MINER_BACKEND = $value
+            }
+        }
+    }
+}
+
 switch ($Component) {
     'node'     { $exe = "Astram-node.exe" }
     'dns'      { $exe = "Astram-dns.exe" }
@@ -240,10 +234,6 @@ P2P_PORT=8335
 # HTTP API server
 HTTP_BIND_ADDR=127.0.0.1
 HTTP_PORT=19533
-
-# Ethereum JSON-RPC server
-ETH_RPC_BIND_ADDR=127.0.0.1
-ETH_RPC_PORT=8545
 
 # DNS discovery server
 DNS_SERVER_URL=http://161.33.19.183:8053
@@ -328,9 +318,16 @@ $VersionInfo = @"
 Astram v$Version
 Built: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 Platform: Windows x64
+Miner Backend: $BuildBackend
 "@
 
 Set-Content -Path "$ReleaseDir/VERSION.txt" -Value $VersionInfo
+
+# Create build info file for launcher to read
+$BuildInfoContent = @"
+MINER_BACKEND=$BuildBackend
+"@
+Set-Content -Path "$ReleaseDir/BUILD_INFO.conf" -Value $BuildInfoContent
 
 Write-Success "Release package created successfully!"
 Write-Host ""

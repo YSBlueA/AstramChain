@@ -8,7 +8,7 @@ Astram is a lightweight Proof-of-Work blockchain with a focus on fast propagatio
 
 - Provide a simple PoW chain that can be run and tested locally.
 - Support both CPU and optional CUDA mining backends.
-- Expose a straightforward HTTP API and an Ethereum-compatible JSON-RPC surface for tooling integration.
+- Expose a straightforward HTTP API for tooling integration.
 - Maintain a minimal wallet UX via a command-line wallet tool.
 
 ## System Model
@@ -195,7 +195,6 @@ Astram consists of:
 ## APIs
 
 - HTTP API: serves chain data, mempool queries, and node status.
-- Ethereum JSON-RPC: a compatibility layer for MetaMask and standard tooling.
 
 ## Configuration
 

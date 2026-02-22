@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 pub struct NodeHandles {
     pub bc: Arc<Mutex<Blockchain>>,
     pub mempool: Arc<Mutex<MempoolState>>,
-    /// Maps Ethereum transaction hash to Astram UTXO txid (for MetaMask compatibility)
     pub mining: Arc<MiningState>,
 }
 
@@ -46,8 +45,6 @@ pub struct NodeMeta {
     /// My public IP address as registered with DNS server
     pub my_public_address: Arc<Mutex<Option<String>>>,
     pub node_start_time: std::time::Instant,
-    /// Maps Ethereum transaction hash to Astram UTXO txid (for MetaMask compatibility)
-    pub eth_to_astram_tx: Arc<Mutex<HashMap<String, String>>>,
 }
 
 pub struct MiningState {

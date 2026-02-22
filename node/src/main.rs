@@ -249,7 +249,6 @@ async fn main() {
         miner_address: Arc::new(Mutex::new(miner_address.clone())),
         my_public_address: Arc::new(Mutex::new(None)),
         node_start_time: std::time::Instant::now(),
-        eth_to_astram_tx: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let node = NodeHandles {
@@ -287,24 +286,6 @@ async fn main() {
         .expect("p2p start failed");
 
     // Start Ethereum JSON-RPC server for MetaMask
-    let eth_rpc_node = node_handle.clone();
-    let eth_rpc_addr = to_socket_addr(
-        &node_settings.eth_rpc_bind_addr,
-        node_settings.eth_rpc_port,
-        SocketAddr::from(([127, 0, 0, 1], 8545)),
-    );
-    let eth_rpc_p2p = p2p_handle.clone();
-    let eth_rpc_meta = node_meta.clone();
-    tokio::spawn(async move {
-        astram_node::server::run_eth_rpc_server(
-            eth_rpc_node,
-            eth_rpc_p2p,
-            eth_rpc_meta,
-            eth_rpc_addr,
-        )
-        .await;
-    });
-
     // Graceful shutdown flag
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_clone = shutdown_flag.clone();
@@ -1029,20 +1010,20 @@ async fn mining_loop(
     shutdown_flag: Arc<AtomicBool>,
 ) {
     let requested_backend = std::env::var("MINER_BACKEND")
-        .unwrap_or_else(|_| "cpu".to_string())
+        .unwrap_or_else(|_| "cuda".to_string())
         .to_lowercase();
-    let mut miner_backend = requested_backend.clone();
-
-    if miner_backend == "cuda" && !cfg!(feature = "cuda-miner") {
-        println!("[WARN] CUDA miner requested but not enabled; falling back to CPU");
-        miner_backend = "cpu".to_string();
+    
+    if requested_backend != "cuda" {
+        println!("[ERROR] Only CUDA miner backend is supported");
+        std::process::exit(1);
     }
-
-    if miner_backend == "cuda" {
-        println!("[INFO] Using CUDA miner backend");
-    } else {
-        println!("[INFO] Using CPU miner backend");
+    
+    if !cfg!(feature = "cuda-miner") {
+        println!("[ERROR] CUDA miner feature not enabled. Build with --features cuda-miner");
+        std::process::exit(1);
     }
+    
+    println!("[INFO] Using CUDA miner backend");
 
     loop {
         // Check shutdown flag
@@ -1218,33 +1199,9 @@ async fn mining_loop(
         let hashrate_for_thread = hashrate_shared.clone();
 
         // Run mining in a blocking task so we don't block the tokio runtime
-        let backend = miner_backend.clone();
         println!("[DEBUG] ⏳ Spawning mining task on blocking thread pool...");
         let mined_block_res: anyhow::Result<Block> = tokio::task::spawn_blocking(move || {
-            if backend == "cuda" {
-                #[cfg(feature = "cuda-miner")]
-                {
-                    return consensus::mine_block_with_coinbase_cuda(
-                        index_local,
-                        prev_hash,
-                        difficulty_local,
-                        txs_cloned,
-                        &miner_addr_cloned,
-                        coinbase_reward,
-                        cancel_for_thread,
-                        Some(hashrate_for_thread),
-                    );
-                }
-                #[cfg(not(feature = "cuda-miner"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "CUDA miner not enabled. Build with --features cuda-miner"
-                    ));
-                }
-            }
-
-            println!("[DEBUG] 🔨 Mining thread: Using CPU backend, starting consensus mining...");
-            let block = consensus::mine_block_with_coinbase(
+            consensus::mine_block_with_coinbase_cuda(
                 index_local,
                 prev_hash,
                 difficulty_local,
@@ -1253,9 +1210,7 @@ async fn mining_loop(
                 coinbase_reward,
                 cancel_for_thread,
                 Some(hashrate_for_thread),
-            );
-            println!("[DEBUG] 🔨 Mining thread: consensus::mine_block_with_coinbase returned!");
-            block
+            )
         })
         .await
         .expect("mining task panicked");

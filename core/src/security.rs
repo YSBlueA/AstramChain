@@ -436,8 +436,6 @@ mod tests {
 
         let tx = Transaction {
             txid: "test".to_string(),
-            eth_hash: "0x0000000000000000000000000000000000000000000000000000000000000000"
-                .to_string(),
             inputs,
             outputs: vec![TransactionOutput::new("addr".to_string(), U256::from(100))],
             timestamp: 0,

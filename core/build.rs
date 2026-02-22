@@ -26,7 +26,10 @@ fn main() {
     
     let mut nvcc_args = vec![
         "-ptx",
-        "-O3",
+        "-O3",                    // Maximum optimization
+        "--use_fast_math",        // Fast math operations (critical for performance)
+        "--maxrregcount=64",      // Optimize register usage for better occupancy
+        "-Xptxas=-v",             // Verbose PTX assembly info
     ];
     
     let arch_flag = format!("-arch={}", arch);
@@ -39,7 +42,6 @@ fn main() {
         src_str,
         "-o",
         out_str,
-        "-lineinfo",
     ]);
     
     let output = Command::new(&nvcc)

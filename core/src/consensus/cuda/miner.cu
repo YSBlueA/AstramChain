@@ -1,139 +1,143 @@
 #include <stdint.h>
 
-#define SHA256_BLOCK_SIZE 64
+// Blake3 constants and helpers
+#define BLAKE3_OUT_LEN 32
+#define BLAKE3_KEY_LEN 32
+#define BLAKE3_BLOCK_LEN 64
+#define BLAKE3_CHUNK_LEN 1024
 
-__device__ __forceinline__ uint32_t rotr(uint32_t x, uint32_t n) {
+// Blake3 IV (Initialization Vector)
+__constant__ uint32_t BLAKE3_IV[8] = {
+    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+    0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19
+};
+
+// Rotation helpers for Blake3
+__device__ __forceinline__ uint32_t rotr32(uint32_t x, uint32_t n) {
     return (x >> n) | (x << (32 - n));
 }
 
-__device__ __forceinline__ uint32_t ch(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (~x & z);
+// Blake3 G function (quarter-round)
+__device__ __forceinline__ void g(uint32_t *state, int a, int b, int c, int d, uint32_t mx, uint32_t my) {
+    state[a] = state[a] + state[b] + mx;
+    state[d] = rotr32(state[d] ^ state[a], 16);
+    state[c] = state[c] + state[d];
+    state[b] = rotr32(state[b] ^ state[c], 12);
+    state[a] = state[a] + state[b] + my;
+    state[d] = rotr32(state[d] ^ state[a], 8);
+    state[c] = state[c] + state[d];
+    state[b] = rotr32(state[b] ^ state[c], 7);
 }
 
-__device__ __forceinline__ uint32_t maj(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (x & z) ^ (y & z);
+// Blake3 round function
+__device__ __forceinline__ void round_fn(uint32_t state[16], const uint32_t *m) {
+    // Mix columns
+    g(state, 0, 4, 8, 12, m[0], m[1]);
+    g(state, 1, 5, 9, 13, m[2], m[3]);
+    g(state, 2, 6, 10, 14, m[4], m[5]);
+    g(state, 3, 7, 11, 15, m[6], m[7]);
+    // Mix diagonals
+    g(state, 0, 5, 10, 15, m[8], m[9]);
+    g(state, 1, 6, 11, 12, m[10], m[11]);
+    g(state, 2, 7, 8, 13, m[12], m[13]);
+    g(state, 3, 4, 9, 14, m[14], m[15]);
 }
 
-__device__ __forceinline__ uint32_t bsig0(uint32_t x) {
-    return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22);
-}
-
-__device__ __forceinline__ uint32_t bsig1(uint32_t x) {
-    return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25);
-}
-
-__device__ __forceinline__ uint32_t ssig0(uint32_t x) {
-    return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3);
-}
-
-__device__ __forceinline__ uint32_t ssig1(uint32_t x) {
-    return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10);
-}
-
-__device__ void sha256(const uint8_t* data, int len, uint8_t out[32]) {
-    static __device__ const uint32_t k[64] = {
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-    };
-
-    uint8_t buf[256];
-    int total = len + 1 + 8;
-    int padded = ((total + 63) / 64) * 64;
-
-    for (int i = 0; i < len; i++) {
-        buf[i] = data[i];
-    }
-    buf[len] = 0x80;
-    for (int i = len + 1; i < padded; i++) {
-        buf[i] = 0x00;
-    }
-
-    uint64_t bit_len = (uint64_t)len * 8ULL;
+// Blake3 permutation (7 rounds)
+__device__ void blake3_compress(uint32_t cv[8], const uint8_t block[BLAKE3_BLOCK_LEN], 
+                                uint8_t block_len, uint64_t counter, uint8_t flags) {
+    uint32_t state[16];
+    
+    // Initialize state with chaining value and IV
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
-        buf[padded - 1 - i] = (uint8_t)(bit_len >> (8 * i));
+        state[i] = cv[i];
+        state[i + 8] = BLAKE3_IV[i];
     }
-
-    uint32_t h0 = 0x6a09e667;
-    uint32_t h1 = 0xbb67ae85;
-    uint32_t h2 = 0x3c6ef372;
-    uint32_t h3 = 0xa54ff53a;
-    uint32_t h4 = 0x510e527f;
-    uint32_t h5 = 0x9b05688c;
-    uint32_t h6 = 0x1f83d9ab;
-    uint32_t h7 = 0x5be0cd19;
-
-    for (int offset = 0; offset < padded; offset += 64) {
-        uint32_t w[64];
-        for (int i = 0; i < 16; i++) {
-            int idx = offset + i * 4;
-            w[i] = ((uint32_t)buf[idx] << 24) |
-                   ((uint32_t)buf[idx + 1] << 16) |
-                   ((uint32_t)buf[idx + 2] << 8) |
-                   ((uint32_t)buf[idx + 3]);
-        }
-        for (int i = 16; i < 64; i++) {
-            w[i] = ssig1(w[i - 2]) + w[i - 7] + ssig0(w[i - 15]) + w[i - 16];
-        }
-
-        uint32_t a = h0;
-        uint32_t b = h1;
-        uint32_t c = h2;
-        uint32_t d = h3;
-        uint32_t e = h4;
-        uint32_t f = h5;
-        uint32_t g = h6;
-        uint32_t h = h7;
-
-        for (int i = 0; i < 64; i++) {
-            uint32_t t1 = h + bsig1(e) + ch(e, f, g) + k[i] + w[i];
-            uint32_t t2 = bsig0(a) + maj(a, b, c);
-            h = g;
-            g = f;
-            f = e;
-            e = d + t1;
-            d = c;
-            c = b;
-            b = a;
-            a = t1 + t2;
-        }
-
-        h0 += a;
-        h1 += b;
-        h2 += c;
-        h3 += d;
-        h4 += e;
-        h5 += f;
-        h6 += g;
-        h7 += h;
+    
+    state[12] = (uint32_t)counter;
+    state[13] = (uint32_t)(counter >> 32);
+    state[14] = (uint32_t)block_len;
+    state[15] = (uint32_t)flags;
+    
+    // Load message block (little-endian)
+    uint32_t m[16];
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        m[i] = ((uint32_t)block[i*4 + 0]) |
+               ((uint32_t)block[i*4 + 1] << 8) |
+               ((uint32_t)block[i*4 + 2] << 16) |
+               ((uint32_t)block[i*4 + 3] << 24);
     }
-
-    uint32_t hs[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+    
+    // 7 rounds
+    #pragma unroll
+    for (int r = 0; r < 7; r++) {
+        round_fn(state, m);
+        // Permute message words for next round (Blake3 permutation)
+        uint32_t tmp[16];
+        tmp[0] = m[2]; tmp[1] = m[6]; tmp[2] = m[3]; tmp[3] = m[10];
+        tmp[4] = m[7]; tmp[5] = m[0]; tmp[6] = m[4]; tmp[7] = m[13];
+        tmp[8] = m[1]; tmp[9] = m[11]; tmp[10] = m[12]; tmp[11] = m[5];
+        tmp[12] = m[9]; tmp[13] = m[14]; tmp[14] = m[15]; tmp[15] = m[8];
+        #pragma unroll
+        for (int i = 0; i < 16; i++) m[i] = tmp[i];
+    }
+    
+    // XOR state with chaining value
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
-        out[i * 4 + 0] = (uint8_t)(hs[i] >> 24);
-        out[i * 4 + 1] = (uint8_t)(hs[i] >> 16);
-        out[i * 4 + 2] = (uint8_t)(hs[i] >> 8);
-        out[i * 4 + 3] = (uint8_t)(hs[i]);
+        cv[i] = state[i] ^ state[i + 8];
     }
 }
 
-__device__ void sha256d(const uint8_t* data, int len, uint8_t out[32]) {
-    uint8_t tmp[32];
-    sha256(data, len, tmp);
-    sha256(tmp, 32, out);
+// Simplified Blake3 hash for mining (single chunk)
+__device__ void blake3_hash_simple(const uint8_t* input, int len, uint8_t output[32]) {
+    uint32_t cv[8];
+    
+    // Initialize chaining value with IV
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        cv[i] = BLAKE3_IV[i];
+    }
+    
+    uint8_t block[BLAKE3_BLOCK_LEN];
+    int processed = 0;
+    uint64_t chunk_counter = 0;
+    
+    // Process complete 64-byte blocks
+    while (processed + BLAKE3_BLOCK_LEN <= len) {
+        #pragma unroll
+        for (int i = 0; i < BLAKE3_BLOCK_LEN; i++) {
+            block[i] = input[processed + i];
+        }
+        blake3_compress(cv, block, BLAKE3_BLOCK_LEN, chunk_counter++, 0);
+        processed += BLAKE3_BLOCK_LEN;
+    }
+    
+    // Process final block (with padding)
+    int remaining = len - processed;
+    #pragma unroll
+    for (int i = 0; i < BLAKE3_BLOCK_LEN; i++) {
+        if (i < remaining) {
+            block[i] = input[processed + i];
+        } else {
+            block[i] = 0;
+        }
+    }
+    
+    // Final block flag (0x01 for chunk end, 0x08 for root)
+    uint8_t flags = 0x01 | 0x08;
+    blake3_compress(cv, block, remaining, chunk_counter, flags);
+    
+    // Extract output (little-endian)
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        output[i*4 + 0] = (uint8_t)(cv[i]);
+        output[i*4 + 1] = (uint8_t)(cv[i] >> 8);
+        output[i*4 + 2] = (uint8_t)(cv[i] >> 16);
+        output[i*4 + 3] = (uint8_t)(cv[i] >> 24);
+    }
 }
 
 __device__ __forceinline__ int meets_target(const uint8_t hash[32], int difficulty) {
@@ -144,6 +148,8 @@ __device__ __forceinline__ int meets_target(const uint8_t hash[32], int difficul
     int full_bytes = difficulty / 2;
     int half = difficulty % 2;
 
+    // Early exit optimization
+    #pragma unroll 4
     for (int i = 0; i < full_bytes; i++) {
         if (hash[i] != 0) {
             return 0;
@@ -169,10 +175,16 @@ extern "C" __global__ void mine_kernel(
     int difficulty,
     unsigned int* found_flag,
     uint64_t* found_nonce,
-    uint8_t* found_hash
+    uint8_t* found_hash,
+    const uint8_t* dag,
+    uint64_t dag_size
 ) {
     uint64_t idx = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t stride = (uint64_t)blockDim.x * gridDim.x;
+
+    const int DAG_ITEM_SIZE = 128;
+    const int MIX_ITERATIONS = 32;  // Increased from 16 for better security
+    const uint64_t DAG_ITEM_COUNT = dag_size / DAG_ITEM_SIZE;
 
     for (uint64_t i = idx; i < total; i += stride) {
         if (atomicAdd(found_flag, 0) != 0) {
@@ -180,9 +192,13 @@ extern "C" __global__ void mine_kernel(
         }
 
         uint64_t nonce = start_nonce + i;
-        uint8_t msg[192];
+        
+        // Reduce stack usage by using smaller temporary buffers
+        // Step 1: Initial Blake3 hash of header (reuse msg buffer)
+        uint8_t msg[192];  // Shared buffer for multiple purposes
         int len = 0;
 
+        // Build header: prefix + nonce + suffix
         for (int j = 0; j < prefix_len; j++) {
             msg[len++] = prefix[j];
         }
@@ -196,14 +212,82 @@ extern "C" __global__ void mine_kernel(
             msg[len++] = suffix[j];
         }
 
-        uint8_t hash[32];
-        sha256d(msg, len, hash);
+        uint8_t header_hash[32];
+        blake3_hash_simple(msg, len, header_hash);
 
-        if (meets_target(hash, difficulty)) {
+        // Step 2: DAG seed from header + nonce (reuse msg buffer)
+        for (int j = 0; j < 32; j++) {
+            msg[j] = header_hash[j];
+        }
+        for (int j = 0; j < 8; j++) {
+            msg[32 + j] = (uint8_t)(nonce >> (8 * j));
+        }
+        
+        uint8_t seed[32];
+        blake3_hash_simple(msg, 40, seed);
+
+        // Step 3: Memory-hard mixing with DAG
+        uint8_t mix[128];
+        for (int j = 0; j < 32; j++) {
+            mix[j] = seed[j];
+        }
+        
+        // Expand seed to 128 bytes (reuse msg buffer for expand_input)
+        for (int expand_i = 1; expand_i < 4; expand_i++) {
+            for (int j = 0; j < 32; j++) {
+                msg[j] = mix[j];
+            }
+            msg[32] = (uint8_t)expand_i;
+            msg[33] = 0;
+            msg[34] = 0;
+            msg[35] = 0;
+            
+            uint8_t expanded[32];
+            blake3_hash_simple(msg, 36, expanded);
+            
+            int start_idx = expand_i * 32;
+            for (int j = 0; j < 32 && (start_idx + j) < 128; j++) {
+                mix[start_idx + j] = expanded[j];
+            }
+        }
+
+        // Perform random DAG accesses (memory-hard)
+        for (int iteration = 0; iteration < MIX_ITERATIONS; iteration++) {
+            // Compute DAG index from current mix state
+            uint32_t index_offset = (iteration % 4) * 32;
+            uint32_t dag_index_raw = 
+                ((uint32_t)mix[index_offset + 0]) |
+                ((uint32_t)mix[index_offset + 1] << 8) |
+                ((uint32_t)mix[index_offset + 2] << 16) |
+                ((uint32_t)mix[index_offset + 3] << 24);
+            
+            uint64_t dag_index = ((uint64_t)dag_index_raw) % DAG_ITEM_COUNT;
+            uint64_t dag_offset = dag_index * DAG_ITEM_SIZE;
+            
+            // Fetch DAG item from global memory (4GB dataset!)
+            // This is the memory-hard part - requires 4GB VRAM
+            for (int j = 0; j < DAG_ITEM_SIZE; j++) {
+                mix[j] ^= dag[dag_offset + j];
+            }
+            
+            // Hash the mix for next iteration
+            uint8_t mixed[32];
+            blake3_hash_simple(mix, 128, mixed);
+            for (int j = 0; j < 32; j++) {
+                mix[j] = mixed[j];
+            }
+        }
+
+        // Step 4: Final Blake3 hash
+        uint8_t final_hash[32];
+        blake3_hash_simple(mix, 128, final_hash);
+
+        // Check if meets target
+        if (meets_target(final_hash, difficulty)) {
             if (atomicCAS(found_flag, 0, 1) == 0) {
                 *found_nonce = nonce;
                 for (int j = 0; j < 32; j++) {
-                    found_hash[j] = hash[j];
+                    found_hash[j] = final_hash[j];
                 }
             }
             return;

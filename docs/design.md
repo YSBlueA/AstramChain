@@ -16,7 +16,6 @@
 ## API Design
 
 - HTTP API is optimized for local dashboards and basic chain queries.
-- Ethereum JSON-RPC is provided for tooling compatibility.
 
 ## Explorer UX
 

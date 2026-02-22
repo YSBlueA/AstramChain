@@ -9,16 +9,83 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+pub mod dag;
+
 #[cfg(feature = "cuda-miner")]
 pub mod cuda;
 
 #[cfg(feature = "cuda-miner")]
 pub use cuda::mine_block_with_coinbase_cuda;
 
+/// Convert compact difficulty format (bits) to required leading zero count
+/// Compact format: [exponent (1 byte)][mantissa (3 bytes)]
+/// Relationship: difficulty increases by factor of 16 for each additional leading hex-zero
+/// Formula: average_attempts = 16^(leading_zeros) = 2^(4 * leading_zeros)
+pub fn compact_to_leading_zeros(bits: u32) -> u32 {
+    let exponent = bits >> 24;
+    
+    if exponent == 0 {
+        return 0;
+    }
+    
+    // For simplicity in this implementation:
+    // exponent 32 (0x20) = 8 leading zeros (2-min @ 40MH/s)
+    // exponent 31 (0x1f) = 6 leading zeros (1-min @ 40MH/s)
+    // exponent 30 (0x1e) = 4 leading zeros (5-sec @ 40MH/s)
+    
+    // Map exponent to leading zeros
+    // This is a custom mapping for our consensus rules
+    match exponent {
+        0x20 => 8,   // Mainnet (2 min @ 40MH/s)
+        0x1f => 6,   // 1 min @ 40MH/s
+        0x1e => 4,   // 5 sec @ 40MH/s
+        0x1d => 2,   // Testing
+        _ => {
+            // Fallback: rough estimation
+            if exponent > 0x20 { 8 } else { 0 }
+        }
+    }
+}
+
 /// Find a valid nonce by updating header.nonce and returning (nonce, hash).
-/// Simple CPU single-threaded loop. Caller should run this in spawn_blocking.
+/// Now uses memory-hard DAG mixing for ASIC resistance.
+pub fn find_valid_nonce_with_dag(
+    header: &mut BlockHeader, 
+    difficulty: u32,
+    dag: &[u8]
+) -> Result<(u64, String)> {
+    // Convert compact difficulty format to leading zeros count
+    let leading_zeros = compact_to_leading_zeros(difficulty);
+    let target_prefix = "0".repeat(leading_zeros as usize);
+    let mut nonce: u64 = header.nonce;
+
+    // Compute header hash once (without nonce)
+    let header_hash = compute_header_hash(header)?;
+    let mut header_hash_bytes = [0u8; 32];
+    hex::decode_to_slice(&header_hash, &mut header_hash_bytes)?;
+
+    loop {
+        // Memory-hard mixing with DAG
+        let dag_hash = dag::hash_with_dag(&header_hash_bytes, nonce, dag);
+        let hash_str = hex::encode(&dag_hash);
+        
+        if hash_str.starts_with(&target_prefix) {
+            return Ok((nonce, hash_str));
+        }
+
+        nonce = nonce.wrapping_add(1);
+        // yield occasionally so OS scheduler can run other threads
+        if nonce % 100_000 == 0 {
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// Legacy CPU miner without DAG (fast but not memory-hard)
 pub fn find_valid_nonce(header: &mut BlockHeader, difficulty: u32) -> Result<(u64, String)> {
-    let target_prefix = "0".repeat(difficulty as usize);
+    // Convert compact difficulty format to leading zeros count
+    let leading_zeros = compact_to_leading_zeros(difficulty);
+    let target_prefix = "0".repeat(leading_zeros as usize);
     let mut nonce: u64 = header.nonce;
 
     loop {
@@ -54,7 +121,7 @@ pub fn mine_block_with_coinbase(
     cancel_flag: Arc<AtomicBool>,
     hashrate: Option<Arc<std::sync::Mutex<f64>>>,
 ) -> Result<Block> {
-    println!("[DEBUG] Mining: mine_block_with_coinbase called with difficulty={}", difficulty);
+    println!("[DEBUG] Mining: mine_block_with_coinbase called with difficulty=0x{:08x}", difficulty);
     let coinbase = Transaction::coinbase(miner_addr, reward).with_hashes();
     let mut all_txs = vec![coinbase];
     all_txs.extend(txs);
@@ -71,15 +138,32 @@ pub fn mine_block_with_coinbase(
         difficulty,
     };
 
-    let target_prefix = "0".repeat(difficulty as usize);
+    // Generate/load DAG for current epoch (memory-hard PoW)
+    let epoch = dag::get_epoch(index);
+    println!("[DEBUG] Mining: Block {} is in epoch {}, checking DAG...", index, epoch);
+    
+    // TODO: Cache DAG to avoid regeneration
+    // For now, generate it each time (expensive!)
+    let dag = dag::generate_full_dag(epoch)?;
+    println!("[DEBUG] Mining: DAG ready (4GB), starting mining...");
+
+    // Compute header hash (without nonce)
+    let header_hash = compute_header_hash(&header)?;
+    let mut header_hash_bytes = [0u8; 32];
+    hex::decode_to_slice(&header_hash, &mut header_hash_bytes)
+        .map_err(|e| anyhow!("Failed to decode header hash: {}", e))?;
+
+    // Convert compact difficulty format to leading zeros count
+    let leading_zeros = compact_to_leading_zeros(difficulty);
+    let target_prefix = "0".repeat(leading_zeros as usize);
     let mut nonce: u64 = 0;
     let mining_start = std::time::Instant::now();
     let mut last_hashrate_update = mining_start;
     let mut hashes_since_update: u64 = 0;
     
-    println!("[DEBUG] Mining: Entering mining loop, target_zeros={}", target_prefix.len());
+    println!("[DEBUG] Mining: Entering memory-hard mining loop, difficulty=0x{:08x} requires {} leading zeros", difficulty, target_prefix.len());
 
-    // ⛏️ CPU mining loop
+    // ⛏️ CPU mining loop with DAG
     loop {
         // ⛔ network cancellation check
         if cancel_flag.load(Ordering::Relaxed) {
@@ -88,14 +172,19 @@ pub fn mine_block_with_coinbase(
 
         // Log first iteration only
         if nonce == 0 {
-            println!("[DEBUG] Mining loop: STARTING iteration with nonce=0");
+            println!("[DEBUG] Mining loop: STARTING iteration with nonce=0 (DAG-based)");
         }
 
-        header.nonce = nonce;
-        let hash = compute_header_hash(&header)?;
+        // Memory-hard mixing with DAG
+        let dag_hash = dag::hash_with_dag(&header_hash_bytes, nonce, &dag);
+        let hash = hex::encode(&dag_hash);
         
         if hash.starts_with(&target_prefix) {
             println!("[DEBUG] Mining: FOUND valid hash! nonce={}, hash_prefix={}", nonce, &hash[..20]);
+            
+            // Set the nonce in header
+            header.nonce = nonce;
+            
             // Update final hashrate before returning
             let final_elapsed = last_hashrate_update.elapsed();
             if final_elapsed.as_secs_f64() > 0.0 {

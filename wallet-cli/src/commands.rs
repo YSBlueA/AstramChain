@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
-// ASRM unit constants (18 decimal places, same as Ethereum)
+// ASRM unit constants (18 decimal places)
 const RAM_PER_ASRM: u128 = 1_000_000_000_000_000_000; // 1 ASRM = 10^18 ram
 
 /// Convert ASRM to ram (smallest unit) as U256
@@ -29,7 +29,7 @@ pub enum Commands {
     /// Create a new wallet (Ed25519)
     Generate,
 
-    /// Create a new Ethereum-compatible wallet (secp256k1) for MetaMask
+    /// Create a new Ed25519 wallet (alias for Generate)
     GenerateEth,
 
     /// Check the balance of a specific address
@@ -91,21 +91,14 @@ pub fn generate_wallet() {
     println!("Checksum Address: {}", wallet.checksummed_address());
     println!();
     println!("[WARN] IMPORTANT: Save your private key securely!");
-    println!("   You can import this into MetaMask using the private key.");
 
     let path = get_wallet_path();
     save_wallet_json(&wallet, path.to_str().unwrap()).expect("Failed to save wallet");
 }
 
 pub fn generate_eth_wallet() {
-    // Same as generate_wallet now, since all wallets are Ethereum-compatible
+    // Same as generate_wallet now, since all wallets are secp256k1
     generate_wallet();
-    println!();
-    println!("To add Astram to MetaMask:");
-    println!("   Network Name: Astram Localhost");
-    println!("   RPC URL: http://127.0.0.1:8545");
-    println!("   Chain ID: 8888");
-    println!("   Currency Symbol: ASRM");
 }
 
 fn load_wallet() -> Wallet {
@@ -244,40 +237,30 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
 
     let mut tx = Transaction {
         txid: "".to_string(),
-        eth_hash: "".to_string(),
         inputs: selected_inputs,
         outputs,
         timestamp: chrono::Utc::now().timestamp(),
     };
 
-    // Step 5: Sign transaction (secp256k1)
+    // Step 5: Sign transaction (Ed25519)
     use Astram_core::crypto::WalletKeypair;
-    use secp256k1::SecretKey;
 
-    let secret_bytes = hex::decode(wallet.secret_hex()).expect("Invalid secret key");
-    let secret_key = SecretKey::from_slice(&secret_bytes).expect("Invalid secret key");
-    let secp = secp256k1::Secp256k1::new();
-    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
-
-    let keypair = WalletKeypair {
-        secret_key,
-        public_key,
-    };
+    let keypair = WalletKeypair::from_secret_hex(&wallet.secret_hex())
+        .expect("Invalid secret key");
 
     if let Err(e) = tx.sign(&keypair) {
-        println!("??Failed to sign transaction: {}", e);
+        println!("❌Failed to sign transaction: {}", e);
         return;
     }
 
     tx.verify_signatures()
         .expect("Signature verification failed after signing");
 
-    // Step 6: Populate txid and eth_hash
+    // Step 6: Populate txid
     tx = tx.with_hashes();
 
     println!("[OK] Transaction created successfully!");
     println!("   TXID (internal): {}", tx.txid);
-    println!("   ETH Hash (external): {}", tx.eth_hash);
     println!("   Amount: {} ASRM", ram_to_asrm(amount_ram));
     println!("   Fee: {} ASRM ({} ram)", ram_to_asrm(fee), fee);
     if change > U256::zero() {

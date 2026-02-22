@@ -46,7 +46,6 @@ impl TransactionOutput {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct Transaction {
     pub txid: String,     // UTXO transaction tracking (SHA256 double hash)
-    pub eth_hash: String, // EVM transaction hash (Keccak256, 0x prefix)
     pub inputs: Vec<TransactionInput>,
     pub outputs: Vec<TransactionOutput>,
     pub timestamp: i64,
@@ -57,7 +56,6 @@ impl Transaction {
         let output = TransactionOutput::new(to.to_string(), amount);
         let tx = Transaction {
             txid: "".to_string(),
-            eth_hash: "".to_string(),
             inputs: vec![],
             outputs: vec![output],
             timestamp: chrono::Utc::now().timestamp(),
@@ -86,22 +84,10 @@ impl Transaction {
         Ok(hex::encode(h2))
     }
 
-    /// Calculate EVM transaction hash (Ethereum style: Keccak256)
-    pub fn compute_eth_hash(&self) -> Result<String, anyhow::Error> {
-        use sha3::{Digest as Sha3Digest, Keccak256};
-
-        let bytes = self.serialize_for_hash()?;
-        let hash = Keccak256::digest(&bytes);
-        Ok(format!("0x{}", hex::encode(hash)))
-    }
-
-    /// Set both txid and eth_hash (recommended)
+    /// Set txid (recommended)
     pub fn with_hashes(mut self) -> Self {
         if let Ok(txid) = self.compute_txid() {
             self.txid = txid;
-        }
-        if let Ok(eth_hash) = self.compute_eth_hash() {
-            self.eth_hash = eth_hash;
         }
         self
     }
@@ -141,21 +127,6 @@ impl Transaction {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Missing signature"))?;
 
-            // Check for Ethereum-style signature (from MetaMask)
-            if sig_hex.starts_with("eth_sig:") {
-                // For Ethereum signatures, just verify the public key is valid
-                // The Ethereum signature was already validated when converting the transaction
-                if inp.pubkey.is_empty() {
-                    return Ok(false);
-                }
-                // Verify the public key can be parsed
-                if hex::decode(&inp.pubkey).is_err() {
-                    return Ok(false);
-                }
-                // Accept it - the Ethereum signature was validated during eth_sendRawTransaction
-                continue;
-            }
-
             // Standard Astram signature verification
             let sig_bytes = hex::decode(sig_hex)?;
 
@@ -185,7 +156,6 @@ fn sign_and_verify() {
     let out = TransactionOutput::new("alice".to_string(), U256::from(10));
     let mut tx2 = Transaction {
         txid: "".to_string(),
-        eth_hash: "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
         inputs: vec![inp],
         outputs: vec![out],
         timestamp: chrono::Utc::now().timestamp(),

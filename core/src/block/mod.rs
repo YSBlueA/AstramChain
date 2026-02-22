@@ -22,6 +22,13 @@ pub struct Block {
     pub hash: String, // hex string (computed from serialized header)
 }
 
+/// Blake3 hash for PoW (GPU-friendly)
+pub fn blake3_hash(data: &[u8]) -> [u8; 32] {
+    let hash = blake3::hash(data);
+    *hash.as_bytes()
+}
+
+/// Legacy SHA256d (kept for Ed25519 signatures)
 pub fn sha256d(data: &[u8]) -> [u8; 32] {
     let h1 = Sha256::digest(data);
     let h2 = Sha256::digest(&h1);
@@ -41,17 +48,17 @@ pub fn serialize_header(header: &BlockHeader) -> Result<Vec<u8>, bincode::error:
     Ok(bincode::encode_to_vec(header, config)?)
 }
 
-/// Compute hash from the header (sha256d)
+/// Compute hash from the header (Blake3 for PoW)
 pub fn compute_header_hash(header: &BlockHeader) -> Result<String, anyhow::Error> {
     let bytes = serialize_header(header)?;
-    let h = sha256d(&bytes);
+    let h = blake3_hash(&bytes);
     Ok(to_hex(&h))
 }
 
 /// Compute merkle root (assuming txids are in hex format)
 pub fn compute_merkle_root(txids: &[String]) -> String {
     if txids.is_empty() {
-        return to_hex(&sha256d(&[]));
+        return to_hex(&blake3_hash(&[]));
     }
 
     // decode hex -> bytes array [u8; 32]
@@ -78,7 +85,7 @@ pub fn compute_merkle_root(txids: &[String]) -> String {
             let mut concat = Vec::with_capacity(64);
             concat.extend_from_slice(&leaves[i]);
             concat.extend_from_slice(&leaves[i + 1]);
-            let h = sha256d(&concat);
+            let h = blake3_hash(&concat);
             next.push(h);
         }
         leaves = next;

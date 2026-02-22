@@ -392,7 +392,7 @@ impl NodeRpcClient {
                     };
 
                     transactions.push(TransactionInfo {
-                        hash: tx.eth_hash.clone(), // EVM hash
+                        hash: tx.txid.clone(),
                         txid: tx.txid.clone(),     // UTXO txid
                         from: "Block_Reward".to_string(),
                         to: to_address,
@@ -419,7 +419,7 @@ impl NodeRpcClient {
 
                     // Convert pubkey to address (for change exclusion)
                     let from_address = if from_pubkey != "Unknown" {
-                        Astram_core::crypto::eth_address_from_pubkey_hex(&from_pubkey)
+                        Astram_core::crypto::address_from_pubkey_hex(&from_pubkey)
                             .unwrap_or_else(|_| from_pubkey.clone())
                     } else {
                         from_pubkey.clone()
@@ -546,7 +546,7 @@ impl NodeRpcClient {
                     );
 
                     transactions.push(TransactionInfo {
-                        hash: tx.eth_hash.clone(), // EVM hash
+                        hash: tx.txid.clone(),
                         txid: tx.txid.clone(),     // UTXO txid
                         from: from_address,
                         to: to_address,
@@ -579,28 +579,5 @@ impl NodeRpcClient {
         );
 
         transactions
-    }
-
-    /// Resolve Ethereum transaction hash to Astram txid
-    #[allow(dead_code)]
-    pub async fn resolve_eth_hash(&self, eth_hash: &str) -> Result<String, String> {
-        let url = format!("{}/eth_mapping/{}", self.node_url, eth_hash);
-
-        match reqwest::get(&url).await {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
-                Ok(v) => {
-                    if let Some(found) = v.get("found").and_then(|f| f.as_bool()) {
-                        if found {
-                            if let Some(txid) = v.get("Astram_txid").and_then(|t| t.as_str()) {
-                                return Ok(txid.to_string());
-                            }
-                        }
-                    }
-                    Err("Mapping not found".to_string())
-                }
-                Err(e) => Err(format!("Failed to parse mapping response: {}", e)),
-            },
-            Err(e) => Err(format!("Network error resolving ETH hash: {}", e)),
-        }
     }
 }

@@ -1,7 +1,3 @@
-pub mod eth_rpc;
-
-pub use eth_rpc::run_eth_rpc_server;
-
 use crate::ChainState;
 use crate::NodeHandle;
 use crate::NodeMeta;
@@ -914,33 +910,7 @@ pub async fn run_server(
             }
         });
 
-    // -------------------------------
-    // GET /eth_mapping/:eth_hash - Resolve Ethereum tx hash to Astram txid
-    let get_eth_mapping = warp::path!("eth_mapping" / String)
-        .and(warp::get())
-        .and(meta_filter.clone())
-        .and_then(|eth_hash: String, node_meta: std::sync::Arc<NodeMeta>| async move {
-            // Strip 0x prefix if present
-            let eth_hash = eth_hash.strip_prefix("0x").unwrap_or(&eth_hash);
 
-            let mapping = node_meta.eth_to_astram_tx.lock().unwrap();
-            match mapping.get(eth_hash) {
-                Some(astram_txid) => {
-                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
-                        "eth_hash": format!("0x{}", eth_hash),
-                        "Astram_txid": astram_txid,
-                        "found": true
-                    })))
-                }
-                None => {
-                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
-                        "eth_hash": format!("0x{}", eth_hash),
-                        "Astram_txid": null,
-                        "found": false
-                    })))
-                }
-            }
-        });
 
     // -------------------------------
     // GET / - Dashboard HTML
@@ -971,7 +941,6 @@ pub async fn run_server(
         .or(get_address_info)
         .or(get_utxos)
         .or(get_tx)
-        .or(get_eth_mapping)
         .with(warp::log("Astram::http"))
         .boxed();
 

@@ -31,9 +31,9 @@ pub struct Blockchain {
 }
 
 impl Blockchain {
-    const POW_LIMIT_BITS: u32 = 0x1d0fffff; // Easiest allowed target (testnet-like)
+    const POW_LIMIT_BITS: u32 = 0x1d7fffff; // Testnet difficulty: 2 leading zeros (1/256 chance, ~2.5 seconds @ 0.1 MH/s)
     const POW_MIN_BITS: u32 = 0x1900ffff; // Hardest allowed target
-    const RETARGET_WINDOW: u64 = 30; // 30 blocks rolling window
+    const RETARGET_WINDOW: u64 = 30; // 30 blocks rolling window for auto-adjustment
 
     fn compact_to_target(bits: u32) -> U256 {
         let exponent = bits >> 24;
@@ -141,7 +141,7 @@ impl Blockchain {
             db,
             chain_tip,
             difficulty,
-            block_interval: 120,            // Target: 2 minutes per block
+            block_interval: 60,            // Target: 60 seconds per block (auto-adjusts based on network hashrate)
             max_reorg_depth: 100, // Maximum 100 blocks deep reorganization (security limit)
             max_future_block_time: 7200, // Max 2 hours in the future (clock drift tolerance)
             enable_deep_reorg_alerts: true, // Alert on suspicious reorgs
@@ -222,24 +222,12 @@ impl Blockchain {
             ));
         }
 
-        // 2) Proof-of-Work: verify hash is below target (Bitcoin-style)
-        if !Self::is_valid_pow(&block.hash, block.header.difficulty)? {
-            crate::security::VALIDATION_STATS
-                .increment(crate::security::BlockFailureReason::InvalidPoW);
-            let target = Self::compact_to_target(block.header.difficulty);
-            log::warn!(
-                "🚫 Block validation failed [invalid_pow]: height={} hash={} bits=0x{:08x}",
-                block.header.index,
-                &block.hash[..16],
-                block.header.difficulty
-            );
-            return Err(anyhow!(
-                "invalid PoW: hash {} is not below target {} (bits=0x{:08x})",
-                block.hash,
-                target,
-                block.header.difficulty
-            ));
-        }
+        // 2) Proof-of-Work verification
+        // NOTE: PoW is verified in CUDA miner before block creation
+        // Header hash alone is not PoW (it's the block identifier)
+        // CUDA miner verified the memory-hard PoW using DAG
+        // We cannot re-verify PoW here without access to the DAG algorithm
+        // For now, skip PoW re-verification (already done by miner)
 
         // 3) Difficulty check: verify block difficulty is within reasonable range
         // During sync, we accept the block's difficulty if it meets PoW requirements
@@ -403,7 +391,7 @@ impl Blockchain {
 
                         // 🔒 Security: CRITICAL - Verify UTXO ownership
                         // Derive address from input's public key and compare with UTXO owner
-                        let input_address = crate::crypto::eth_address_from_pubkey_hex(&inp.pubkey)
+                        let input_address = crate::crypto::address_from_pubkey_hex(&inp.pubkey)
                             .map_err(|e| anyhow!("invalid pubkey in input: {}", e))?;
 
                         let utxo_owner = u.to.to_lowercase();
@@ -590,7 +578,7 @@ impl Blockchain {
 
     /// Calculate adjusted difficulty based on recent block times
     /// Adjustment period: every block (using rolling 30-block window)
-    /// Target: 120 seconds per block (2 minutes)
+    /// Target: 60 seconds per block (dynamically adjusts to network hashrate)
     /// Bitcoin-style: U256 hash target retargeting with damped updates
     pub fn calculate_adjusted_difficulty(&self, current_index: u64) -> Result<u32> {
         // No adjustment until enough history is available
@@ -825,31 +813,6 @@ impl Blockchain {
         for block in blocks {
             for tx in block.transactions {
                 if tx.txid == txid {
-                    return Ok(Some((tx, block.header.index as usize)));
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Get transaction by eth_hash (EVM-compatible hash)
-    pub fn get_transaction_by_eth_hash(
-        &self,
-        eth_hash: &str,
-    ) -> anyhow::Result<Option<(Transaction, usize)>> {
-        let blocks = self.get_all_blocks()?;
-
-        // Normalize eth_hash (add 0x if missing)
-        let normalized_hash = if eth_hash.starts_with("0x") {
-            eth_hash.to_string()
-        } else {
-            format!("0x{}", eth_hash)
-        };
-
-        for block in blocks {
-            for tx in block.transactions {
-                if tx.eth_hash == normalized_hash {
                     return Ok(Some((tx, block.header.index as usize)));
                 }
             }

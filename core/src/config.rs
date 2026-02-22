@@ -2,7 +2,7 @@
 use primitive_types::U256;
 
 // ========== Token Definition ==========
-/// 1 ASRM in ram (smallest unit) - 18 decimals like Ethereum
+/// 1 ASRM in ram (smallest unit) - 18 decimals
 pub const RAM_PER_ASRM: U256 = U256([1_000_000_000_000_000_000, 0, 0, 0]);
 
 /// Initial block reward: 8 ASRM in ram
@@ -20,10 +20,9 @@ pub fn max_supply() -> U256 {
 
 // ========== Fee Model ==========
 // Anti-DDoS fee policy (EVM-compatible with 18 decimals)
-// Fee structure similar to Ethereum to prevent spam while remaining affordable
+// Fee structure to prevent spam while remaining affordable
 
 /// Base minimum fee: 100 Twei (100 * 10^12 wei) = 0.0001 ASRM
-/// Comparable to Ethereum's typical base fee
 /// In ram: 100,000,000,000,000 (100 trillion)
 pub const BASE_MIN_FEE: U256 = U256([100_000_000_000_000, 0, 0, 0]);
 

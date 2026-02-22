@@ -2,9 +2,6 @@
   <div class="transaction-detail-page">
     <div v-if="loading" class="loading">
       <p>Loading transaction...</p>
-      <p v-if="isEthHash" class="info-text">
-        Converting Ethereum transaction hash to Astram transaction...
-      </p>
     </div>
     <div v-else-if="error" class="error-container">
       <h2>Transaction not found</h2>
@@ -23,9 +20,6 @@
 
       <div v-if="isCoinbase" class="info-banner coinbase-banner">
         Mining Reward Transaction
-      </div>
-      <div v-else-if="isEthHash" class="info-banner">
-        This transaction was sent through MetaMask
       </div>
 
       <div class="detail-grid">

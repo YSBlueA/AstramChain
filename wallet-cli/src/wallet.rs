@@ -1,82 +1,72 @@
-use secp256k1::{Secp256k1, SecretKey, PublicKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use rand::RngCore;
 use hex;
-use tiny_keccak::{Hasher, Keccak};
+use sha2::{Digest, Sha256};
 
 pub struct Wallet {
-    pub secret_key: SecretKey,
-    pub public_key: PublicKey,
+    pub signing_key: SigningKey,
+    pub verifying_key: VerifyingKey,
     pub address: String,
 }
 
 impl Wallet {
-    /// 새 지갑 생성 (secp256k1, Ethereum 호환)
+    /// 새 지갑 생성 (Ed25519)
     pub fn new() -> Self {
-        let secp = Secp256k1::new();
         let mut rng = OsRng;
-        let mut secret_bytes = [0u8; 32];
-        rng.fill_bytes(&mut secret_bytes);
-        
-        let secret_key = SecretKey::from_slice(&secret_bytes)
-            .expect("32 bytes, within curve order");
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-        let address = Self::address_from_public(&public_key);
+        let signing_key = SigningKey::generate(&mut rng);
+        let verifying_key = signing_key.verifying_key();
+        let address = Self::address_from_public(&verifying_key);
         
         Self {
-            secret_key,
-            public_key,
+            signing_key,
+            verifying_key,
             address,
         }
     }
 
-    fn address_from_public(pubkey: &PublicKey) -> String {
-        let pubkey_bytes = pubkey.serialize_uncompressed();
-        let hash = keccak256(&pubkey_bytes[1..]); // Skip 0x04 prefix
-        format!("0x{}", hex::encode(&hash[12..32])) // Last 20 bytes with 0x prefix
+    fn address_from_public(pubkey: &VerifyingKey) -> String {
+        let pubkey_bytes = pubkey.to_bytes();
+        let hash = Sha256::digest(&pubkey_bytes);
+        // Use first 20 bytes for address (similar to Ethereum format)
+        format!("0x{}", hex::encode(&hash[..20]))
     }
 
     pub fn secret_hex(&self) -> String {
-        hex::encode(self.secret_key.secret_bytes())
+        hex::encode(self.signing_key.to_bytes())
     }
 
     pub fn public_hex(&self) -> String {
-        hex::encode(self.public_key.serialize_uncompressed())
+        hex::encode(self.verifying_key.to_bytes())
     }
     
-    /// Ethereum 체크섬 주소 (0x 접두사 포함)
+    /// 체크섬 주소 (0x 접두사 포함)
     pub fn checksummed_address(&self) -> String {
         to_checksum_address(&self.address)
     }
 
     /// 16진수 개인키로부터 복원
     pub fn from_hex(hex_str: &str) -> Self {
-        let secp = Secp256k1::new();
         let secret_bytes = hex::decode(hex_str).expect("Invalid hex string");
-        let secret_key = SecretKey::from_slice(&secret_bytes)
-            .expect("Invalid secret key");
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-        let address = Self::address_from_public(&public_key);
+        if secret_bytes.len() != 32 {
+            panic!("Secret key must be 32 bytes");
+        }
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&secret_bytes);
+        let signing_key = SigningKey::from_bytes(&bytes);
+        let verifying_key = signing_key.verifying_key();
+        let address = Self::address_from_public(&verifying_key);
 
         Self {
-            secret_key,
-            public_key,
+            signing_key,
+            verifying_key,
             address,
         }
     }
 }
 
-fn keccak256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Keccak::v256();
-    let mut output = [0u8; 32];
-    hasher.update(data);
-    hasher.finalize(&mut output);
-    output
-}
-
 fn to_checksum_address(address: &str) -> String {
     let address = address.trim_start_matches("0x").to_lowercase();
-    let hash = hex::encode(keccak256(address.as_bytes()));
+    let hash = hex::encode(Sha256::digest(address.as_bytes()));
     
     let mut result = String::from("0x");
     for (i, ch) in address.chars().enumerate() {
@@ -93,3 +83,4 @@ fn to_checksum_address(address: &str) -> String {
     }
     result
 }
+

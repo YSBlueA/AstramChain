@@ -1,100 +1,110 @@
-use rand::RngCore;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
-use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
-use tiny_keccak::{Hasher, Keccak};
 
 pub struct WalletKeypair {
-    pub secret_key: SecretKey,
-    pub public_key: PublicKey,
+    pub signing_key: SigningKey,
+    pub verifying_key: VerifyingKey,
 }
 
 impl WalletKeypair {
     pub fn new() -> Self {
-        let secp = Secp256k1::new();
         let mut rng = OsRng;
-        let mut secret_bytes = [0u8; 32];
-        rng.fill_bytes(&mut secret_bytes);
-
-        let secret_key =
-            SecretKey::from_slice(&secret_bytes).expect("32 bytes, within curve order");
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let signing_key = SigningKey::generate(&mut rng);
+        let verifying_key = signing_key.verifying_key();
 
         Self {
-            secret_key,
-            public_key,
+            signing_key,
+            verifying_key,
         }
     }
 
     pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
-        let secp = Secp256k1::new();
         let msg_hash = Sha256::digest(msg);
-        let message = Message::from_digest_slice(&msg_hash).expect("32 byte hash");
-        let sig = secp.sign_ecdsa(&message, &self.secret_key);
-        sig.serialize_compact()
+        let signature = self.signing_key.sign(&msg_hash);
+        signature.to_bytes()
     }
 
     pub fn address(&self) -> String {
-        eth_address_from_public_key(&self.public_key)
+        address_from_public_key(&self.verifying_key)
     }
 
     pub fn secret_hex(&self) -> String {
-        hex::encode(self.secret_key.secret_bytes())
+        hex::encode(self.signing_key.to_bytes())
     }
 
     pub fn public_hex(&self) -> String {
-        hex::encode(self.public_key.serialize_uncompressed())
+        hex::encode(self.verifying_key.to_bytes())
+    }
+
+    pub fn from_secret_hex(hex_str: &str) -> Result<Self, String> {
+        let secret_bytes = hex::decode(hex_str).map_err(|e| format!("invalid hex: {}", e))?;
+        if secret_bytes.len() != 32 {
+            return Err("secret key must be 32 bytes".to_string());
+        }
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&secret_bytes);
+        let signing_key = SigningKey::from_bytes(&bytes);
+        let verifying_key = signing_key.verifying_key();
+        
+        Ok(Self {
+            signing_key,
+            verifying_key,
+        })
     }
 }
 
-/// Generate Ethereum-style address from public key (with 0x prefix)
-pub fn eth_address_from_public_key(pubkey: &PublicKey) -> String {
-    let pubkey_bytes = pubkey.serialize_uncompressed();
-    let hash = keccak256(&pubkey_bytes[1..]); // Skip 0x04 prefix
-    format!("0x{}", hex::encode(&hash[12..32])) // Last 20 bytes with 0x prefix
+/// Generate address from Ed25519 public key (SHA256 hash with 0x prefix)
+pub fn address_from_public_key(pubkey: &VerifyingKey) -> String {
+    let pubkey_bytes = pubkey.to_bytes();
+    let hash = Sha256::digest(&pubkey_bytes);
+    // Use first 20 bytes like Ethereum for compatibility with existing address format
+    format!("0x{}", hex::encode(&hash[..20]))
 }
 
-/// Generate Ethereum-style address from hex-encoded public key string
-pub fn eth_address_from_pubkey_hex(pubkey_hex: &str) -> Result<String, String> {
+/// Generate address from hex-encoded public key string
+pub fn address_from_pubkey_hex(pubkey_hex: &str) -> Result<String, String> {
     let pubkey_bytes = hex::decode(pubkey_hex).map_err(|e| format!("invalid hex: {}", e))?;
-
-    let pubkey =
-        PublicKey::from_slice(&pubkey_bytes).map_err(|e| format!("invalid public key: {}", e))?;
-
-    Ok(eth_address_from_public_key(&pubkey))
-}
-
-pub fn keccak256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Keccak::v256();
-    let mut output = [0u8; 32];
-    hasher.update(data);
-    hasher.finalize(&mut output);
-    output
+    if pubkey_bytes.len() != 32 {
+        return Err("public key must be 32 bytes".to_string());
+    }
+    
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&pubkey_bytes);
+    let pubkey = VerifyingKey::from_bytes(&bytes)
+        .map_err(|e| format!("invalid public key: {}", e))?;
+    
+    Ok(address_from_public_key(&pubkey))
 }
 
 pub fn verify_signature(pubkey_hex: &str, msg: &[u8], sig_bytes: &[u8]) -> bool {
-    let secp = Secp256k1::new();
+    if sig_bytes.len() != 64 {
+        return false;
+    }
 
     let pubkey_bytes = match hex::decode(pubkey_hex) {
         Ok(bytes) => bytes,
         Err(_) => return false,
     };
 
-    let pubkey = match PublicKey::from_slice(&pubkey_bytes) {
+    if pubkey_bytes.len() != 32 {
+        return false;
+    }
+
+    let mut pubkey_array = [0u8; 32];
+    pubkey_array.copy_from_slice(&pubkey_bytes);
+    
+    let pubkey = match VerifyingKey::from_bytes(&pubkey_array) {
         Ok(pk) => pk,
         Err(_) => return false,
     };
 
     let msg_hash = Sha256::digest(msg);
-    let message = match Message::from_digest_slice(&msg_hash) {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
+    
+    let mut sig_array = [0u8; 64];
+    sig_array.copy_from_slice(sig_bytes);
+    let signature = Signature::from_bytes(&sig_array);
 
-    let sig = match secp256k1::ecdsa::Signature::from_compact(sig_bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
-    secp.verify_ecdsa(&message, &sig, &pubkey).is_ok()
+    pubkey.verify(&msg_hash, &signature).is_ok()
 }
+
