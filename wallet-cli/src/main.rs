@@ -20,6 +20,7 @@ fn main() {
     match cli.command {
         Commands::Generate => generate_wallet(),
         Commands::GenerateEth => generate_eth_wallet(),
+        Commands::Import { mnemonic } => import_wallet(&mnemonic),
         Commands::Balance { address } => get_balance(&address),
         Commands::Send { to, amount } => {
             let amount_ram = asrm_to_ram(amount);

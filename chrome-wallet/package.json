@@ -1,0 +1,33 @@
+{
+  "name": "astram-chrome-wallet",
+  "version": "0.1.0",
+  "description": "Astram Blockchain Chrome Extension Wallet",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "bip39": "^3.1.0",
+    "buffer": "^6.0.3",
+    "crypto-js": "^4.2.0",
+    "ethers": "^6.16.0",
+    "hdkey": "^2.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "sha256": "^0.2.0",
+    "tweetnacl": "^1.0.3",
+    "zustand": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "copy-webpack-plugin": "^11.0.0",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0"
+  }
+}

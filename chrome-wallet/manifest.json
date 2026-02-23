@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Astram Wallet",
+  "version": "0.1.0",
+  "description": "Astram Blockchain Chrome Extension Wallet",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "http://localhost:19533/*",
+    "http://127.0.0.1:19533/*"
+  ],
+  "action": {
+    "default_title": "Astram Wallet"
+  },
+  "side_panel": {
+    "default_path": "side-panel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

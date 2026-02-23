@@ -2,18 +2,43 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use hex;
 use sha2::{Digest, Sha256};
+use bip39::{Mnemonic, Language};
 
 pub struct Wallet {
     pub signing_key: SigningKey,
     pub verifying_key: VerifyingKey,
     pub address: String,
+    pub mnemonic: Option<String>,
 }
 
 impl Wallet {
-    /// 새 지갑 생성 (Ed25519)
+    /// 새 지갑 생성 (Ed25519 + BIP39 24-word mnemonic)
     pub fn new() -> Self {
         let mut rng = OsRng;
-        let signing_key = SigningKey::generate(&mut rng);
+        
+        // Generate 24-word mnemonic (256 bits entropy)
+        let mut entropy = [0u8; 32]; // 32 bytes = 256 bits for 24 words
+        rand::Rng::fill(&mut rng, &mut entropy);
+        
+        let mnemonic = Mnemonic::from_entropy_in(Language::English, &entropy)
+            .expect("Failed to generate mnemonic");
+        
+        Self::from_mnemonic_str(mnemonic.to_string().as_str())
+    }
+    
+    /// Mnemonic 문자열로부터 지갑 생성 (크롬 지갑과 호환)
+    pub fn from_mnemonic_str(mnemonic_str: &str) -> Self {
+        let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_str)
+            .expect("Invalid mnemonic");
+        
+        // BIP39 seed 파생 (512 bits)
+        let seed = mnemonic.to_seed("");
+        
+        // First 32 bytes as Ed25519 seed (크롬 지갑과 동일)
+        let mut seed_bytes = [0u8; 32];
+        seed_bytes.copy_from_slice(&seed[0..32]);
+        
+        let signing_key = SigningKey::from_bytes(&seed_bytes);
         let verifying_key = signing_key.verifying_key();
         let address = Self::address_from_public(&verifying_key);
         
@@ -21,6 +46,7 @@ impl Wallet {
             signing_key,
             verifying_key,
             address,
+            mnemonic: Some(mnemonic_str.to_string()),
         }
     }
 
@@ -44,7 +70,7 @@ impl Wallet {
         to_checksum_address(&self.address)
     }
 
-    /// 16진수 개인키로부터 복원
+    /// 16진수 개인키로부터 복원 (기존 wallet.json 호환용)
     pub fn from_hex(hex_str: &str) -> Self {
         let secret_bytes = hex::decode(hex_str).expect("Invalid hex string");
         if secret_bytes.len() != 32 {
@@ -60,6 +86,7 @@ impl Wallet {
             signing_key,
             verifying_key,
             address,
+            mnemonic: None, // hex로부터 복구 시 mnemonic 없음
         }
     }
 }

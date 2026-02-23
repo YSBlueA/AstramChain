@@ -652,10 +652,12 @@ impl Blockchain {
         }
 
         // Damp oscillations: apply only 25% of the computed move at each retarget event.
+        // Reduced damping for faster convergence (can be adjusted: 4 = 25%, 2 = 50%, 1 = 100%)
+        let damping_factor = 2; // 50% damping for faster adjustment
         let damped = if retargeted > current_target {
-            current_target + ((retargeted - current_target) / U256::from(4u8))
+            current_target + ((retargeted - current_target) / U256::from(damping_factor as u8))
         } else if retargeted < current_target {
-            current_target - ((current_target - retargeted) / U256::from(4u8))
+            current_target - ((current_target - retargeted) / U256::from(damping_factor as u8))
         } else {
             current_target
         };

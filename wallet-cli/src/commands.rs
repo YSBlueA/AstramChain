@@ -26,11 +26,17 @@ pub fn ram_to_asrm(ram: U256) -> f64 {
 
 #[derive(clap::Subcommand)]
 pub enum Commands {
-    /// Create a new wallet (Ed25519)
+    /// Create a new wallet (Ed25519 + BIP39 24-word mnemonic)
     Generate,
 
     /// Create a new Ed25519 wallet (alias for Generate)
     GenerateEth,
+    
+    /// Import wallet from 24-word recovery phrase (compatible with Chrome wallet)
+    Import {
+        #[arg(help = "24-word recovery phrase")]
+        mnemonic: String,
+    },
 
     /// Check the balance of a specific address
     Balance { address: String },
@@ -61,6 +67,8 @@ pub enum ConfigCommands {
 struct WalletJson {
     secret_key: String,
     address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mnemonic: Option<String>,
 }
 
 fn get_wallet_path() -> PathBuf {
@@ -77,6 +85,7 @@ fn save_wallet_json(wallet: &Wallet, path: &str) -> std::io::Result<()> {
     let wallet_json = WalletJson {
         secret_key: wallet.secret_hex(),
         address: wallet.address.clone(),
+        mnemonic: wallet.mnemonic.clone(),
     };
     let data = serde_json::to_string_pretty(&wallet_json).unwrap();
     fs::write(path, data)
@@ -89,16 +98,43 @@ pub fn generate_wallet() {
     println!("Private Key: {}", wallet.secret_hex());
     println!("Public Key: {}", wallet.public_hex());
     println!("Checksum Address: {}", wallet.checksummed_address());
+    
+    if let Some(ref mnemonic) = wallet.mnemonic {
+        println!();
+        println!("=== 24-Word Recovery Phrase (BIP39) ===");
+        println!("{}", mnemonic);
+        println!("========================================");
+        println!();
+        println!("[INFO] This mnemonic is compatible with Chrome wallet!");
+    }
+    
     println!();
-    println!("[WARN] IMPORTANT: Save your private key securely!");
+    println!("[WARN] IMPORTANT: Save your recovery phrase and private key securely!");
 
     let path = get_wallet_path();
     save_wallet_json(&wallet, path.to_str().unwrap()).expect("Failed to save wallet");
 }
 
 pub fn generate_eth_wallet() {
-    // Same as generate_wallet now, since all wallets are secp256k1
+    // Same as generate_wallet now, since all wallets are Ed25519
     generate_wallet();
+}
+
+pub fn import_wallet(mnemonic: &str) {
+    let wallet = Wallet::from_mnemonic_str(mnemonic);
+    println!("[OK] Wallet imported successfully from recovery phrase!");
+    println!("Address: {}", wallet.address);
+    println!("Private Key: {}", wallet.secret_hex());
+    println!("Public Key: {}", wallet.public_hex());
+    println!("Checksum Address: {}", wallet.checksummed_address());
+    println!();
+    println!("[INFO] This wallet is compatible with Chrome wallet!");
+    println!();
+    println!("[WARN] Wallet will be saved to disk.");
+
+    let path = get_wallet_path();
+    save_wallet_json(&wallet, path.to_str().unwrap()).expect("Failed to save wallet");
+    println!("[OK] Wallet saved to: {}", path.display());
 }
 
 fn load_wallet() -> Wallet {
