@@ -32,7 +32,7 @@ pub struct Blockchain {
 
 impl Blockchain {
     const POW_LIMIT_BITS: u32 = 0x1d7fffff; // Testnet difficulty: 2 leading zeros (1/256 chance, ~2.5 seconds @ 0.1 MH/s)
-    const POW_MIN_BITS: u32 = 0x1900ffff; // Hardest allowed target
+    const POW_MIN_BITS: u32 = 0x180fffff; // Hardest allowed target (allows headroom beyond 0x1900ffff saturation)
     const RETARGET_WINDOW: u64 = 30; // 30 blocks rolling window for auto-adjustment
 
     fn compact_to_target(bits: u32) -> U256 {
@@ -141,7 +141,7 @@ impl Blockchain {
             db,
             chain_tip,
             difficulty,
-            block_interval: 60,            // Target: 60 seconds per block (auto-adjusts based on network hashrate)
+            block_interval: 60, // Target: 60 seconds per block (auto-adjusts based on network hashrate)
             max_reorg_depth: 100, // Maximum 100 blocks deep reorganization (security limit)
             max_future_block_time: 7200, // Max 2 hours in the future (clock drift tolerance)
             enable_deep_reorg_alerts: true, // Alert on suspicious reorgs
@@ -577,12 +577,18 @@ impl Blockchain {
     }
 
     /// Calculate adjusted difficulty based on recent block times
-    /// Adjustment period: every block (using rolling 30-block window)
+    /// Adjustment period: every 30 blocks (using the previous 30-block window)
     /// Target: 60 seconds per block (dynamically adjusts to network hashrate)
     /// Bitcoin-style: U256 hash target retargeting with damped updates
     pub fn calculate_adjusted_difficulty(&self, current_index: u64) -> Result<u32> {
         // No adjustment until enough history is available
         if current_index < Self::RETARGET_WINDOW {
+            return Ok(self.difficulty);
+        }
+
+        // Retarget only on fixed boundaries (30, 60, 90, ...)
+        // `current_index` is the height of the block to be mined next.
+        if current_index % Self::RETARGET_WINDOW != 0 {
             return Ok(self.difficulty);
         }
 
@@ -645,7 +651,7 @@ impl Blockchain {
             retargeted = min_target;
         }
 
-        // Damp oscillations: apply only 25% of the computed move each block.
+        // Damp oscillations: apply only 25% of the computed move at each retarget event.
         let damped = if retargeted > current_target {
             current_target + ((retargeted - current_target) / U256::from(4u8))
         } else if retargeted < current_target {
