@@ -32,7 +32,6 @@ pub struct Blockchain {
 
 impl Blockchain {
     const POW_LIMIT_BITS: u32 = 0x1d7fffff; // Testnet difficulty: 2 leading zeros (1/256 chance, ~2.5 seconds @ 0.1 MH/s)
-    const POW_MIN_BITS: u32 = 0x180fffff; // Hardest allowed target (allows headroom beyond 0x1900ffff saturation)
     const RETARGET_WINDOW: u64 = 30; // 30 blocks rolling window for auto-adjustment
 
     fn compact_to_target(bits: u32) -> U256 {
@@ -93,10 +92,6 @@ impl Blockchain {
 
     fn pow_limit_target() -> U256 {
         Self::compact_to_target(Self::POW_LIMIT_BITS)
-    }
-
-    fn min_target() -> U256 {
-        Self::compact_to_target(Self::POW_MIN_BITS)
     }
 
     fn is_valid_pow(hash_hex: &str, bits: u32) -> Result<bool> {
@@ -633,7 +628,7 @@ impl Blockchain {
 
         let current_difficulty = self.difficulty;
         let pow_limit = Self::pow_limit_target();
-        let min_target = Self::min_target();
+        let min_target = U256::one();
         let current_target = {
             let t = Self::compact_to_target(current_difficulty);
             if t.is_zero() { pow_limit } else { t }
