@@ -217,12 +217,24 @@ impl Blockchain {
             ));
         }
 
-        // 2) Proof-of-Work verification
-        // NOTE: PoW is verified in CUDA miner before block creation
-        // Header hash alone is not PoW (it's the block identifier)
-        // CUDA miner verified the memory-hard PoW using DAG
-        // We cannot re-verify PoW here without access to the DAG algorithm
-        // For now, skip PoW re-verification (already done by miner)
+        // 2) Proof-of-Work verification (consensus-critical)
+        // Bitcoin-style compact bits target check against canonical header hash.
+        // This is deterministic and must be validated by every node on block acceptance.
+        if !Self::is_valid_pow(&block.hash, block.header.difficulty)? {
+            crate::security::VALIDATION_STATS
+                .increment(crate::security::BlockFailureReason::DifficultyOutOfRange);
+            log::warn!(
+                "🚫 Block validation failed [invalid_pow]: height={} hash={} bits=0x{:08x}",
+                block.header.index,
+                &block.hash[..16],
+                block.header.difficulty
+            );
+            return Err(anyhow!(
+                "invalid PoW at block {}: hash does not satisfy bits 0x{:08x}",
+                block.header.index,
+                block.header.difficulty
+            ));
+        }
 
         // 3) Difficulty check: verify block difficulty is within reasonable range
         // During sync, we accept the block's difficulty if it meets PoW requirements
@@ -646,13 +658,20 @@ impl Blockchain {
             retargeted = min_target;
         }
 
-        // Damp oscillations: apply only 25% of the computed move at each retarget event.
-        // Reduced damping for faster convergence (can be adjusted: 4 = 25%, 2 = 50%, 1 = 100%)
+        // Damp oscillations: apply only a fraction of the computed move at each retarget event.
+        // Reduced damping for faster convergence (4 = 25%, 2 = 50%, 1 = 100%).
+        // Ensure at least 1 target-unit movement when a change is needed, otherwise
+        // integer truncation can freeze at boundary values (e.g. target 2 -> 1 with factor 2).
         let damping_factor = 2; // 50% damping for faster adjustment
+        let damping_divisor = U256::from(damping_factor as u8);
         let damped = if retargeted > current_target {
-            current_target + ((retargeted - current_target) / U256::from(damping_factor as u8))
+            let delta = retargeted - current_target;
+            let step = (delta / damping_divisor).max(U256::one());
+            current_target.saturating_add(step)
         } else if retargeted < current_target {
-            current_target - ((current_target - retargeted) / U256::from(damping_factor as u8))
+            let delta = current_target - retargeted;
+            let step = (delta / damping_divisor).max(U256::one());
+            current_target.saturating_sub(step)
         } else {
             current_target
         };

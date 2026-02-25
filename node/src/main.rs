@@ -1012,17 +1012,17 @@ async fn mining_loop(
     let requested_backend = std::env::var("MINER_BACKEND")
         .unwrap_or_else(|_| "cuda".to_string())
         .to_lowercase();
-    
+
     if requested_backend != "cuda" {
         println!("[ERROR] Only CUDA miner backend is supported");
         std::process::exit(1);
     }
-    
+
     if !cfg!(feature = "cuda-miner") {
         println!("[ERROR] CUDA miner feature not enabled. Build with --features cuda-miner");
         std::process::exit(1);
     }
-    
+
     println!("[INFO] Using CUDA miner backend");
 
     loop {
@@ -1245,8 +1245,11 @@ async fn mining_loop(
                         // Calculate hashrate (rough estimate)
                         let mining_duration = mining_start.elapsed().as_secs_f64();
                         if mining_duration > 0.0 {
-                            // Estimate: 2^difficulty hashes attempted in mining_duration seconds
-                            let estimated_hashes = 2_u64.pow(difficulty_local) as f64;
+                            // difficulty_local is compact bits, not an exponent.
+                            // Approximate attempts by converted leading-zero hardness: 16^z = 2^(4z).
+                            let leading_zeros =
+                                consensus::compact_to_leading_zeros(difficulty_local);
+                            let estimated_hashes = 16_f64.powi(leading_zeros as i32);
                             let hashrate = estimated_hashes / mining_duration;
                             *node_handle.mining.current_hashrate.lock().unwrap() = hashrate;
                         }

@@ -17,9 +17,38 @@ const DEFAULT_BATCH_SIZE: u64 = 524_288; // 512K hashes (increased from 256K)
 const THREADS_PER_BLOCK: u32 = 256; // Stable setting
 const MAX_BLOCKS: u32 = 768; // Increased from 512 (GTX 1050 Ti has 768 cores)
 
+fn compact_bits_to_target_bytes(bits: u32) -> [u8; 32] {
+    let exponent = bits >> 24;
+    let mantissa = bits & 0x007f_ffff;
+    if mantissa == 0 {
+        return [0u8; 32];
+    }
+
+    let target = if exponent <= 3 {
+        U256::from(mantissa >> (8 * (3 - exponent)))
+    } else {
+        U256::from(mantissa) << (8 * (exponent - 3))
+    };
+
+    let mut out = [0u8; 32];
+    target.to_big_endian(&mut out);
+    out
+}
+
+fn hash_meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
+    for i in 0..32 {
+        if hash[i] < target[i] {
+            return true;
+        }
+        if hash[i] > target[i] {
+            return false;
+        }
+    }
+    true
+}
+
 fn encode_field<T: bincode::Encode>(value: &T) -> Result<Vec<u8>> {
-    let config = bincode::config::standard()
-        .with_fixed_int_encoding(); // Use fixed-length encoding
+    let config = bincode::config::standard().with_fixed_int_encoding(); // Use fixed-length encoding
     Ok(bincode::encode_to_vec(value, config)?)
 }
 
@@ -63,31 +92,50 @@ pub fn mine_block_with_coinbase_cuda(
 
     // Generate/load DAG for current epoch (memory-hard PoW)
     let epoch = crate::consensus::dag::get_epoch(index);
-    println!("[CUDA] Block {} is in epoch {}, generating 4GB DAG...", index, epoch);
-    
+    println!(
+        "[CUDA] Block {} is in epoch {}, generating 4GB DAG...",
+        index, epoch
+    );
+
     // TODO: Cache DAG to avoid regeneration
     let dag = crate::consensus::dag::generate_full_dag(epoch)?;
-    
+
     // DEBUG: Verify DAG contents
     println!("[DEBUG] DAG size: {} bytes", dag.len());
     println!("[DEBUG] DAG first 16 bytes: {}", hex::encode(&dag[..16]));
-    println!("[DEBUG] DAG[0] (first item, first 16 bytes): {}", hex::encode(&dag[0..16]));
-    
+    println!(
+        "[DEBUG] DAG[0] (first item, first 16 bytes): {}",
+        hex::encode(&dag[0..16])
+    );
+
     // Verify specific indices from first test
     let idx0_offset = 16275540 * 128;
     let idx1_offset = 22845103 * 128;
     let idx2_offset = 32858808 * 128;
     if idx2_offset + 16 <= dag.len() {
-        println!("[DEBUG] DAG item at idx 16275540: {}", hex::encode(&dag[idx0_offset..idx0_offset+16]));
-        println!("[DEBUG] DAG item at idx 22845103: {}", hex::encode(&dag[idx1_offset..idx1_offset+16]));
-        println!("[DEBUG] DAG item at idx 32858808: {}", hex::encode(&dag[idx2_offset..idx2_offset+16]));
+        println!(
+            "[DEBUG] DAG item at idx 16275540: {}",
+            hex::encode(&dag[idx0_offset..idx0_offset + 16])
+        );
+        println!(
+            "[DEBUG] DAG item at idx 22845103: {}",
+            hex::encode(&dag[idx1_offset..idx1_offset + 16])
+        );
+        println!(
+            "[DEBUG] DAG item at idx 32858808: {}",
+            hex::encode(&dag[idx2_offset..idx2_offset + 16])
+        );
     }
-    
+
     println!("[CUDA] DAG generation complete, uploading to GPU memory (4GB)...");
-    
+
     // Upload DAG to GPU (this is expensive - 4GB!)
-    let dag_dev = DeviceBuffer::from_slice(&dag)
-        .map_err(|e| anyhow!("Failed to upload DAG to GPU: {}. Make sure you have at least 4GB VRAM.", e))?;
+    let dag_dev = DeviceBuffer::from_slice(&dag).map_err(|e| {
+        anyhow!(
+            "Failed to upload DAG to GPU: {}. Make sure you have at least 4GB VRAM.",
+            e
+        )
+    })?;
     println!("[CUDA] DAG uploaded to GPU, starting mining...");
 
     let prefix = {
@@ -112,11 +160,12 @@ pub fn mine_block_with_coinbase_cuda(
     }
 
     let ptx = include_str!(concat!(env!("OUT_DIR"), "/miner.ptx"));
-    let module = Module::from_ptx(ptx, &[])
-        .map_err(|e| anyhow!("Failed to load CUDA PTX module: {}", e))?;
+    let module =
+        Module::from_ptx(ptx, &[]).map_err(|e| anyhow!("Failed to load CUDA PTX module: {}", e))?;
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
         .map_err(|e| anyhow!("Failed to create CUDA stream: {}", e))?;
-    let function = module.get_function("mine_kernel")
+    let function = module
+        .get_function("mine_kernel")
         .map_err(|e| anyhow!("Failed to get CUDA kernel function 'mine_kernel': {}", e))?;
 
     let prefix_dev = DeviceBuffer::from_slice(&prefix)?;
@@ -135,18 +184,25 @@ pub fn mine_block_with_coinbase_cuda(
     let blocks = ((batch_size + THREADS_PER_BLOCK as u64 - 1) / THREADS_PER_BLOCK as u64)
         .min(MAX_BLOCKS as u64) as u32;
 
-    // Convert compact difficulty format to leading zeros count for CUDA kernel
-    let leading_zeros = crate::consensus::compact_to_leading_zeros(difficulty);
-    
+    // Bitcoin-style target from compact bits (nBits)
+    let target = compact_bits_to_target_bytes(difficulty);
+    let target_dev = DeviceBuffer::from_slice(&target)?;
+
     let mut start_nonce: u64 = 0;
     let mut last_rate_update = std::time::Instant::now();
     let mut hashes_since_update: u64 = 0;
     let mut last_console_update = std::time::Instant::now();
     let mut total_hashes: u64 = 0;
 
-    println!("[CUDA] Starting mining loop: {} blocks × {} threads = {} parallel threads", blocks, THREADS_PER_BLOCK, blocks * THREADS_PER_BLOCK);
+    println!(
+        "[CUDA] Starting mining loop: {} blocks × {} threads = {} parallel threads",
+        blocks,
+        THREADS_PER_BLOCK,
+        blocks * THREADS_PER_BLOCK
+    );
     println!("[CUDA] Batch size: {} hashes per kernel call", batch_size);
-    println!("[CUDA] Difficulty: 0x{:08x} → {} leading hex zeros (1/{} chance)", difficulty, leading_zeros, 16_u64.pow(leading_zeros));
+    println!("[CUDA] Difficulty(bits): 0x{:08x}", difficulty);
+    println!("[CUDA] Target prefix: {}", hex::encode(&target[..8]));
     println!("[CUDA] Mining with 4GB DAG (memory-hard PoW)...");
 
     loop {
@@ -155,7 +211,11 @@ pub fn mine_block_with_coinbase_cuda(
         }
 
         if start_nonce % (batch_size * 10) == 0 && start_nonce > 0 {
-            println!("[CUDA] Processed {} batches, current nonce: {}", start_nonce / batch_size, start_nonce);
+            println!(
+                "[CUDA] Processed {} batches, current nonce: {}",
+                start_nonce / batch_size,
+                start_nonce
+            );
         }
 
         found_flag.copy_from(&[0u32])?;
@@ -168,21 +228,22 @@ pub fn mine_block_with_coinbase_cuda(
                 suffix.len() as i32,
                 start_nonce,
                 batch_size,
-                leading_zeros as i32,  // Pass converted leading zeros, not raw compact bits!
+                target_dev.as_device_ptr(),
                 found_flag.as_device_ptr(),
                 found_nonce.as_device_ptr(),
                 found_hash.as_device_ptr(),
                 dag_dev.as_device_ptr(),
                 dag.len() as u64
             ))
-                .map_err(|e| anyhow!("CUDA kernel launch failed: {}", e))?;
+            .map_err(|e| anyhow!("CUDA kernel launch failed: {}", e))?;
         }
 
         if start_nonce == 0 {
             println!("[CUDA] First kernel launched successfully, waiting for completion...");
         }
 
-        stream.synchronize()
+        stream
+            .synchronize()
             .map_err(|e| anyhow!("CUDA stream synchronization failed: {}", e))?;
 
         if start_nonce == 0 {
@@ -204,15 +265,20 @@ pub fn mine_block_with_coinbase_cuda(
                     *hr_lock = rate;
                 }
             }
-            
+
             // Console output every 5 seconds
             if last_console_update.elapsed().as_secs() >= 5 {
                 let mhs = rate / 1_000_000.0;
-                println!("[CUDA] Mining: {:.2} MH/s | Total: {} MH | Nonce range: {}-{}", 
-                    mhs, total_hashes / 1_000_000, start_nonce, start_nonce + batch_size);
+                println!(
+                    "[CUDA] Mining: {:.2} MH/s | Total: {} MH | Nonce range: {}-{}",
+                    mhs,
+                    total_hashes / 1_000_000,
+                    start_nonce,
+                    start_nonce + batch_size
+                );
                 last_console_update = std::time::Instant::now();
             }
-            
+
             hashes_since_update = 0;
             last_rate_update = std::time::Instant::now();
         }
@@ -224,17 +290,21 @@ pub fn mine_block_with_coinbase_cuda(
             found_hash.copy_to(&mut gpu_pow_hash)?;
 
             let nonce = nonce_host[0];
-            
-            // Verify GPU PoW hash meets difficulty
-            let gpu_pow_hex = hex::encode(gpu_pow_hash);
-            
-            // Convert compact difficulty format to leading zeros count
-            let leading_zeros = crate::consensus::compact_to_leading_zeros(difficulty);
-            if !gpu_pow_hex.starts_with(&"0".repeat(leading_zeros as usize)) {
-                return Err(anyhow!("GPU found nonce did not satisfy target (requires {} leading zeros)", leading_zeros));
+
+            // Verify GPU DAG-PoW hash meets compact target
+            if !hash_meets_target(&gpu_pow_hash, &target) {
+                return Err(anyhow!(
+                    "GPU found nonce did not satisfy compact target bits=0x{:08x}",
+                    difficulty
+                ));
             }
-            
-            println!("[CUDA] ✅ Valid PoW found! Nonce: {}, GPU PoW: {}", nonce, gpu_pow_hex);
+
+            let gpu_pow_hex = hex::encode(gpu_pow_hash);
+
+            println!(
+                "[CUDA] ✅ Valid PoW found! Nonce: {}, GPU PoW: {}",
+                nonce, gpu_pow_hex
+            );
 
             // Update final hashrate before returning
             let final_elapsed = last_rate_update.elapsed();
@@ -248,12 +318,20 @@ pub fn mine_block_with_coinbase_cuda(
             }
 
             header.nonce = nonce;
-            
+
             // Compute canonical header hash (block identifier)
             let recomposed = build_header_bytes(&prefix, nonce, &suffix);
             let header_hash = crate::block::blake3_hash(&recomposed);
+
+            // Consensus acceptance uses canonical header hash vs compact target.
+            // Keep searching if the DAG-PoW nonce does not satisfy canonical PoW target.
+            if !hash_meets_target(&header_hash, &target) {
+                start_nonce = nonce.wrapping_add(1);
+                continue;
+            }
+
             let header_hash_hex = hex::encode(header_hash);
-            
+
             // Block hash = header hash (NOT GPU PoW hash)
             // GPU PoW verification confirmed nonce is valid above
             let block = Block {
