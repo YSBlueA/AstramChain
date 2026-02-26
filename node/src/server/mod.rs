@@ -805,7 +805,7 @@ pub async fn run_server(
         .and_then(|address: String, node: NodeHandle| async move {
             match node.bc.lock().unwrap().get_address_balance_from_db(&address) {
                 Ok(bal) => {
-                    log::info!("[INFO] Balance lookup success: {} -> {}", address, bal);
+                    log::debug!("[DEBUG] Balance lookup: {} -> {}", address, bal);
                     Ok::<_, warp::Rejection>(warp::reply::json(
                         &serde_json::json!({"address": address, "balance": bal}),
                     ))

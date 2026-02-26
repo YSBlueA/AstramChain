@@ -2,6 +2,7 @@
 use Astram_core::Blockchain;
 use Astram_core::block::Block;
 use Astram_core::config::initial_block_reward;
+use Astram_core::config::calculate_block_reward;
 use Astram_core::consensus;
 use Astram_core::transaction::BINCODE_CONFIG;
 use Astram_core::utxo::Utxo;
@@ -19,7 +20,7 @@ use log::{info, warn};
 use primitive_types::U256;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -1165,7 +1166,7 @@ async fn mining_loop(
         println!("[INFO] Mining {} pending tx(s)...", block_txs_for_logging);
 
         // Coinbase reward = block reward + total fees
-        let base_reward = current_block_reward_snapshot();
+        let base_reward = current_block_reward_snapshot(index_snapshot);
         let coinbase_reward = base_reward + total_fees;
 
         if total_fees > U256::zero() {
@@ -1342,8 +1343,9 @@ async fn mining_loop(
     }
 }
 
-fn current_block_reward_snapshot() -> U256 {
+fn current_block_reward_snapshot(block_height:u64) -> U256 {
     // For now, always return initial reward (genesis/early blocks)
     // In production, this would take current blockchain height as parameter
-    initial_block_reward()
+    //initial_block_reward()
+    calculate_block_reward(block_height)
 }

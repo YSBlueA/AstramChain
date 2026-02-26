@@ -1,5 +1,5 @@
 use crate::block::{
-    Block, BlockHeader, compute_header_hash, compute_merkle_root, serialize_header,
+    Block, BlockHeader, compute_merkle_root, serialize_header,
 };
 use crate::transaction::Transaction;
 use anyhow::{Result, anyhow};
@@ -44,7 +44,7 @@ fn hash_meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
             return false;
         }
     }
-    true
+    false  // hash == target is NOT valid; must be hash < target
 }
 
 fn encode_field<T: bincode::Encode>(value: &T) -> Result<Vec<u8>> {
@@ -202,8 +202,10 @@ pub fn mine_block_with_coinbase_cuda(
     );
     println!("[CUDA] Batch size: {} hashes per kernel call", batch_size);
     println!("[CUDA] Difficulty(bits): 0x{:08x}", difficulty);
-    println!("[CUDA] Target prefix: {}", hex::encode(&target[..8]));
+    println!("[CUDA] Target (full 32 bytes): {}", hex::encode(&target));
+    println!("[CUDA] Target prefix (first 8 bytes): {}", hex::encode(&target[..8]));
     println!("[CUDA] Mining with 4GB DAG (memory-hard PoW)...");
+    println!("[CUDA] Note: Hash must be LESS than target to be valid");
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {

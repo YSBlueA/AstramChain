@@ -33,10 +33,12 @@ export function WalletHome() {
   }
 
   useEffect(() => {
+    if (!wallet?.address) return
+
     fetchBalance()
     const interval = setInterval(fetchBalance, 10000)
     return () => clearInterval(interval)
-  }, [wallet])
+  }, [wallet?.address])
 
   const handleCopyAddress = () => {
     if (wallet) {
