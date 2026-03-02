@@ -2,12 +2,12 @@
 
 ## Abstract
 
-Astram is a lightweight Proof-of-Work blockchain with a focus on fast propagation, practical mining on CPU or GPU, and a compact operational footprint. This document summarizes the current implementation as found in this repository.
+Astram is a lightweight Proof-of-Work blockchain with a focus on fast propagation, practical GPU mining, and a compact operational footprint. This document summarizes the current implementation as found in this repository.
 
 ## Goals
 
 - Provide a simple PoW chain that can be run and tested locally.
-- Support both CPU and optional CUDA mining backends.
+- Support CUDA-based GPU mining.
 - Expose a straightforward HTTP API for tooling integration.
 - Maintain a minimal wallet UX via a command-line wallet tool.
 
@@ -23,7 +23,7 @@ Astram consists of:
 ## Consensus and Mining
 
 - Consensus is Proof-of-Work using a Bitcoin-style numeric target check (`hash_u256 < target_u256`).
-- Mining can run on CPU or CUDA (feature-flag based builds).
+- Mining runs on CUDA GPU backend.
 - Difficulty is dynamically adjusted to converge toward a 120-second block interval.
 
 ### PoW target model
@@ -35,9 +35,10 @@ Astram consists of:
 ### Difficulty adjustment
 
 - Target block time: 120 seconds.
-- Retarget cadence: every block, using a rolling 30-block timing window.
-- Core formula: `new_target = old_target * actual_timespan / target_timespan`.
-- Timespan clamp: `actual_timespan` is bounded to `[target_timespan/4, target_timespan*4]`.
+- Difficulty algorithm: DWG3 (Dark Gravity Wave v3 style).
+- Retarget cadence: every block, using a 24-block timing window.
+- Core formula: `new_target = avg_past_target * actual_timespan / target_timespan`.
+- Timespan clamp: `actual_timespan` is bounded to `[target_timespan/3, target_timespan*3]`.
 - Damping: each block applies 25% of the computed move to reduce oscillation.
 - Bounds: target is clamped between a network maximum target (`POW_LIMIT_BITS`) and minimum target (`POW_MIN_BITS`).
 - Validation additionally rejects per-block target changes beyond 4x in either direction.

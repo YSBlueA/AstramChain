@@ -13,7 +13,8 @@ Write-Host ""
 
 # GPU (CUDA) is the only supported miner backend
 Write-Info "Build backend: GPU (CUDA)"
-$env:MINER_BACKEND = "cuda"
+$BuildBackend = "cuda"
+$env:MINER_BACKEND = $BuildBackend
 
 # Use default features (cuda-miner enabled by default)
 $NodeFeatureArgs = @()
@@ -171,10 +172,18 @@ if (Test-Path $BuildInfoFile) {
             $key = $matches[1]
             $value = $matches[2]
             if ($key -eq "MINER_BACKEND") {
-                $env:MINER_BACKEND = $value
+                if ([string]::IsNullOrWhiteSpace($value)) {
+                    $env:MINER_BACKEND = "cuda"
+                } else {
+                    $env:MINER_BACKEND = $value
+                }
             }
         }
     }
+}
+
+if ([string]::IsNullOrWhiteSpace($env:MINER_BACKEND)) {
+    $env:MINER_BACKEND = "cuda"
 }
 
 switch ($Component) {
@@ -290,6 +299,13 @@ $ReadmeContent = @'
 - Windows 10 or later (64-bit)
 - 4GB RAM minimum
 - 10GB free disk space
+- NVIDIA GPU (4GB+ VRAM recommended)
+- NVIDIA driver + CUDA Toolkit installed (`nvcc` available)
+
+## Mining Backend
+
+- This release is **GPU-only**.
+- Node mining backend is fixed to CUDA (`MINER_BACKEND=cuda`).
 
 ## Data Directory
 

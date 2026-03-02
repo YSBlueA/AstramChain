@@ -34,7 +34,7 @@ pub struct Blockchain {
 
 impl Blockchain {
     const POW_LIMIT_BITS: u32 = 0x1f7fffff; // Bitcoin-style compact bits: maximum target (easiest difficulty for testing)
-    const RETARGET_WINDOW: u64 = 30; // 30 blocks rolling window for auto-adjustment
+    const RETARGET_WINDOW: u64 = 24; // DWG3 window: use last 24 blocks
 
     fn compact_to_target(bits: u32) -> U256 {
         let exponent = bits >> 24;
@@ -497,121 +497,100 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Calculate adjusted difficulty based on recent block times
-    /// Adjustment period: every 30 blocks (using the previous 30-block window)
-    /// Target: 60 seconds per block (dynamically adjusts to network hashrate)
-    /// Bitcoin-style: U256 hash target retargeting with damped updates
+    /// Calculate next difficulty using DWG3 (Dark Gravity Wave v3 style)
+    /// - Recalculates every block
+    /// - Uses the last `RETARGET_WINDOW` blocks
+    /// - Averages historical targets, then scales by measured timespan
     pub fn calculate_adjusted_difficulty(&self, current_index: u64) -> Result<u32> {
-        // No adjustment until enough history is available
+        // No adjustment until enough history is available.
+        // `current_index` is the height to be mined next.
         if current_index < Self::RETARGET_WINDOW {
             return Ok(self.difficulty);
         }
 
-        // Retarget only on fixed boundaries (30, 60, 90, ...)
-        // `current_index` is the height of the block to be mined next.
-        if current_index % Self::RETARGET_WINDOW != 0 {
-            return Ok(self.difficulty);
+        let pow_limit = Self::pow_limit_target();
+        let mut past_target_avg = U256::zero();
+        let mut newest_time: Option<i64> = None;
+        let mut oldest_time: Option<i64> = None;
+
+        for i in 1..=Self::RETARGET_WINDOW {
+            let height = current_index - i;
+            let hash_bytes = match self.db.get(format!("i:{}", height).as_bytes())? {
+                Some(v) => v,
+                None => {
+                    log::warn!("DWG3: missing index entry at height {}", height);
+                    return Ok(self.difficulty);
+                }
+            };
+
+            let hash = String::from_utf8(hash_bytes)?;
+            let header = match self.load_header(&hash)? {
+                Some(h) => h,
+                None => {
+                    log::warn!("DWG3: missing header at height {}", height);
+                    return Ok(self.difficulty);
+                }
+            };
+
+            let mut target = Self::compact_to_target(header.difficulty);
+            if target.is_zero() {
+                target = pow_limit;
+            }
+
+            if i == 1 {
+                past_target_avg = target;
+                newest_time = Some(header.timestamp);
+            } else {
+                past_target_avg = (past_target_avg.saturating_mul(U256::from((i - 1) as u64))
+                    .saturating_add(target))
+                    / U256::from(i as u64);
+            }
+
+            oldest_time = Some(header.timestamp);
         }
 
-        // Rolling window: compare timestamps of [current_index - window, current_index - 1]
-        let start_index = current_index - Self::RETARGET_WINDOW;
-        let start_hash = self.db.get(format!("i:{}", start_index).as_bytes())?;
-        let end_hash = self.db.get(format!("i:{}", current_index - 1).as_bytes())?;
+        let newest_time = newest_time.unwrap_or(0);
+        let oldest_time = oldest_time.unwrap_or(newest_time);
 
-        if start_hash.is_none() || end_hash.is_none() {
-            log::warn!("Cannot find blocks for difficulty adjustment");
-            return Ok(self.difficulty);
+        // DWG3-style timespan clamping to reduce oscillation.
+        let raw_actual_timespan = (newest_time - oldest_time).max(1);
+        let target_timespan = (self.block_interval * Self::RETARGET_WINDOW as i64).max(1);
+        let clamped_actual_timespan = raw_actual_timespan.clamp(target_timespan / 3, target_timespan * 3);
+
+        let mut new_target = past_target_avg
+            .saturating_mul(U256::from(clamped_actual_timespan as u64))
+            / U256::from(target_timespan as u64);
+
+        if new_target.is_zero() {
+            new_target = U256::one();
+        }
+        if new_target > pow_limit {
+            new_target = pow_limit;
         }
 
-        let start_hash_str = String::from_utf8(start_hash.unwrap())?;
-        let end_hash_str = String::from_utf8(end_hash.unwrap())?;
+        let previous_bits = match self.db.get(format!("i:{}", current_index - 1).as_bytes())? {
+            Some(v) => {
+                let hash = String::from_utf8(v)?;
+                self.load_header(&hash)?
+                    .map(|h| h.difficulty)
+                    .unwrap_or(self.difficulty)
+            }
+            None => self.difficulty,
+        };
 
-        let start_header = self.load_header(&start_hash_str)?;
-        let end_header = self.load_header(&end_hash_str)?;
-
-        if start_header.is_none() || end_header.is_none() {
-            log::warn!("Cannot load headers for difficulty adjustment");
-            return Ok(self.difficulty);
-        }
-
-        let start_time = start_header.unwrap().timestamp;
-        let end_time = end_header.unwrap().timestamp;
-
-        // Calculate actual time taken for the last window
-        let raw_actual_time = (end_time - start_time).max(1);
-        let target_time = self.block_interval * Self::RETARGET_WINDOW as i64;
-        let clamped_actual_time = raw_actual_time.clamp(target_time / 4, target_time * 4);
+        let next_bits = Self::target_to_compact(new_target);
 
         log::info!(
-            "Difficulty adjustment at block {}: actual={}s, target={}s, avg={:.1}s/block",
+            "DWG3 retarget @{}: bits 0x{:08x} -> 0x{:08x}, actual={}s, target={}s, avg={:.1}s/block",
             current_index,
-            raw_actual_time,
-            target_time,
-            raw_actual_time as f64 / Self::RETARGET_WINDOW as f64
+            previous_bits,
+            next_bits,
+            raw_actual_timespan,
+            target_timespan,
+            raw_actual_timespan as f64 / Self::RETARGET_WINDOW as f64
         );
 
-        let ratio = raw_actual_time as f64 / target_time as f64;
-
-        let current_difficulty = self.difficulty;
-        let pow_limit = Self::pow_limit_target();
-        let min_target = U256::one();
-        let current_target = {
-            let t = Self::compact_to_target(current_difficulty);
-            if t.is_zero() { pow_limit } else { t }
-        };
-
-        // Core Bitcoin-style retarget: new_target = old_target * actual / target
-        // Avoid U256 overflow by dividing first (order matters with large numbers)
-        let mut retargeted = (current_target / U256::from(target_time as u64))
-            .saturating_mul(U256::from(clamped_actual_time as u64));
-
-        // Clamp target bounds
-        if retargeted > pow_limit {
-            retargeted = pow_limit;
-        }
-        if retargeted < min_target {
-            retargeted = min_target;
-        }
-
-        // Damp oscillations: apply only a fraction of the computed move at each retarget event.
-        // Reduced damping for faster convergence (4 = 25%, 2 = 50%, 1 = 100%).
-        // Ensure at least 1 target-unit movement when a change is needed, otherwise
-        // integer truncation can freeze at boundary values (e.g. target 2 -> 1 with factor 2).
-        let damping_factor = 2; // 50% damping for faster adjustment
-        let damping_divisor = U256::from(damping_factor as u8);
-        let damped = if retargeted > current_target {
-            let delta = retargeted - current_target;
-            let step = (delta / damping_divisor).max(U256::one());
-            current_target.saturating_add(step)
-        } else if retargeted < current_target {
-            let delta = current_target - retargeted;
-            let step = (delta / damping_divisor).max(U256::one());
-            current_target.saturating_sub(step)
-        } else {
-            current_target
-        };
-
-        let final_target = damped.clamp(min_target, pow_limit);
-        let final_difficulty = Self::target_to_compact(final_target);
-
-        if final_difficulty != current_difficulty {
-            log::info!(
-                "Difficulty adjusted: bits 0x{:08x} -> 0x{:08x} (ratio: {:.2}x target, avg: {:.1}s/block vs target: {}s/block)",
-                current_difficulty,
-                final_difficulty,
-                ratio,
-                raw_actual_time as f64 / Self::RETARGET_WINDOW as f64,
-                self.block_interval
-            );
-        } else {
-            log::info!(
-                "Difficulty unchanged: bits 0x{:08x} (ratio: {:.2}x, within acceptable range)",
-                current_difficulty,
-                ratio
-            );
-        }
-
-        Ok(final_difficulty)
+        Ok(next_bits)
     }
 
     /// Find a valid nonce by updating header.nonce and computing header hash.

@@ -208,16 +208,13 @@ pub async fn run_server(
         .and(p2p_filter.clone())
         .and_then(|node: NodeHandle, chain_state: std::sync::Arc<std::sync::Mutex<ChainState>>, node_meta: std::sync::Arc<NodeMeta>, p2p: std::sync::Arc<PeerManager>| async move {
             let request_start = std::time::Instant::now();
-            info!("[DASHBOARD] 📊 /status request START");
-            
+
             // Get P2P data FIRST to avoid nested lock contention
             // Use a non-blocking snapshot to keep /status responsive
-            info!("[DASHBOARD] 🌐 P2P snapshot attempt...");
             let p2p_start = std::time::Instant::now();
             let (peer_heights, my_height, subnet_24_count, subnet_16_count) =
                 match p2p.try_get_status_snapshot() {
                     Some(data) => {
-                        info!("[DASHBOARD] ✅ P2P snapshot OK (took {:?})", p2p_start.elapsed());
                         data
                     }
                     None => {
@@ -230,7 +227,6 @@ pub async fn run_server(
                 };
             
             // Quick snapshot of blockchain data with ONE read lock - no nested locks!
-            info!("[DASHBOARD] 🔄 Collecting node state...");
             let (
                 memory_blocks,
                 pending_tx,
@@ -245,37 +241,25 @@ pub async fn run_server(
             ) = {
                 let state = node.clone();
 
-                info!("[DASHBOARD] 🔒 Acquiring blockchain lock...");
                 let bc_lock_start = std::time::Instant::now();
                 let chain_tip = {
                     let bc = state.bc.lock().unwrap();
-                    info!("[DASHBOARD] ✅ Blockchain lock acquired (took {:?})", bc_lock_start.elapsed());
                     bc.chain_tip
                         .as_ref()
                         .map(|h| hex::encode(h))
                         .unwrap_or_else(|| "none".to_string())
                 };
-                info!("[DASHBOARD] ✅ Blockchain lock released (held {:?})", bc_lock_start.elapsed());
-
-                info!("[DASHBOARD] 🔒 Acquiring chain_state lock...");
                 let chain_lock_start = std::time::Instant::now();
                 let memory_count = {
                     let chain = chain_state.lock().unwrap();
-                    info!("[DASHBOARD] ✅ Chain_state lock acquired (took {:?})", chain_lock_start.elapsed());
                     chain.blockchain.len()
                 };
-                info!("[DASHBOARD] ✅ Chain_state lock released (held {:?})", chain_lock_start.elapsed());
-
-                info!("[DASHBOARD] 🔒 Acquiring mempool lock...");
                 let mempool_lock_start = std::time::Instant::now();
                 let (pending_count, seen_count) = {
                     let mempool = state.mempool.lock().unwrap();
-                    info!("[DASHBOARD] ✅ Mempool lock acquired (took {:?})", mempool_lock_start.elapsed());
                     (mempool.pending.len(), mempool.seen_tx.len())
                 };
-                info!("[DASHBOARD] ✅ Mempool lock released (held {:?})", mempool_lock_start.elapsed());
 
-                info!("[DASHBOARD] 🔒 Acquiring mining locks...");
                 let mining_start = std::time::Instant::now();
                 let diff = *state.mining.current_difficulty.lock().unwrap();
                 let hash = *state.mining.current_hashrate.lock().unwrap();
@@ -283,13 +267,9 @@ pub async fn run_server(
                     .mining
                     .blocks_mined
                     .load(std::sync::atomic::Ordering::Relaxed);
-                info!("[DASHBOARD] ✅ Mining state collected (took {:?})", mining_start.elapsed());
 
-                info!("[DASHBOARD] 🔒 Acquiring miner_address lock...");
-                let wallet_start = std::time::Instant::now();
+                    let wallet_start = std::time::Instant::now();
                 let wallet_addr = node_meta.miner_address.lock().unwrap().clone();
-                info!("[DASHBOARD] ✅ Miner_address acquired (took {:?})", wallet_start.elapsed());
-
                 (
                     memory_count,
                     pending_count,
@@ -303,10 +283,7 @@ pub async fn run_server(
                     wallet_addr,
                 )
             };
-            info!("[DASHBOARD] ✅ All state collected");
-            
             // Get wallet balance OUTSIDE the lock (DB operation)
-            info!("[DASHBOARD] 💰 Fetching wallet balance from DB...");
             let balance_start = std::time::Instant::now();
             let wallet_balance = {
                 node
@@ -316,18 +293,13 @@ pub async fn run_server(
                     .get_address_balance_from_db(&miner_address)
                     .unwrap_or(U256::zero())
             };
-            info!("[DASHBOARD] ✅ Wallet balance fetched (took {:?})", balance_start.elapsed());
 
             let connected_peers = peer_heights.len();
             let block_height = my_height;
 
-            info!("[DASHBOARD] 📈 Fetching validation statistics...");
             // Get validation statistics (lock-free)
             let validation_stats = Astram_core::security::VALIDATION_STATS.get_stats();
             let total_failures: u64 = validation_stats.iter().map(|(_, count)| count).sum();
-            info!("[DASHBOARD] ✅ Validation stats collected");
-
-            info!("[DASHBOARD] 📦 Building response JSON...");
             let response = serde_json::json!({
                 "node": {
                     "version": "0.1.0",
@@ -373,7 +345,6 @@ pub async fn run_server(
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             });
 
-            info!("[DASHBOARD] ✅ /status request COMPLETED in {:?}", request_start.elapsed());
             Ok::<_, warp::Rejection>(warp::reply::json(&response))
         });
 

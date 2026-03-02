@@ -168,9 +168,7 @@ impl ExplorerDB {
         let mut iter = self.db.raw_iterator();
         iter.seek(start_key);
 
-        let skip = ((page - 1) * limit) as usize;
-        let mut transactions = Vec::new();
-        let mut count = 0;
+        let mut all_transactions = Vec::new();
 
         while iter.valid() {
             if let Some(key) = iter.key() {
@@ -178,25 +176,27 @@ impl ExplorerDB {
                     break;
                 }
 
-                if count >= skip && transactions.len() < limit as usize {
-                    if let Some(value) = iter.value() {
-                        if let Ok(tx) = serde_json::from_slice::<TransactionInfo>(value) {
-                            transactions.push(tx);
-                        }
+                if let Some(value) = iter.value() {
+                    if let Ok(tx) = serde_json::from_slice::<TransactionInfo>(value) {
+                        all_transactions.push(tx);
                     }
                 }
-                count += 1;
             }
             iter.next();
         }
 
-        // 최신순으로 정렬
-        transactions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_transactions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
-        Ok(transactions)
+        let skip = ((page - 1) * limit) as usize;
+        let paginated: Vec<TransactionInfo> = all_transactions
+            .into_iter()
+            .skip(skip)
+            .take(limit as usize)
+            .collect();
+
+        Ok(paginated)
     }
 
-    /// 주소별 트랜잭션 조회
     pub fn get_transactions_by_address(&self, address: &str) -> Result<Vec<TransactionInfo>> {
         let prefix = format!("ta:{}:", address);
         let mut iter = self.db.raw_iterator();
@@ -220,7 +220,6 @@ impl ExplorerDB {
             iter.next();
         }
 
-        // 중복 제거 및 트랜잭션 조회
         let mut transactions = Vec::new();
         let mut seen = std::collections::HashSet::new();
 

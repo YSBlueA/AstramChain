@@ -38,8 +38,11 @@ pub enum Commands {
         mnemonic: String,
     },
 
-    /// Check the balance of a specific address
-    Balance { address: String },
+    /// Check the balance of a specific address (or current wallet if not specified)
+    Balance { 
+        #[arg(help = "Address to check balance (defaults to current wallet)")]
+        address: Option<String> 
+    },
 
     /// Create, sign, and broadcast a transaction to the network
     /// Amount should be specified in ASRM (e.g., 1.5 for 1.5 ASRM)
@@ -137,15 +140,37 @@ pub fn import_wallet(mnemonic: &str) {
     println!("[OK] Wallet saved to: {}", path.display());
 }
 
-fn load_wallet() -> Wallet {
+pub fn load_wallet() -> Wallet {
     let path = get_wallet_path();
     let data = fs::read_to_string(&path).expect("Failed to read wallet file");
     let wallet_json: WalletJson = serde_json::from_str(&data).expect("Failed to parse wallet JSON");
 
-    println!("[INFO] Wallet loaded: {}", wallet_json.address);
+    let wallet = Wallet::from_hex(&wallet_json.secret_key);
+    
+    // Check if stored address matches the one derived from private key
+    if wallet_json.address != wallet.address {
+        println!("[WARN] Address mismatch detected!");
+        println!("       Stored address:  {}", wallet_json.address);
+        println!("       Derived address: {}", wallet.address);
+        println!("[INFO] Auto-fixing wallet.json with correct address...");
+        
+        // Update wallet.json with correct address
+        let updated_wallet = WalletJson {
+            secret_key: wallet_json.secret_key.clone(),
+            address: wallet.address.clone(),
+            mnemonic: wallet_json.mnemonic.clone(),
+        };
+        if let Ok(data) = serde_json::to_string_pretty(&updated_wallet) {
+            if fs::write(&path, data).is_ok() {
+                println!("[OK] Wallet file updated with correct address");
+            }
+        }
+    }
+    
+    println!("[INFO] Wallet loaded: {}", wallet.address);
     println!("Private key: {}", wallet_json.secret_key);
 
-    Wallet::from_hex(&wallet_json.secret_key)
+    wallet
 }
 
 pub fn get_balance(address: &str) {
@@ -180,6 +205,7 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
     let client = Client::new();
 
     let url = format!("{}/address/{}/utxos", cfg.node_rpc_url, wallet.address);
+
     let utxos: Vec<Value> = match client.get(&url).send() {
         Ok(res) => match res.json() {
             Ok(v) => v,
@@ -193,7 +219,7 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
             return;
         }
     };
-
+   
     if utxos.is_empty() {
         println!("[WARN] No UTXOs available for address {}", wallet.address);
         return;
@@ -202,11 +228,32 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
     let mut selected_inputs = vec![];
     let mut input_sum = U256::zero();
 
-    for u in &utxos {
+    for (i, u) in utxos.iter().enumerate() {
         let txid = u["txid"].as_str().unwrap().to_string();
         let vout = u["vout"].as_u64().unwrap() as u32;
-        // Parse amount as hex string (0x...) or number
-        let amt = if let Some(s) = u["amount"].as_str() {
+        
+        // Parse amount: try amount_raw first, then amount (for backwards compatibility)
+        let amt = if let Some(arr) = u["amount_raw"].as_array() {
+            // amount_raw: [u64; 4] array from Utxo struct
+            let parts: Vec<u64> = arr.iter()
+                .filter_map(|v| v.as_u64())
+                .collect();
+            if parts.len() == 4 {
+                U256([parts[0], parts[1], parts[2], parts[3]])
+            } else {
+                U256::zero()
+            }
+        } else if let Some(arr) = u["amount"].as_array() {
+            // Fallback to "amount" field
+            let parts: Vec<u64> = arr.iter()
+                .filter_map(|v| v.as_u64())
+                .collect();
+            if parts.len() == 4 {
+                U256([parts[0], parts[1], parts[2], parts[3]])
+            } else {
+                U256::zero()
+            }
+        } else if let Some(s) = u["amount"].as_str() {
             if let Some(hex_str) = s.strip_prefix("0x") {
                 U256::from_str_radix(hex_str, 16).unwrap_or_else(|_| U256::zero())
             } else {
@@ -218,6 +265,7 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
                 .map(U256::from)
                 .unwrap_or_else(U256::zero)
         };
+
         selected_inputs.push(TransactionInput {
             txid,
             vout,
@@ -240,11 +288,11 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
     }
 
     // Calculate estimated transaction size and fee
-    // Typical transaction structure:
+    // Typical transaction structure (conservative estimate):
     // - Base: ~100 bytes
-    // - Per input: ~100 bytes (txid, vout, pubkey, signature)
-    // - Per output: ~50 bytes (address, amount)
-    let estimated_tx_size = 100 + (selected_inputs.len() * 100) + (2 * 50); // Assume 2 outputs max
+    // - Per input: ~150 bytes (txid, vout, pubkey, signature)
+    // - Per output: ~60 bytes (address, amount)
+    let estimated_tx_size = 100 + (selected_inputs.len() * 150) + (2 * 60); // Assume 2 outputs max
     let fee = Astram_core::config::calculate_default_fee(estimated_tx_size);
 
     println!("Transaction Details:");

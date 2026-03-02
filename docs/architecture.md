@@ -15,7 +15,7 @@ Astram is composed of four main runtime components:
 
 - Maintains the blockchain database and UTXO state.
 - Validates PoW using compact target bits with numeric comparison (`hash_u256 < target_u256`).
-- Retargets mining difficulty every block from a rolling 30-block timing window toward a 120s target.
+- Retargets mining difficulty every block using DWG3 over a 24-block window.
 - Runs the P2P stack for block and transaction propagation.
 - Exposes an HTTP API for basic chain queries and a dashboard.
 

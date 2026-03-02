@@ -26,7 +26,7 @@
 
 - Feature flags enable optional CUDA mining.
 - Modular crates allow future refactors without breaking end-user tooling.
-- Consensus tuning favors smoothness: target-based PoW plus damped per-block retargeting for stable ~2 minute blocks.
+- Consensus tuning uses target-based PoW with DWG3 per-block difficulty adjustment.
 
 ## Known Gaps
 

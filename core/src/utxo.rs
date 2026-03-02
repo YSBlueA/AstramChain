@@ -8,6 +8,7 @@ pub struct Utxo {
     pub txid: String,
     pub vout: u32,
     pub to: String,
+    #[serde(rename = "amount")]
     amount_raw: [u64; 4], // U256 internal representation
 }
 

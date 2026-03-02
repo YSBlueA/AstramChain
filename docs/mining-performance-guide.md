@@ -28,21 +28,21 @@ Mining hashrate: 85.2 MH/s  (example)
 ## Performance Benchmarking
 
 ### Test 1: DAG Generation Speed
-Measures CPU parallelization efficiency:
+Measures DAG generation speed before CUDA mining starts:
 ```powershell
 cargo run --release --example bench-dag
 ```
 
-**Expected**: 3-5 minutes on modern 8-core CPU
+**Expected**: 3-5 minutes on modern desktop systems
 
-### Test 2: CPU Miner Performance
-Test without GPU (baseline):
+### Test 2: GPU Miner Startup
+Verify end-to-end startup on CUDA backend:
 ```powershell
-cargo build --release
-.\target\release\Astram-node.exe --miner --cpu-only
+cargo build --release --features cuda-miner
+.\target\release\Astram-node.exe --miner
 ```
 
-**Expected**: 100-500 KH/s
+**Expected**: DAG upload succeeds and mining loop starts
 
 ### Test 3: GPU Miner Performance
 Full CUDA mining:
@@ -131,15 +131,11 @@ pub const DAG_ITEM_SIZE: usize = 128;  // Current
 **Cause**: GPU has less than 4GB VRAM
 
 **Solutions**:
-1. Use CPU-only mining:
-   ```powershell
-   cargo build --release
-   .\target\release\Astram-node.exe --miner --cpu-only
-   ```
+1. Close other GPU applications (browsers, games)
 
-2. Close other GPU applications (browsers, games)
+2. Reduce system reserved VRAM in BIOS/UEFI
 
-3. Reduce system reserved VRAM in BIOS/UEFI
+3. Use a GPU with at least 4GB VRAM
 
 ### Problem: Low hashrate on GPU (<10 MH/s)
 **Possible causes**:
@@ -162,7 +158,7 @@ pub const DAG_ITEM_SIZE: usize = 128;  // Current
    - Close games, video players
 
 ### Problem: DAG generation takes >10 minutes
-**Cause**: CPU bottleneck or insufficient RAM
+**Cause**: system bottleneck or insufficient free RAM
 
 **Solutions**:
 1. Close other applications (need 4GB+ free RAM)
@@ -226,7 +222,7 @@ nsys profile .\target\release\Astram-node.exe --miner
 ```
 
 Shows:
-- Timeline of GPU/CPU activity
+- Timeline of GPU/host activity
 - Kernel launch overhead
 - Memory copy operations
 

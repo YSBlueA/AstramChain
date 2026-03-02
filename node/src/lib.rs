@@ -1,3 +1,6 @@
+#[cfg(not(feature = "cuda-miner"))]
+compile_error!("Astram-node is GPU-only. Enable the `cuda-miner` feature.");
+
 pub mod p2p;
 pub mod server;
 

@@ -136,7 +136,7 @@ export default {
 
       return ASRM.toLocaleString("en-US", {
         minimumFractionDigits: 0,
-        maximumFractionDigits: 18,
+        maximumFractionDigits: 6,
       });
     },
     truncateHash(hash) {

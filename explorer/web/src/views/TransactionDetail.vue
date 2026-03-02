@@ -60,7 +60,7 @@
           <span class="label">Fee</span>
           <span class="value fee">
             {{ formatAmount(transaction.fee) }} ASRM
-            <span class="natoshi-info">({{ formatNatoshi(transaction.fee) }} natoshi)</span>
+            <span class="ram-info">({{ formatRam(transaction.fee) }} ram)</span>
           </span>
         </div>
         <div class="detail-item" v-if="!isCoinbase">
@@ -179,7 +179,7 @@ export default {
 
       return ASRM.toLocaleString("en-US", {
         minimumFractionDigits: 0,
-        maximumFractionDigits: 18,
+        maximumFractionDigits: 6,
       });
     },
     formatTotal(amount, fee) {
@@ -218,11 +218,11 @@ export default {
 
       return ASRM.toLocaleString("en-US", {
         minimumFractionDigits: 0,
-        maximumFractionDigits: 18,
+        maximumFractionDigits: 6,
       });
     },
-    formatNatoshi(value) {
-      // Return the raw natoshi value as a formatted string
+    formatRam(value) {
+      // Return the raw ram value as a formatted string
       let num;
 
       if (Array.isArray(value)) {
@@ -332,7 +332,7 @@ h1 {
   font-weight: bold;
 }
 
-.natoshi-info {
+.ram-info {
   display: block;
   font-size: 0.75rem;
   color: #999;

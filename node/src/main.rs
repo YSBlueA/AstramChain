@@ -1,3 +1,6 @@
+#[cfg(not(feature = "cuda-miner"))]
+compile_error!("Astram-node is GPU-only. Build with CUDA support (`cuda-miner` feature enabled).");
+
 // Use library exports instead of declaring local modules to avoid duplicate crate types
 use Astram_core::Blockchain;
 use Astram_core::block::Block;

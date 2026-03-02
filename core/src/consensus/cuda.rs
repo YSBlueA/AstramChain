@@ -303,11 +303,6 @@ pub fn mine_block_with_coinbase_cuda(
 
             let gpu_pow_hex = hex::encode(gpu_pow_hash);
 
-            println!(
-                "[CUDA] ✅ Valid PoW found! Nonce: {}, GPU PoW: {}",
-                nonce, gpu_pow_hex
-            );
-
             // Update final hashrate before returning
             let final_elapsed = last_rate_update.elapsed();
             if final_elapsed.as_secs_f64() > 0.0 {

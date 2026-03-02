@@ -21,7 +21,16 @@ fn main() {
         Commands::Generate => generate_wallet(),
         Commands::GenerateEth => generate_eth_wallet(),
         Commands::Import { mnemonic } => import_wallet(&mnemonic),
-        Commands::Balance { address } => get_balance(&address),
+        Commands::Balance { address } => {
+            let target_address = if let Some(addr) = address {
+                addr
+            } else {
+                // If no address provided, use current wallet's address
+                let wallet = commands::load_wallet();
+                wallet.address
+            };
+            get_balance(&target_address)
+        }
         Commands::Send { to, amount } => {
             let amount_ram = asrm_to_ram(amount);
             println!("Sending {} ASRM to {}", amount, to);

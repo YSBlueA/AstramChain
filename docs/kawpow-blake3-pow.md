@@ -60,11 +60,11 @@ for index in 0..32M {
 }
 ```
 
-Generation time: **~3-5 minutes** on modern CPUs (parallelized with rayon)
+Generation time: **~3-5 minutes** on modern systems (parallelized with rayon)
 
 ### Memory Requirements
 - **Minimum VRAM**: 4GB (for GPU mining)
-- **Minimum RAM**: 4GB (for CPU mining)
+- **Minimum RAM**: 4GB (for DAG generation and host-side processing)
 - **Storage**: Optional DAG caching to disk (~4GB per epoch)
 
 ## ASIC Resistance Model
@@ -110,10 +110,6 @@ Generation time: **~3-5 minutes** on modern CPUs (parallelized with rayon)
 
 ### Expected Hashrates
 
-**CPU Mining** (4GB RAM):
-- Modern 8-core: 100-500 KH/s
-- High-end 16-core: 500KH-1MH/s
-
 **GPU Mining** (4GB+ VRAM):
 - GTX 1050 Ti (4GB): 50-150 MH/s (estimated)
 - RTX 3070 (8GB): 200-400 MH/s (estimated)
@@ -129,7 +125,7 @@ Generation time: **~3-5 minutes** on modern CPUs (parallelized with rayon)
 
 2. **Blake3 Computation** (Secondary)
    - 66+ Blake3 hashes per mining attempt
-   - Well-optimized on both CPU and GPU
+   - Well-optimized for CUDA GPU backend
 
 3. **DAG Upload** (One-time)
    - 4GB upload to GPU: ~1-2 seconds on PCIe 3.0
@@ -145,7 +141,7 @@ Generation time: **~3-5 minutes** on modern CPUs (parallelized with rayon)
    - Memory-hard mixing function
 
 2. **[core/src/consensus/mod.rs](../core/src/consensus/mod.rs)**
-   - CPU miner using DAG
+   - Consensus integration and DAG handling
    - Integrated epoch checking
 
 3. **[core/src/consensus/cuda.rs](../core/src/consensus/cuda.rs)**
@@ -169,9 +165,6 @@ Generation time: **~3-5 minutes** on modern CPUs (parallelized with rayon)
 ```powershell
 # With CUDA support (GTX 1050 Ti or better, 4GB+ VRAM)
 cargo build --release --features cuda-miner
-
-# CPU-only (no CUDA)
-cargo build --release
 ```
 
 ## Mining Usage

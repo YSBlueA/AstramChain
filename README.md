@@ -1,6 +1,6 @@
 # Astram
 
-Astram is a lightweight, PoW blockchain focused on fast propagation, clean design, and practical mining on CPU or GPU.
+Astram is a lightweight, PoW blockchain focused on fast propagation, clean design, and practical GPU mining.
 
 ## Components
 
@@ -14,9 +14,10 @@ Astram is a lightweight, PoW blockchain focused on fast propagation, clean desig
 - **PoW rule**: Bitcoin-style numeric target check (`hash_u256 < target_u256`).
 - **Difficulty encoding**: Compact target bits (`nBits`-style `u32`) stored in block header `difficulty`.
 - **Target block time**: `120` seconds (about 2 minutes).
-- **Retarget cadence**: Every block, using a rolling 30-block timing window.
-- **Retarget formula**: `new_target = old_target * actual_timespan / target_timespan`.
-- **Stability guards**: `actual_timespan` is clamped to `[target_timespan/4, target_timespan*4]` and only 25% of each computed move is applied per block (damping).
+- **Difficulty algorithm**: **DWG3** (Dark Gravity Wave v3 style).
+- **Retarget cadence**: Every block, using the most recent 24 blocks.
+- **Retarget formula**: `new_target = avg_past_target * actual_timespan / target_timespan`.
+- **Stability guards**: `actual_timespan` is clamped to `[target_timespan/3, target_timespan*3]`.
 
 ## Quick Start
 
@@ -36,7 +37,7 @@ Windows:
 ./release/windows/Astram.ps1 node
 ```
 
-The release scripts prompt for **CPU vs GPU** and create a runnable package.
+The release scripts build and package the GPU (CUDA) miner runtime.
 
 ## Ports
 
@@ -102,7 +103,7 @@ Contributions are welcome. Please open an issue or a discussion before large cha
 Suggested areas:
 
 - Networking and P2P reliability
-- Mining performance (CPU/CUDA)
+- Mining performance (CUDA)
 - Explorer indexing and APIs
 - Documentation and UX
 
@@ -113,8 +114,6 @@ GPU mining requires NVIDIA CUDA and a compatible GPU. CUDA builds use the `cuda-
 - Install the NVIDIA driver and CUDA Toolkit
 - Ensure `nvcc` is on your PATH
 - Build with: `cargo build --release -p Astram-node --features cuda-miner`
-
-If you do not have CUDA installed, use CPU builds (`--no-default-features`).
 
 ## FAQ
 
@@ -132,7 +131,7 @@ If you do not have CUDA installed, use CPU builds (`--no-default-features`).
 **I see a CUDA build error.**
 
 - Confirm `nvcc --version` works.
-- Use a CPU build if CUDA is not installed.
+- Install a compatible NVIDIA driver + CUDA Toolkit and rebuild.
 
 ## License
 

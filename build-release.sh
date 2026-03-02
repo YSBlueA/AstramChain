@@ -108,6 +108,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 COMPONENT="${1:-node}"
 shift || true
 
+export MINER_BACKEND="${MINER_BACKEND:-cuda}"
+
 DEFAULT_CONFIG_DIR="$HOME/.Astram"
 DEFAULT_CONFIG_FILE="$DEFAULT_CONFIG_DIR/config.json"
 DEFAULT_WALLET_PATH="$DEFAULT_CONFIG_DIR/wallet.json"
@@ -299,6 +301,13 @@ cat > "$RELEASE_DIR/README.md" << README_EOF
 - $PLATFORM (64-bit)
 - 4GB RAM minimum
 - 10GB free disk space
+- NVIDIA GPU (4GB+ VRAM recommended)
+- NVIDIA driver + CUDA Toolkit installed (`nvcc` available)
+
+## Mining Backend
+
+- This release is **GPU-only**.
+- Node mining backend is fixed to CUDA (`MINER_BACKEND=cuda`).
 
 ## Data Directory
 
