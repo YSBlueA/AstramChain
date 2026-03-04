@@ -39,7 +39,6 @@ Desktop.ini
 # === test ===
 /coverage/
 /debug/
-/dist/
 /reports/
 explorer_data/
 
