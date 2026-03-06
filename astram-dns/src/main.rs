@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio::net::TcpStream;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
@@ -123,10 +124,6 @@ impl AppState {
         info!("Starting health check for {} nodes...", total_nodes);
 
         let mut to_remove = Vec::new();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .unwrap();
 
         // Process in batches to avoid overload
         const BATCH_SIZE: usize = 20;
@@ -135,15 +132,20 @@ impl AppState {
         for batch in node_addresses.chunks(BATCH_SIZE) {
             let mut tasks = Vec::new();
 
-            for (node_id, address, _port) in batch {
-                let client = client.clone();
+            for (node_id, address, port) in batch {
                 let node_id = node_id.clone();
                 let address = address.clone();
+                let port = *port;
 
                 let task = tokio::spawn(async move {
-                    let health_url = format!("http://{}:19533/health", address);
-                    match client.get(&health_url).send().await {
-                        Ok(response) if response.status().is_success() => (node_id, true),
+                    let socket_addr = format!("{}:{}", address, port);
+                    match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        TcpStream::connect(&socket_addr),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_stream)) => (node_id, true),
                         _ => (node_id, false),
                     }
                 });
