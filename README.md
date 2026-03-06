@@ -21,6 +21,48 @@ Astram is a lightweight, PoW blockchain focused on fast propagation, clean desig
 
 ## Quick Start
 
+The release scripts build and package the GPU (CUDA) miner runtime.
+
+## Prerequisites (Ubuntu 24.04)
+
+For a fresh Ubuntu 24.04 installation, install dependencies and build tools:
+
+### System packages
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config cmake clang libclang-dev git curl ca-certificates libssl-dev python3 nodejs npm
+```
+
+### Rust toolchain
+```bash
+curl https://sh.rustup.rs -sSf | sh -s -- -y
+source "$HOME/.cargo/env"
+rustup default stable
+rustup update
+```
+
+### NVIDIA drivers and CUDA toolkit
+```bash
+sudo apt install -y ubuntu-drivers-common
+sudo ubuntu-drivers autoinstall
+sudo apt install -y nvidia-cuda-toolkit
+```
+
+After installing CUDA, reboot to ensure drivers are loaded:
+```bash
+sudo reboot
+```
+
+### Verify installation
+```bash
+rustc --version
+cargo --version
+nvcc --version
+node -v
+npm -v
+```
+
+
 ### Release builds (recommended)
 
 Linux/macOS:
@@ -36,8 +78,6 @@ Windows:
 ./build-release.ps1
 ./release/windows/Astram.ps1 node
 ```
-
-The release scripts build and package the GPU (CUDA) miner runtime.
 
 ## Ports
 
