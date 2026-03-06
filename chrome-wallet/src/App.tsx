@@ -3,7 +3,6 @@ import './App.css'
 import { WalletHome } from '@/components/WalletHome'
 import { ImportWallet } from '@/components/ImportWallet'
 import { CreateWallet } from '@/components/CreateWallet'
-import { UnlockWallet } from '@/components/UnlockWallet'
 import { GetStarted } from '@/components/GetStarted'
 import { useWalletStore } from '@/store/wallet'
 
@@ -15,14 +14,6 @@ export function App() {
   useEffect(() => {
     const checkWallet = async () => {
       try {
-        // 암호화된 지갑이 있는지 확인
-        const result = await chrome.storage.local.get('encryptedWallet')
-        if (result.encryptedWallet) {
-          // 암호화된 지갑이 있으면 unlock 화면으로
-          setStep('unlocking')
-          return
-        }
-
         // 아니면 기존 지갑 확인
         const saved = await chrome.storage.local.get('wallet')
         if (saved.wallet) {
@@ -58,8 +49,7 @@ export function App() {
       {step === 'getstarted' && (
         <GetStarted
           onCreateWallet={() => setStep('creating')}
-          onImportWallet={() => setStep('importing')}
-          onUnlockWallet={() => setStep('unlocking')}
+          onUnlockSuccess={handleUnlockSuccess}
         />
       )}
 
@@ -76,14 +66,6 @@ export function App() {
           onCancel={() => setStep('getstarted')}
         />
       )}
-
-      {step === 'unlocking' && (
-        <UnlockWallet
-          onSuccess={handleUnlockSuccess}
-          onCancel={() => setStep('getstarted')}
-        />
-      )}
-
       {step === 'wallet' && hasWallet && <WalletHome />}
     </>
   )
