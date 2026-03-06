@@ -134,7 +134,8 @@ export default {
       const isHex64 = /^[A-Fa-f0-9]{64}$/.test(normalized);
 
       if (isHex64) {
-        const hashQuery = query.startsWith("0x") ? query : `0x${query}`;
+        // Use query as-is (backend handles 0x normalization)
+        const hashQuery = query;
 
         try {
           await explorerAPI.getBlockByHash(hashQuery);
