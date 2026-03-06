@@ -118,7 +118,7 @@ export default {
         console.error("Failed to load data:", error);
       }
     },
-    handleSearch() {
+    async handleSearch() {
       if (!this.searchQuery.trim()) return;
 
       const query = this.searchQuery.trim();
@@ -129,14 +129,42 @@ export default {
         return;
       }
 
-      // Address search (typically longer strings)
-      if (query.length > 30) {
-        this.$router.push(`/address/${query}`);
+      // 64-char hex (with optional 0x) can be block hash or tx hash
+      const normalized = query.startsWith("0x") ? query.slice(2) : query;
+      const isHex64 = /^[A-Fa-f0-9]{64}$/.test(normalized);
+
+      if (isHex64) {
+        const hashQuery = query.startsWith("0x") ? query : `0x${query}`;
+
+        try {
+          await explorerAPI.getBlockByHash(hashQuery);
+          this.$router.push(`/blocks/${hashQuery}`);
+          return;
+        } catch (error) {
+          if (error?.response?.status !== 404) {
+            console.error("Block hash lookup failed:", error);
+          }
+        }
+
+        try {
+          await explorerAPI.getTransactionByHash(hashQuery);
+          this.$router.push(`/transactions/${hashQuery}`);
+          return;
+        } catch (error) {
+          if (error?.response?.status !== 404) {
+            console.error("Transaction hash lookup failed:", error);
+          }
+        }
+
+        // If hash-shaped but not found as block/tx, show tx detail (not found message handled there)
+        this.$router.push(`/transactions/${hashQuery}`);
         return;
       }
 
-      // Transaction hash search
-      this.$router.push(`/transactions/${query}`);
+      // Fallback to address search
+      this.$router.push(`/address/${query}`);
+      return;
+
     },
     goToBlock(height) {
       this.$router.push(`/blocks/${height}`);
