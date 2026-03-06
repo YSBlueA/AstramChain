@@ -11,6 +11,28 @@ pub struct ExplorerDB {
 }
 
 impl ExplorerDB {
+    fn hash_lookup_candidates(hash: &str) -> Vec<String> {
+        let trimmed = hash.trim();
+        let no_prefix = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+
+        let mut candidates = Vec::with_capacity(4);
+        let mut push_unique = |value: String| {
+            if !value.is_empty() && !candidates.iter().any(|existing| existing == &value) {
+                candidates.push(value);
+            }
+        };
+
+        push_unique(trimmed.to_string());
+        push_unique(no_prefix.to_string());
+        push_unique(trimmed.to_ascii_lowercase());
+        push_unique(no_prefix.to_ascii_lowercase());
+
+        candidates
+    }
+
     /// 새 데이터베이스 열기 또는 생성
     pub fn new(path: &str) -> Result<Self> {
         let mut opts = Options::default();
@@ -66,15 +88,16 @@ impl ExplorerDB {
 
     /// 블록 조회 (해시로)
     pub fn get_block_by_hash(&self, hash: &str) -> Result<Option<BlockInfo>> {
-        let hash_key = format!("bh:{}", hash);
-        match self.db.get(hash_key.as_bytes())? {
-            Some(height_bytes) => {
+        for candidate in Self::hash_lookup_candidates(hash) {
+            let hash_key = format!("bh:{}", candidate);
+            if let Some(height_bytes) = self.db.get(hash_key.as_bytes())? {
                 let height_str = String::from_utf8(height_bytes.to_vec())?;
                 let height: u64 = height_str.parse()?;
-                self.get_block_by_height(height)
+                return self.get_block_by_height(height);
             }
-            None => Ok(None),
         }
+
+        Ok(None)
     }
 
     /// 모든 블록 조회 (페이징)
@@ -141,9 +164,9 @@ impl ExplorerDB {
 
     /// 트랜잭션 조회
     pub fn get_transaction(&self, hash: &str) -> Result<Option<TransactionInfo>> {
-        let key = format!("t:{}", hash);
-        match self.db.get(key.as_bytes())? {
-            Some(data) => {
+        for candidate in Self::hash_lookup_candidates(hash) {
+            let key = format!("t:{}", candidate);
+            if let Some(data) = self.db.get(key.as_bytes())? {
                 let mut tx: TransactionInfo = serde_json::from_slice(&data)?;
                 // Calculate confirmations if transaction is in a block
                 if let Some(block_height) = tx.block_height {
@@ -156,10 +179,11 @@ impl ExplorerDB {
                 } else {
                     tx.confirmations = None; // Pending transaction
                 }
-                Ok(Some(tx))
+                return Ok(Some(tx));
             }
-            None => Ok(None),
         }
+
+        Ok(None)
     }
 
     /// 모든 트랜잭션 조회 (페이징)
