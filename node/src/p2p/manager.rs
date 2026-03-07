@@ -564,9 +564,13 @@ impl PeerManager {
                 height: my_height,
                 listening_port: my_port,
             };
-            let _ = tx.send(P2pMessage::Handshake {
+            info!("[P2P] Sending Handshake to {} (height={})", peer_id_clone, my_height);
+            match tx.send(P2pMessage::Handshake {
                 info: handshake_info,
-            });
+            }) {
+                Ok(_) => info!("[P2P] Handshake sent to {}", peer_id_clone),
+                Err(e) => warn!("[P2P] Failed to send Handshake to {}: {:?}", peer_id_clone, e),
+            }
         }
 
         let config = bincode::config::standard();
@@ -575,6 +579,7 @@ impl PeerManager {
         // writer task: consumes rx and writes framed bytes to the socket
         let write_handle = tokio::spawn(async move {
             let mut rx = rx;
+            info!("[P2P] Writer task started for {}", peer_id);
             loop {
                 match rx.recv().await {
                     Some(msg) => {
@@ -582,24 +587,26 @@ impl PeerManager {
                             Ok(vec) => {
                                 // convert Vec<u8> -> Bytes (LengthDelimitedCodec accepts bytes)
                                 let bytes: Bytes = Bytes::from(vec);
+                                info!("[P2P] Sending message to {} (size: {} bytes)", peer_id, bytes.len());
                                 if let Err(e) = writer.send(bytes).await {
-                                    log::warn!("write error to peer {}: {:?}", peer_id, e);
+                                    warn!("[P2P] Write error to peer {}: {:?}", peer_id, e);
                                     break;
                                 }
                             }
                             Err(e) => {
-                                log::warn!("bincode encode error for {}: {:?}", peer_id, e);
+                                warn!("[P2P] Bincode encode error for {}: {:?}", peer_id, e);
                                 break;
                             }
                         }
                     }
                     None => {
                         // All senders dropped -> normal shutdown of writer
-                        log::info!("write rx closed for peer {}", peer_id);
+                        info!("[P2P] Write rx closed for peer {}", peer_id);
                         break;
                     }
                 }
             }
+            info!("[P2P] Writer task ended for {}", peer_id);
 
             // best-effort to close the sink
             let _ = writer.close().await;
@@ -608,35 +615,39 @@ impl PeerManager {
         // read task: read framed bytes, decode, and hand to manager
         let manager_clone = self.clone();
         let read_handle = tokio::spawn(async move {
+            info!("[P2P] Reader task started for {}", peer_id_clone);
             loop {
                 match reader.next().await {
                     Some(Ok(bytes_mut)) => {
+                        info!("[P2P] Received {} bytes from {}", bytes_mut.len(), peer_id_clone);
                         // bytes_mut is BytesMut; get slice for bincode
                         let slice = bytes_mut.as_ref();
                         match bincode::decode_from_slice::<P2pMessage, _>(slice, config_read) {
                             Ok((msg, _remaining)) => {
+                                info!("[P2P] Message decoded from {}", peer_id_clone);
                                 // delegate to manager
                                 manager_clone
                                     .handle_message(peer_id_clone.clone(), msg)
                                     .await;
                             }
                             Err(e) => {
-                                log::warn!("peer {} decode error: {:?}", peer_id_clone, e);
+                                warn!("[P2P] Peer {} decode error: {:?}", peer_id_clone, e);
                                 break;
                             }
                         }
                     }
                     Some(Err(e)) => {
-                        log::warn!("peer {} read error: {:?}", peer_id_clone, e);
+                        warn!("[P2P] Peer {} read error: {:?}", peer_id_clone, e);
                         break;
                     }
                     None => {
                         // stream ended (peer disconnected)
-                        log::info!("peer {} disconnected (reader ended)", peer_id_clone);
+                        info!("[P2P] Peer {} disconnected (reader ended)", peer_id_clone);
                         break;
                     }
                 }
             }
+            info!("[P2P] Reader task ended for {}", peer_id_clone);
         });
 
         let read_fut = read_handle;
@@ -728,7 +739,7 @@ impl PeerManager {
         match msg {
             Handshake { info } => {
                 info!(
-                    "Handshake from {}: protocol={}, version={}, network={}, chain={}, height={}, features={:?}",
+                    "[P2P] ✅ Handshake received from {}: protocol={}, version={}, network={}, chain={}, height={}, features={:?}",
                     peer_id,
                     info.protocol_version,
                     info.software_version,
@@ -799,7 +810,11 @@ impl PeerManager {
                         height: my_height,
                         listening_port: my_port,
                     };
-                    let _ = tx.send(HandshakeAck { info: my_info });
+                    info!("[P2P] Sending HandshakeAck to {}", peer_id);
+                    match tx.send(HandshakeAck { info: my_info }) {
+                        Ok(_) => info!("[P2P] HandshakeAck sent to {}", peer_id),
+                        Err(e) => warn!("[P2P] Failed to send HandshakeAck to {}: {:?}", peer_id, e),
+                    }
                 }
 
                 // Start syncing headers with proper locator
@@ -808,10 +823,14 @@ impl PeerManager {
                         Some(cb) => (cb)(),
                         None => vec![],
                     };
-                    let _ = tx.send(GetHeaders {
+                    info!("[P2P] Sending GetHeaders to {} (locator_size={})", peer_id, locator.len());
+                    match tx.send(GetHeaders {
                         locator_hashes: locator,
                         stop_hash: None,
-                    });
+                    }) {
+                        Ok(_) => info!("[P2P] GetHeaders sent to {}", peer_id),
+                        Err(e) => warn!("[P2P] Failed to send GetHeaders to {}: {:?}", peer_id, e),
+                    }
                 }
             }
 
