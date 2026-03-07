@@ -228,7 +228,7 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
     let mut selected_inputs = vec![];
     let mut input_sum = U256::zero();
 
-    for (i, u) in utxos.iter().enumerate() {
+    for (_i, u) in utxos.iter().enumerate() {
         let txid = u["txid"].as_str().unwrap().to_string();
         let vout = u["vout"].as_u64().unwrap() as u32;
         

@@ -127,7 +127,7 @@ pub fn mine_block_with_coinbase_cuda(
         );
     }
 
-    println!("[CUDA] DAG generation complete, uploading to GPU memory (4GB)...");
+    println!("[CUDA] Uploading 4GB DAG to GPU and starting mining...");
 
     // Upload DAG to GPU (this is expensive - 4GB!)
     let dag_dev = DeviceBuffer::from_slice(&dag).map_err(|e| {
@@ -136,7 +136,6 @@ pub fn mine_block_with_coinbase_cuda(
             e
         )
     })?;
-    println!("[CUDA] DAG uploaded to GPU, starting mining...");
 
     let prefix = {
         let mut bytes = Vec::new();
@@ -194,30 +193,18 @@ pub fn mine_block_with_coinbase_cuda(
     let mut last_console_update = std::time::Instant::now();
     let mut total_hashes: u64 = 0;
 
-    println!(
-        "[CUDA] Starting mining loop: {} blocks × {} threads = {} parallel threads",
-        blocks,
-        THREADS_PER_BLOCK,
-        blocks * THREADS_PER_BLOCK
-    );
-    println!("[CUDA] Batch size: {} hashes per kernel call", batch_size);
-    println!("[CUDA] Difficulty(bits): 0x{:08x}", difficulty);
-    println!("[CUDA] Target (full 32 bytes): {}", hex::encode(&target));
-    println!("[CUDA] Target prefix (first 8 bytes): {}", hex::encode(&target[..8]));
-    println!("[CUDA] Mining with 4GB DAG (memory-hard PoW)...");
-    println!("[CUDA] Note: Hash must be LESS than target to be valid");
+    #[cfg(debug_assertions)]
+    {
+        println!(
+            "[CUDA] Mining: {} blocks × {} threads = {} parallel",
+            blocks, THREADS_PER_BLOCK, blocks * THREADS_PER_BLOCK
+        );
+        println!("[CUDA] Difficulty: 0x{:08x}, Target: {}", difficulty, hex::encode(&target[..8]));
+    }
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
             return Err(anyhow!("Mining cancelled due to new peer block"));
-        }
-
-        if start_nonce % (batch_size * 10) == 0 && start_nonce > 0 {
-            println!(
-                "[CUDA] Processed {} batches, current nonce: {}",
-                start_nonce / batch_size,
-                start_nonce
-            );
         }
 
         found_flag.copy_from(&[0u32])?;
@@ -240,17 +227,9 @@ pub fn mine_block_with_coinbase_cuda(
             .map_err(|e| anyhow!("CUDA kernel launch failed: {}", e))?;
         }
 
-        if start_nonce == 0 {
-            println!("[CUDA] First kernel launched successfully, waiting for completion...");
-        }
-
         stream
             .synchronize()
             .map_err(|e| anyhow!("CUDA stream synchronization failed: {}", e))?;
-
-        if start_nonce == 0 {
-            println!("[CUDA] First batch completed! Mining is working.");
-        }
 
         let mut flag_host = [0u32];
         found_flag.copy_to(&mut flag_host)?;
@@ -301,7 +280,7 @@ pub fn mine_block_with_coinbase_cuda(
                 ));
             }
 
-            let gpu_pow_hex = hex::encode(gpu_pow_hash);
+            let _gpu_pow_hex = hex::encode(gpu_pow_hash);
 
             // Update final hashrate before returning
             let final_elapsed = last_rate_update.elapsed();

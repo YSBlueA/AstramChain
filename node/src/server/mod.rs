@@ -6,7 +6,6 @@ use base64::{Engine as _, engine::general_purpose};
 use Astram_core::block::Block;
 use Astram_core::transaction::{BINCODE_CONFIG, Transaction};
 use Astram_core::utxo::Utxo;
-use log::info;
 use primitive_types::U256;
 use serde::Deserialize;
 use warp::Filter;
@@ -207,7 +206,7 @@ pub async fn run_server(
         .and(meta_filter.clone())
         .and(p2p_filter.clone())
         .and_then(|node: NodeHandle, chain_state: std::sync::Arc<std::sync::Mutex<ChainState>>, node_meta: std::sync::Arc<NodeMeta>, p2p: std::sync::Arc<PeerManager>| async move {
-            let request_start = std::time::Instant::now();
+            let _request_start = std::time::Instant::now();
 
             // Get P2P data FIRST to avoid nested lock contention
             // Use a non-blocking snapshot to keep /status responsive
@@ -241,7 +240,7 @@ pub async fn run_server(
             ) = {
                 let state = node.clone();
 
-                let bc_lock_start = std::time::Instant::now();
+                let _bc_lock_start = std::time::Instant::now();
                 let chain_tip = {
                     let bc = state.bc.lock().unwrap();
                     bc.chain_tip
@@ -249,18 +248,18 @@ pub async fn run_server(
                         .map(|h| hex::encode(h))
                         .unwrap_or_else(|| "none".to_string())
                 };
-                let chain_lock_start = std::time::Instant::now();
+                let _chain_lock_start = std::time::Instant::now();
                 let memory_count = {
                     let chain = chain_state.lock().unwrap();
                     chain.blockchain.len()
                 };
-                let mempool_lock_start = std::time::Instant::now();
+                let _mempool_lock_start = std::time::Instant::now();
                 let (pending_count, seen_count) = {
                     let mempool = state.mempool.lock().unwrap();
                     (mempool.pending.len(), mempool.seen_tx.len())
                 };
 
-                let mining_start = std::time::Instant::now();
+                let _mining_start = std::time::Instant::now();
                 let diff = *state.mining.current_difficulty.lock().unwrap();
                 let hash = *state.mining.current_hashrate.lock().unwrap();
                 let blocks_mined = state
@@ -268,7 +267,7 @@ pub async fn run_server(
                     .blocks_mined
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                    let wallet_start = std::time::Instant::now();
+                    let _wallet_start = std::time::Instant::now();
                 let wallet_addr = node_meta.miner_address.lock().unwrap().clone();
                 (
                     memory_count,
@@ -284,7 +283,7 @@ pub async fn run_server(
                 )
             };
             // Get wallet balance OUTSIDE the lock (DB operation)
-            let balance_start = std::time::Instant::now();
+            let _balance_start = std::time::Instant::now();
             let wallet_balance = {
                 node
                     .bc

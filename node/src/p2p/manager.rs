@@ -8,11 +8,12 @@ use futures::SinkExt;
 use futures::StreamExt;
 use futures::future;
 use hex;
-use log::{info, warn};
+use log::{debug, info, warn};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::net::{TcpListener, TcpStream};
@@ -92,6 +93,8 @@ pub struct PeerManager {
     peer_ips: Shared<HashMap<String, Vec<PeerId>>>, // IP -> list of peer IDs
     my_height: Arc<Mutex<u64>>,
     my_listening_port: Arc<Mutex<u16>>,
+    my_bind_addr: Arc<Mutex<String>>,
+    my_public_ip: Arc<Mutex<Option<String>>>,
     /// callback when a new block is received
     on_block: Arc<Mutex<Option<Arc<dyn Fn(block::Block) + Send + Sync>>>>,
     /// callback when a new transaction is received
@@ -104,6 +107,8 @@ pub struct PeerManager {
         >,
     >,
     on_getdata: Arc<Mutex<Option<Arc<dyn Fn(PeerId, InventoryType, Vec<Vec<u8>>) + Send + Sync>>>>,
+    on_get_chain_locator: Arc<Mutex<Option<Arc<dyn Fn() -> Vec<Vec<u8>> + Send + Sync>>>>,
+    on_headers: Arc<Mutex<Option<Arc<dyn Fn(PeerId, Vec<block::BlockHeader>) + Send + Sync>>>>,
 }
 
 impl PeerManager {
@@ -115,10 +120,14 @@ impl PeerManager {
             peer_ips: Arc::new(Mutex::new(HashMap::new())),
             my_height: Arc::new(Mutex::new(0)),
             my_listening_port: Arc::new(Mutex::new(8335)), // Default port
+            my_bind_addr: Arc::new(Mutex::new("0.0.0.0".to_string())),
+            my_public_ip: Arc::new(Mutex::new(None)),
             on_block: Arc::new(Mutex::new(None)),
             on_tx: Arc::new(Mutex::new(None)),
             on_getheaders: Arc::new(Mutex::new(None)),
             on_getdata: Arc::new(Mutex::new(None)),
+            on_get_chain_locator: Arc::new(Mutex::new(None)),
+            on_headers: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -143,6 +152,20 @@ impl PeerManager {
         *self.on_getheaders.lock() = Some(Arc::new(cb));
     }
 
+    pub fn set_on_get_chain_locator<F>(&self, cb: F)
+    where
+        F: Fn() -> Vec<Vec<u8>> + Send + Sync + 'static,
+    {
+        *self.on_get_chain_locator.lock() = Some(Arc::new(cb));
+    }
+
+    pub fn set_on_headers<F>(&self, cb: F)
+    where
+        F: Fn(PeerId, Vec<block::BlockHeader>) + Send + Sync + 'static,
+    {
+        *self.on_headers.lock() = Some(Arc::new(cb));
+    }
+
     pub fn set_on_getdata<F>(&self, cb: F)
     where
         F: Fn(PeerId, InventoryType, Vec<Vec<u8>>) + Send + Sync + 'static,
@@ -164,6 +187,47 @@ impl PeerManager {
 
     pub fn get_my_listening_port(&self) -> u16 {
         *self.my_listening_port.lock()
+    }
+
+    pub fn set_my_bind_addr(&self, bind_addr: String) {
+        *self.my_bind_addr.lock() = bind_addr;
+    }
+
+    pub fn set_my_public_ip(&self, public_ip: Option<String>) {
+        *self.my_public_ip.lock() = public_ip;
+    }
+
+    fn is_self_connection(&self, peer_id: &str, peer_listening_port: u16) -> bool {
+        let my_port = self.get_my_listening_port();
+        if peer_listening_port != my_port {
+            return false;
+        }
+
+        let peer_socket = match peer_id.parse::<SocketAddr>() {
+            Ok(addr) => addr,
+            Err(_) => return false,
+        };
+
+        if peer_socket.port() != my_port {
+            return false;
+        }
+
+        let peer_ip = peer_socket.ip().to_string();
+
+        if let Some(my_public_ip) = self.my_public_ip.lock().clone() {
+            if peer_ip == my_public_ip {
+                return true;
+            }
+        }
+
+        let my_bind_addr = self.my_bind_addr.lock().clone();
+        let is_wildcard_bind = my_bind_addr == "0.0.0.0" || my_bind_addr == "::";
+
+        if !is_wildcard_bind && !my_bind_addr.is_empty() && peer_ip == my_bind_addr {
+            return true;
+        }
+
+        peer_socket.ip().is_loopback()
     }
 
     /// Get handshake info for a specific peer
@@ -588,6 +652,8 @@ impl PeerManager {
                     log::warn!("read task error: {:?}", e);
                 }
                 self.peers.lock().remove(&peer_id_clone2);
+                self.peer_heights.lock().remove(&peer_id_clone2);
+                self.peer_handshakes.lock().remove(&peer_id_clone2);
 
                 // Security: Remove from IP tracking (OPTIMIZED: single lock)
                 info!(
@@ -622,6 +688,8 @@ impl PeerManager {
                     log::warn!("write task error: {:?}", e);
                 }
                 self.peers.lock().remove(&peer_id_clone2);
+                self.peer_heights.lock().remove(&peer_id_clone2);
+                self.peer_handshakes.lock().remove(&peer_id_clone2);
 
                 // Security: Remove from IP tracking (OPTIMIZED: single lock)
                 info!(
@@ -692,15 +760,17 @@ impl PeerManager {
                     // Could disconnect here
                 }
 
-                // Check if this is ourselves (same listening port)
-                let my_port = self.get_my_listening_port();
-                if info.listening_port == my_port {
+                // Check if this is ourselves (endpoint-aware check)
+                if self.is_self_connection(&peer_id, info.listening_port) {
+                    let my_port = self.get_my_listening_port();
                     warn!(
-                        "Detected self-connection to {} (same listening port: {}), disconnecting",
+                        "Detected self-connection to {} (matching self endpoint on port {}), disconnecting",
                         peer_id, my_port
                     );
                     // Remove from peers map to disconnect
                     self.peers.lock().remove(&peer_id);
+                    self.peer_heights.lock().remove(&peer_id);
+                    self.peer_handshakes.lock().remove(&peer_id);
                     return; // Exit handler
                 }
 
@@ -715,6 +785,7 @@ impl PeerManager {
                 // Send handshake ack with our info
                 if let Some(tx) = self.peers.lock().get(&peer_id) {
                     let my_height = self.get_my_height();
+                    let my_port = self.get_my_listening_port();
                     let my_info = HandshakeInfo {
                         protocol_version: PROTOCOL_VERSION,
                         software_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -731,9 +802,12 @@ impl PeerManager {
                     let _ = tx.send(HandshakeAck { info: my_info });
                 }
 
-                // Start syncing headers
+                // Start syncing headers with proper locator
                 if let Some(tx) = self.peers.lock().get(&peer_id) {
-                    let locator = vec![];
+                    let locator = match &*self.on_get_chain_locator.lock() {
+                        Some(cb) => (cb)(),
+                        None => vec![],
+                    };
                     let _ = tx.send(GetHeaders {
                         locator_hashes: locator,
                         stop_hash: None,
@@ -752,15 +826,17 @@ impl PeerManager {
                     info.height
                 );
 
-                // Check if this is ourselves (same listening port)
-                let my_port = self.get_my_listening_port();
-                if info.listening_port == my_port {
+                // Check if this is ourselves (endpoint-aware check)
+                if self.is_self_connection(&peer_id, info.listening_port) {
+                    let my_port = self.get_my_listening_port();
                     warn!(
-                        "Detected self-connection in HandshakeAck from {} (same listening port: {}), disconnecting",
+                        "Detected self-connection in HandshakeAck from {} (matching self endpoint on port {}), disconnecting",
                         peer_id, my_port
                     );
                     // Remove from peers map to disconnect
                     self.peers.lock().remove(&peer_id);
+                    self.peer_heights.lock().remove(&peer_id);
+                    self.peer_handshakes.lock().remove(&peer_id);
                     return; // Exit handler
                 }
 
@@ -799,7 +875,10 @@ impl PeerManager {
                 }
 
                 if let Some(tx) = self.peers.lock().get(&peer_id) {
-                    let locator = vec![];
+                    let locator = match &*self.on_get_chain_locator.lock() {
+                        Some(cb) => (cb)(),
+                        None => vec![],
+                    };
                     let _ = tx.send(GetHeaders {
                         locator_hashes: locator,
                         stop_hash: None,
@@ -832,6 +911,11 @@ impl PeerManager {
             Headers { headers } => {
                 info!("{} sent {} headers", peer_id, headers.len());
                 if !headers.is_empty() {
+                    // Call headers callback for chain validation/reorg detection
+                    if let Some(cb) = &*self.on_headers.lock() {
+                        (cb)(peer_id.clone(), headers.clone());
+                    }
+                    
                     // request full blocks for these headers
                     let mut hashes: Vec<Vec<u8>> = Vec::new();
                     for hdr in headers.iter() {
@@ -1033,19 +1117,10 @@ impl PeerManager {
 
     /// Broadcast a block to all connected peers (fire-and-forget)
     pub async fn broadcast_block(&self, block: &block::Block) {
-        info!(
-            "[P2P] 🔒 broadcast_block #{}: acquiring peers lock...",
-            block.header.index
-        );
-        let lock_start = std::time::Instant::now();
         let peers = self.peers.lock().clone();
-        let lock_duration = lock_start.elapsed();
-        info!(
-            "[P2P] ✅ broadcast_block #{}: peers lock acquired (took {:?}), {} peers",
-            block.header.index,
-            lock_duration,
-            peers.len()
-        );
+        if peers.len() > 0 {
+            info!("[P2P] Broadcasting block #{} to {} peers", block.header.index, peers.len());
+        }
 
         for (_id, tx) in peers {
             // clone the block for each peer
@@ -1053,11 +1128,6 @@ impl PeerManager {
                 block: block.clone(),
             });
         }
-        info!(
-            "[P2P] ✅ broadcast_block #{}: completed (total {:?})",
-            block.header.index,
-            lock_start.elapsed()
-        );
     }
 
     /// Broadcast a transaction to all connected peers (async so callers can `.await`)
@@ -1092,15 +1162,8 @@ impl PeerManager {
         locator_hashes: Vec<Vec<u8>>,
         stop_hash: Option<Vec<u8>>,
     ) {
-        info!("[P2P] 🔒 request_headers_from_peers: acquiring peers lock...");
-        let lock_start = std::time::Instant::now();
         let peers = self.peers.lock().clone();
-        let lock_duration = lock_start.elapsed();
-        info!(
-            "[P2P] ✅ request_headers_from_peers: peers lock acquired (took {:?}), {} peers",
-            lock_duration,
-            peers.len()
-        );
+        debug!("[P2P] request_headers_from_peers: {} peers", peers.len());
 
         for (_id, tx) in peers {
             let _ = tx.send(P2pMessage::GetHeaders {
@@ -1111,14 +1174,34 @@ impl PeerManager {
     }
 
     pub fn get_peer_heights(&self) -> HashMap<PeerId, u64> {
-        self.peer_heights.lock().clone()
+        // Only return heights for currently connected peers
+        let peers = self.peers.lock();
+        let peer_heights = self.peer_heights.lock();
+        
+        peer_heights
+            .iter()
+            .filter(|(peer_id, _)| peers.contains_key(*peer_id))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     /// Non-blocking snapshot for status endpoints. Returns None if any lock is contended.
     pub fn try_get_status_snapshot(&self) -> Option<(HashMap<PeerId, u64>, u64, usize, usize)> {
         use std::collections::HashSet;
 
-        let peer_heights = match self.peer_heights.try_lock() {
+        let peers = match self.peers.try_lock() {
+            Some(guard) => {
+                let cloned = guard.clone();
+                drop(guard);
+                cloned
+            }
+            None => {
+                warn!("[P2P] ⚠️ try_get_status_snapshot: peers lock CONTENDED");
+                return None;
+            }
+        };
+
+        let peer_heights_all = match self.peer_heights.try_lock() {
             Some(guard) => {
                 let cloned = guard.clone();
                 drop(guard);
@@ -1129,6 +1212,12 @@ impl PeerManager {
                 return None;
             }
         };
+
+        // Filter to only include currently connected peers
+        let peer_heights: HashMap<PeerId, u64> = peer_heights_all
+            .into_iter()
+            .filter(|(peer_id, _)| peers.contains_key(peer_id))
+            .collect();
 
         let my_height = match self.my_height.try_lock() {
             Some(guard) => *guard,

@@ -4,7 +4,6 @@ compile_error!("Astram-node is GPU-only. Build with CUDA support (`cuda-miner` f
 // Use library exports instead of declaring local modules to avoid duplicate crate types
 use Astram_core::Blockchain;
 use Astram_core::block::Block;
-use Astram_core::config::initial_block_reward;
 use Astram_core::config::calculate_block_reward;
 use Astram_core::consensus;
 use Astram_core::transaction::BINCODE_CONFIG;
@@ -183,7 +182,11 @@ async fn main() {
     println!("[INFO] Astram node starting...");
 
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Info)
+        .filter_module("warp", log::LevelFilter::Warn)
+        .filter_module("hyper", log::LevelFilter::Warn)
+        .filter_module("reqwest", log::LevelFilter::Warn)
+        .filter_module("Astram::http", log::LevelFilter::Warn)
         .init();
 
     let cfg = Config::load();
@@ -283,6 +286,7 @@ async fn main() {
 
     // Set listening port in P2P manager (for self-connection detection)
     p2p_handle.set_my_listening_port(node_settings.p2p_port);
+    p2p_handle.set_my_bind_addr(node_settings.p2p_bind_addr.clone());
 
     p2p_service
         .start(bind_addr, node_handle.clone(), chain_state.clone())
@@ -571,11 +575,12 @@ async fn fetch_best_nodes_from_dns(
 
 /// Register this node with the DNS server (non-blocking version)
 /// Height is optional and only used for informational purposes
+/// Returns the public IP address as seen by the DNS server.
 async fn register_with_dns(
     _node_handle: NodeHandle, // Not used - we don't need to lock for DNS registration
     settings: &NodeSettings,
     height: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error>> {
     let dns_url = settings.dns_server_url.clone();
     let node_port = settings.p2p_port;
 
@@ -609,7 +614,7 @@ async fn register_with_dns(
             "Successfully registered with DNS server: {} ({}:{})",
             result.message, result.registered_address, result.registered_port
         );
-        Ok(())
+        Ok(result.registered_address)
     } else {
         let error_text = response.text().await?;
         Err(format!("Failed to register with DNS server: {}", error_text).into())
@@ -685,9 +690,11 @@ async fn sync_blockchain(
 
     // Wait for blocks to arrive (give peers time to respond)
     // Increase timeout for larger syncs
-    let sync_timeout = Duration::from_secs(60);
+    let max_sync_duration = Duration::from_secs(600); // 10 minutes max
+    let idle_timeout = Duration::from_secs(30); // Stop if no progress for 30 seconds
     let sync_start = std::time::Instant::now();
     let mut last_height = my_height;
+    let mut last_progress_time = sync_start;
 
     loop {
         sleep(Duration::from_secs(2)).await;
@@ -712,6 +719,7 @@ async fn sync_blockchain(
                 current_height, max_peer_height
             );
             last_height = current_height;
+            last_progress_time = std::time::Instant::now(); // Reset idle timer
 
             // Request more headers if we're still behind
             if current_height < max_peer_height {
@@ -733,17 +741,151 @@ async fn sync_blockchain(
             break;
         }
 
-        if sync_start.elapsed() > sync_timeout {
+        // Check for idle (no progress for 30 seconds)
+        if last_progress_time.elapsed() > idle_timeout {
             info!(
-                "[WARN] Sync timeout reached. Current height: {} (target: {})",
+                "[WARN] No sync progress for {} seconds. Current height: {} / {}",
+                idle_timeout.as_secs(),
                 current_height, max_peer_height
             );
             info!("[INFO] Will continue syncing in background via periodic header requests");
             break;
         }
+
+        // Check for overall timeout (10 minutes)
+        if sync_start.elapsed() > max_sync_duration {
+            info!(
+                "[WARN] Sync max duration reached ({} minutes). Current height: {} / {}",
+                max_sync_duration.as_secs() / 60,
+                current_height, max_peer_height
+            );
+            info!("[INFO] Proceeding with partial sync; background sync will continue");
+            break;
+        }
     }
 
     Ok(())
+}
+
+/// Wait until blockchain is completely synchronized with peers
+/// This ensures mining only starts when we have all blocks
+async fn wait_for_complete_sync(
+    node_handle: NodeHandle,
+    p2p_handle: Arc<astram_node::p2p::manager::PeerManager>,
+) {
+    const MAX_WAIT_DURATION: Duration = Duration::from_secs(1800); // 30 minutes max
+    const CHECK_INTERVAL: Duration = Duration::from_secs(5);
+    const NO_PEER_GRACE_DURATION: Duration = Duration::from_secs(30);
+    
+    let wait_start = std::time::Instant::now();
+    let mut last_checked_height = 0u64;
+    let mut last_progress_time = wait_start;
+    let mut no_peer_since: Option<std::time::Instant> = None;
+    
+    loop {
+        sleep(CHECK_INTERVAL).await;
+        
+        // Get current blockchain height
+        let my_height = {
+            let bc = node_handle.bc.lock().unwrap();
+            if let Some(tip_hash) = &bc.chain_tip {
+                if let Ok(Some(header)) = bc.load_header(tip_hash) {
+                    header.index + 1
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+        
+        // Get max peer height
+        let peer_heights = p2p_handle.get_peer_heights();
+        let max_peer_height = peer_heights.values().max().copied().unwrap_or(0);
+
+        // If there are no peers, don't block forever at startup.
+        if peer_heights.is_empty() {
+            if no_peer_since.is_none() {
+                no_peer_since = Some(std::time::Instant::now());
+                warn!(
+                    "[WARN] No peers connected yet (local height: {}). Waiting up to {}s before mining.",
+                    my_height,
+                    NO_PEER_GRACE_DURATION.as_secs()
+                );
+            }
+
+            if my_height > 0 {
+                if let Some(since) = no_peer_since {
+                    if since.elapsed() >= NO_PEER_GRACE_DURATION {
+                        warn!(
+                            "[WARN] Still no peers after {}s. Proceeding with local chain at height {}.",
+                            NO_PEER_GRACE_DURATION.as_secs(),
+                            my_height
+                        );
+                        return;
+                    }
+                }
+            }
+
+            if wait_start.elapsed() > MAX_WAIT_DURATION {
+                warn!(
+                    "[CRITICAL] Sync wait timeout after {} minutes with no peers. Local height: {}",
+                    MAX_WAIT_DURATION.as_secs() / 60,
+                    my_height
+                );
+                warn!("[WARN] Proceeding without peer sync confirmation.");
+                return;
+            }
+
+            continue;
+        }
+
+        no_peer_since = None;
+        
+        // Check if we've caught up
+        if my_height >= max_peer_height && max_peer_height > 0 {
+            info!(
+                "[OK] Blockchain fully synchronized! Height: {} (peers: {})",
+                my_height, max_peer_height
+            );
+            return;
+        }
+        
+        // Track progress
+        if my_height > last_checked_height {
+            info!(
+                "[SYNC] Progress: {} / {} blocks",
+                my_height, max_peer_height
+            );
+            last_checked_height = my_height;
+            last_progress_time = std::time::Instant::now();
+        }
+        
+        // Check if we've been idle for too long
+        if last_progress_time.elapsed() > Duration::from_secs(120) {
+            info!(
+                "[WARN] No progress for 2 minutes. Current: {} / {} blocks",
+                my_height, max_peer_height
+            );
+            if my_height > 0 {
+                info!("[INFO] Proceeding with current sync state ({}% complete)",
+                    if max_peer_height > 0 { my_height * 100 / max_peer_height } else { 0 }
+                );
+                return;
+            }
+        }
+        
+        // Check overall timeout
+        if wait_start.elapsed() > MAX_WAIT_DURATION {
+            warn!(
+                "[CRITICAL] Sync timeout after {} minutes. Current: {} / {} blocks",
+                MAX_WAIT_DURATION.as_secs() / 60,
+                my_height, max_peer_height
+            );
+            warn!("[WARN] Proceeding with incomplete sync - mining may produce orphan blocks!");
+            return;
+        }
+    }
 }
 
 async fn start_services(
@@ -783,12 +925,20 @@ async fn start_services(
     // Register with DNS server (fail fast if registration fails)
     // Note: This is outside the main mining loop, so it happens only once at startup
     // Periodic re-registration is done without trying to acquire any locks
-    if let Err(e) = register_with_dns(node_handle.clone(), &settings, initial_height).await {
-        log::error!("DNS registration failed; shutting down node: {}", e);
-        std::process::exit(1);
+    match register_with_dns(node_handle.clone(), &settings, initial_height).await {
+        Ok(registered_address) => {
+            p2p_handle.set_my_public_ip(Some(registered_address.clone()));
+            *node_meta.my_public_address.lock().unwrap() = Some(registered_address);
+        }
+        Err(e) => {
+            log::error!("DNS registration failed; shutting down node: {}", e);
+            std::process::exit(1);
+        }
     }
 
     let dns_node_handle = node_handle.clone();
+    let p2p_handle_dns = p2p_handle.clone();
+    let node_meta_dns = node_meta.clone();
     let shutdown_flag_dns = shutdown_flag.clone();
     let settings_dns = settings.clone();
     let dns_task = tokio::spawn(async move {
@@ -831,6 +981,8 @@ async fn start_services(
                     // Spawn DNS registration asynchronously - never blocks mining
                     let dns_handle_clone = dns_node_handle.clone();
                     let settings_clone = settings_dns.clone();
+                    let p2p_handle_clone = p2p_handle_dns.clone();
+                    let node_meta_clone = node_meta_dns.clone();
                     let spawn_time = std::time::Instant::now();
                     tokio::spawn(async move {
                         let start = std::time::Instant::now();
@@ -841,7 +993,9 @@ async fn start_services(
                         )
                         .await
                         {
-                            Ok(Ok(())) => {
+                            Ok(Ok(registered_address)) => {
+                                p2p_handle_clone.set_my_public_ip(Some(registered_address.clone()));
+                                *node_meta_clone.my_public_address.lock().unwrap() = Some(registered_address);
                                 info!(
                                     "[DNS] ✅ Re-registration OK (height={}, took {:?})",
                                     height,
@@ -988,6 +1142,10 @@ async fn start_services(
     let server_handle = tokio::spawn(async move {
         run_server(nh, server_p2p, server_chain, server_meta, http_addr).await;
     });
+
+    // Step 5.5: Wait for complete blockchain synchronization before mining
+    println!("[INFO] Step 5.5: Waiting for complete blockchain synchronization...");
+    wait_for_complete_sync(node_handle.clone(), p2p_handle.clone()).await;
 
     // Step 6: Start mining
     println!("[INFO] Step 6: Starting mining...");

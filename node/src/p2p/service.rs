@@ -43,9 +43,16 @@ impl P2PService {
 
         tokio::spawn(async move {
             if let Err(e) = p2p.start_listener(&addr).await {
-                log::error!("P2P listener failed: {:?}", e);
+                log::error!("❌ CRITICAL: P2P listener failed: {:?}", e);
+                log::error!("   Address: {}", addr);
+                log::error!("   This node CANNOT accept incoming peer connections!");
+                log::error!("   Check if port is already in use or firewall is blocking");
+                std::process::exit(1);
             }
         });
+
+        // Give listener a moment to bind
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
     async fn connect_initial_peers(&self) {
@@ -78,6 +85,85 @@ impl P2PService {
         chain_state: Arc<std::sync::Mutex<ChainState>>,
     ) {
         let p2p = self.manager.clone();
+
+        // set chain locator callback for syncing
+        let chain_for_locator = chain_state.clone();
+        p2p.set_on_get_chain_locator(move || {
+            let mut locator = Vec::new();
+            let chain = chain_for_locator.lock().unwrap();
+            for b in chain.blockchain.iter().rev().take(10) {
+                if let Ok(bytes) = hex::decode(&b.hash) {
+                    locator.push(bytes);
+                }
+            }
+            locator
+        });
+
+        // headers handler - detect chain reorg from genesis
+        let nh_headers = node_handle.clone();
+        let chain_headers = chain_state.clone();
+        p2p.set_on_headers(move |_peer_id, headers| {
+            if headers.is_empty() {
+                return;
+            }
+
+            // Check if this is a genesis-starting chain that differs from ours
+            let first_header = &headers[0];
+            if first_header.index == 0 {
+                let bc = nh_headers.bc.lock().unwrap();
+                
+                // Check our genesis
+                if let Ok(Some(our_genesis_hash)) = bc.db.get(b"i:0") {
+                    let our_genesis_hash_str = String::from_utf8_lossy(&our_genesis_hash);
+                    if let Ok(received_genesis_hash) = Astram_core::block::compute_header_hash(first_header) {
+                        
+                        if our_genesis_hash_str != received_genesis_hash {
+                            // Different genesis! Need full chain reorg
+                            let our_height = bc.chain_tip.as_ref()
+                                .and_then(|tip| bc.load_header(tip).ok().flatten())
+                                .map(|h| h.index)
+                                .unwrap_or(0);
+                            
+                            let their_height = headers.last().map(|h| h.index).unwrap_or(0);
+                            
+                            log::warn!(
+                                "🔄 DIFFERENT GENESIS DETECTED! Our height: {}, Their height: {}",
+                                our_height, their_height
+                            );
+                            log::warn!("   Our genesis:   {}", our_genesis_hash_str);
+                            log::warn!("   Their genesis: {}", received_genesis_hash);
+                            
+                            // Security: Only auto-reset if peer chain is SIGNIFICANTLY longer (10+ blocks)
+                            // This prevents attack from single malicious peer
+                            const MIN_HEIGHT_ADVANTAGE: u64 = 10;
+                            
+                            if their_height > our_height + MIN_HEIGHT_ADVANTAGE {
+                                log::error!("🚨 CHAIN REORG REQUIRED: Peer has significantly longer chain with different genesis!");
+                                log::warn!("   Difference: {} blocks (minimum {} required for auto-reset)", their_height - our_height, MIN_HEIGHT_ADVANTAGE);
+                                
+                                // Reset chain and let sync continue
+                                drop(bc);
+                                let mut bc_mut = nh_headers.bc.lock().unwrap();
+                                if let Err(e) = bc_mut.reset_chain() {
+                                    log::error!("Failed to reset chain: {}", e);
+                                } else {
+                                    // Clear in-memory chain state
+                                    let mut chain = chain_headers.lock().unwrap();
+                                    chain.blockchain.clear();
+                                    chain.orphan_blocks.clear();
+                                    log::info!("✅ Chain reset complete, will sync from genesis");
+                                }
+                            } else if their_height > our_height {
+                                log::warn!("   Peer chain is longer but not significantly ({} blocks difference < {} minimum)", their_height - our_height, MIN_HEIGHT_ADVANTAGE);
+                                log::warn!("   Manual intervention recommended: check which genesis is correct");
+                            } else {
+                                log::warn!("   Our chain is longer/equal, keeping our chain");
+                            }
+                        }
+                    }
+                }
+            }
+        });
 
         // getheaders handler - load headers from DB
         let nh = node_handle.clone();
@@ -269,10 +355,54 @@ impl P2PService {
                         info!("[INFO] Mining cancelled, restarting with updated chain...");
                     }
                     Err(e) => {
-                        // Block validation failed - check if it's an orphan
+                        // Block validation failed - check if it's an orphan or fork
                         let error_msg = format!("{:?}", e);
                         
-                        if error_msg.contains("previous header not found") {
+                        if error_msg.contains("previous header not found") || error_msg.contains("fork detected") {
+                            info!("[P2P] Block #{} is orphan/fork: {}", block.header.index, error_msg);
+                            
+                            // For fork blocks, try to store and trigger reorganization
+                            if error_msg.contains("fork detected") {
+                                // This is a fork block - parent exists but not on our chain tip
+                                // Store it separately and check if it creates a better chain
+                                info!("[P2P] 🔀 Fork block detected at height {}, attempting chain reorganization...", block.header.index);
+                                
+                                // Validate the fork block without chain tip check
+                                match bc.validate_fork_block(&block) {
+                                    Ok(_) => {
+                                        info!("[P2P] ✅ Fork block validated, checking if reorg needed...");
+                                        
+                                        // Try to reorganize to this fork
+                                        match bc.reorganize_if_needed(&block.hash) {
+                                            Ok(true) => {
+                                                info!("[P2P] ✅ Chain reorganized to fork block #{}", block.header.index);
+                                                
+                                                // Update chain state
+                                                drop(bc);
+                                                let mut chain = chain_async.lock().unwrap();
+                                                chain.blockchain.push(block.clone());
+                                                chain.enforce_memory_limit();
+                                                
+                                                p2p_block.set_my_height(block.header.index + 1);
+                                                info!("[INFO] Mining cancelled, restarted with new chain after reorg");
+                                            }
+                                            Ok(false) => {
+                                                info!("[P2P] Fork block exists but our chain has more work, keeping current chain");
+                                            }
+                                            Err(reorg_err) => {
+                                                warn!("[WARN] Reorganization failed: {:?}", reorg_err);
+                                            }
+                                        }
+                                    }
+                                    Err(val_err) => {
+                                        warn!("[WARN] Fork block validation failed: {:?}", val_err);
+                                    }
+                                }
+                                
+                                return;
+                            }
+                            
+                            // Regular orphan handling
                             // Security: Check orphan pool size limit before adding
                             let now = chrono::Utc::now().timestamp();
                             

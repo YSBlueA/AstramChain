@@ -100,9 +100,12 @@ pub fn generate_full_dag(epoch: u64) -> Result<Vec<u8>> {
             dag[dag_offset..dag_offset + DAG_ITEM_SIZE].copy_from_slice(item);
         }
         
-        if chunk_idx % 10 == 0 {
-            let progress = (chunk_idx * 100) / total_chunks;
-            println!("[DAG] Progress: {}%", progress);
+        let progress = (chunk_idx * 100) / total_chunks;
+        if progress % 10 == 0 && chunk_idx > 0 {
+            let prev_progress = ((chunk_idx - 1) * 100) / total_chunks;
+            if prev_progress / 10 != progress / 10 {
+                println!("[DAG] Progress: {}%", progress);
+            }
         }
     }
     

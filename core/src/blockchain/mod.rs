@@ -199,6 +199,125 @@ impl Blockchain {
         Ok(hash)
     }
 
+    /// Validate and insert a fork block (allows fork without chain_tip check)
+    /// This is used for chain reorganization scenarios
+    pub fn validate_fork_block(&mut self, block: &Block) -> Result<()> {
+        // 1) header hash match
+        let computed = compute_header_hash(&block.header)?;
+        if computed != block.hash {
+            return Err(anyhow!(
+                "header hash mismatch: computed {} != block.hash {}",
+                computed,
+                block.hash
+            ));
+        }
+
+        // 2) Proof-of-Work verification
+        if !Self::is_valid_pow(&block.hash, block.header.difficulty)? {
+            return Err(anyhow!(
+                "invalid PoW at block {}: hash does not satisfy bits 0x{:08x}",
+                block.header.index,
+                block.header.difficulty
+            ));
+        }
+
+        // 3) Expected difficulty check
+        if block.header.index > 0 {
+            let expected = self.calculate_adjusted_difficulty(block.header.index)?;
+            if block.header.difficulty != expected {
+                return Err(anyhow!(
+                    "difficulty mismatch at height {}: expected 0x{:08x}, got 0x{:08x}",
+                    block.header.index,
+                    expected,
+                    block.header.difficulty
+                ));
+            }
+        }
+
+        // 4) previous exists (but allow fork - no chain_tip check)
+        if block.header.index > 0 {
+            let prev_key = format!("b:{}", block.header.previous_hash);
+            if self.db.get(prev_key.as_bytes())?.is_none() {
+                return Err(anyhow!(
+                    "previous header not found: {}",
+                    block.header.previous_hash
+                ));
+            }
+            // NOTE: We DO NOT check against chain_tip here - that's the point of fork blocks
+        }
+
+        // 5) Future timestamp check
+        let now = Utc::now().timestamp();
+        if block.header.timestamp > now + self.max_future_block_time {
+            return Err(anyhow!(
+                "block timestamp too far in future: {} > {}",
+                block.header.timestamp,
+                now + self.max_future_block_time
+            ));
+        }
+
+        // 6) Difficulty sanity progression check
+        if block.header.index > 0 {
+            let prev_key = format!("b:{}", block.header.previous_hash);
+            if let Ok(Some(prev_bytes)) = self.db.get(prev_key.as_bytes()) {
+                if let Ok((prev_block, _)) =
+                    bincode::decode_from_slice::<Block, _>(&prev_bytes, *BINCODE_CONFIG)
+                {
+                    let prev_target = Self::compact_to_target(prev_block.header.difficulty);
+                    let current_target = Self::compact_to_target(block.header.difficulty);
+
+                    if current_target.is_zero()
+                        || (!prev_target.is_zero()
+                            && ((current_target > prev_target
+                                && (current_target / prev_target) > U256::from(4u8))
+                                || (current_target < prev_target
+                                    && (prev_target / current_target) > U256::from(4u8))))
+                    {
+                        return Err(anyhow!(
+                            "difficulty target changed too aggressively at block {}",
+                            block.header.index
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 7) Merkle check
+        let txids: Vec<String> = block.transactions.iter().map(|t| t.txid.clone()).collect();
+        let merkle = compute_merkle_root(&txids);
+        if merkle != block.header.merkle_root {
+            return Err(anyhow!("merkle mismatch"));
+        }
+
+        // 8) Median-Time-Past
+        if block.header.index > 0 {
+            self.validate_median_time_past(block)?;
+        }
+
+        // 9) Store the fork block in DB (without updating chain_tip)
+        let mut batch = WriteBatch::default();
+        
+        // Store complete block
+        let block_blob = bincode::encode_to_vec(block, *BINCODE_CONFIG)?;
+        batch.put(format!("b:{}", block.hash).as_bytes(), &block_blob);
+
+        // Store transactions
+        for tx in &block.transactions {
+            let tx_blob = bincode::encode_to_vec(tx, *BINCODE_CONFIG)?;
+            batch.put(format!("t:{}", tx.txid).as_bytes(), &tx_blob);
+        }
+        
+        // Note: We DO NOT update i:{index} here because that would conflict with main chain
+        // The index will be updated during reorganization if this becomes the main chain
+        // Note: We do NOT update UTXO set here - that happens during reorganization
+        
+        put_batch(&self.db, batch)?;
+        
+        log::info!("Fork block #{} stored in DB (hash: {})", block.header.index, &block.hash[..16]);
+        
+        Ok(())
+    }
+
     /// validate and insert block (core of migration/consensus)
     pub fn validate_and_insert_block(&mut self, block: &Block) -> Result<()> {
         // 1) header hash match
@@ -850,58 +969,18 @@ impl Blockchain {
     /// Calculate total chain work (cumulative difficulty) from genesis to given block
     /// Higher difficulty blocks contribute more work
     pub fn calculate_chain_work(&self, block_hash: &str) -> Result<u64> {
-        let mut total_work = 0u64;
-        let mut current_hash = block_hash.to_string();
-
-        loop {
-            let block = self.load_block(&current_hash)?;
-            if block.is_none() {
-                break;
-            }
-
-            let block = block.unwrap();
-
-            // 🔒 Security: Validate difficulty is reasonable (prevent invalid blocks)
-            if block.header.difficulty == 0 {
-                return Err(anyhow!(
-                    "Invalid block with difficulty 0 at height {}",
-                    block.header.index
-                ));
-            }
-
-            if block.header.difficulty > 32 {
-                return Err(anyhow!(
-                    "Invalid block with excessive difficulty {} at height {}",
-                    block.header.difficulty,
-                    block.header.index
-                ));
-            }
-
-            // Each difficulty level represents 16x more work (hexadecimal)
-            // Work = 16^difficulty
-            // Use checked operations to prevent overflow
-            let block_work = match 16u64.checked_pow(block.header.difficulty) {
-                Some(work) => work,
-                None => {
-                    log::warn!(
-                        "Work calculation overflow at difficulty {}, using max u64",
-                        block.header.difficulty
-                    );
-                    u64::MAX
-                }
-            };
-
-            // Saturating add to prevent overflow
-            total_work = total_work.saturating_add(block_work);
-
-            if block.header.index == 0 {
-                break; // Reached genesis
-            }
-
-            current_hash = block.header.previous_hash.clone();
+        // For simplicity and overflow prevention, use height as work metric
+        // In production, could use sum of (2^256 / target) but this is sufficient
+        // for longest chain rule when difficulty is relatively stable
+        
+        let block = self.load_block(block_hash)?;
+        if let Some(block) = block {
+            // Chain work = block height + 1 (genesis = 1, block 1 = 2, etc.)
+            // This ensures longer chain always wins when difficulty is similar
+            Ok(block.header.index + 1)
+        } else {
+            Err(anyhow!("Block not found: {}", block_hash))
         }
-
-        Ok(total_work)
     }
 
     /// Get block height (index) for a given block hash
@@ -1086,11 +1165,12 @@ impl Blockchain {
     }
 
     /// Rollback UTXO changes from a list of blocks (reverse order)
+    /// Also deletes the rolled-back blocks from DB
     fn rollback_blocks(&mut self, blocks: &[Block]) -> Result<()> {
         let mut batch = WriteBatch::default();
 
         for block in blocks {
-            log::info!("Rolling back block {}", block.header.index);
+            log::info!("Rolling back block {} (hash: {})", block.header.index, &block.hash[..16]);
 
             // Process transactions in reverse order
             for tx in block.transactions.iter().rev() {
@@ -1123,7 +1203,18 @@ impl Blockchain {
                         }
                     }
                 }
+                
+                // Delete transaction from DB
+                batch.delete(format!("t:{}", tx.txid).as_bytes());
             }
+            
+            // Delete block from DB
+            batch.delete(format!("b:{}", block.hash).as_bytes());
+            
+            // Delete block index (will be overwritten by new chain anyway, but clean up)
+            batch.delete(format!("i:{}", block.header.index).as_bytes());
+            
+            log::info!("✅ Block {} deleted from DB during rollback", block.header.index);
         }
 
         put_batch(&self.db, batch)?;
@@ -1133,9 +1224,9 @@ impl Blockchain {
     /// Replay blocks to apply UTXO changes (forward order)
     fn replay_blocks(&mut self, blocks: &[Block]) -> Result<()> {
         for block in blocks {
-            log::info!("Replaying block {}", block.header.index);
+            log::info!("Replaying block {} (hash: {})", block.header.index, &block.hash[..16]);
 
-            // We already have the block stored, just need to update UTXO set
+            // Update UTXO set and block index
             let mut batch = WriteBatch::default();
 
             for tx in &block.transactions {
@@ -1158,6 +1249,9 @@ impl Blockchain {
                     }
                 }
             }
+            
+            // Update block index for new chain
+            batch.put(format!("i:{}", block.header.index).as_bytes(), block.hash.as_bytes());
 
             put_batch(&self.db, batch)?;
         }
@@ -1173,5 +1267,42 @@ impl Blockchain {
         }
 
         initial_block_reward() >> halvings
+    }
+
+    /// Reset blockchain to empty state (for chain reorg from genesis)
+    /// WARNING: This deletes all blockchain data!
+    pub fn reset_chain(&mut self) -> Result<()> {
+        log::warn!("🔄 Resetting blockchain database...");
+        
+        // Delete all blockchain-related keys
+        let mut batch = WriteBatch::default();
+        
+        // Delete tip
+        batch.delete(b"tip");
+        
+        // Collect all keys to delete
+        let mut keys_to_delete = Vec::new();
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            if let Ok((key, _)) = item {
+                let key_str = String::from_utf8_lossy(&key);
+                // Delete block, transaction, utxo, and index keys
+                if key_str.starts_with("b:") || key_str.starts_with("t:") || 
+                   key_str.starts_with("u:") || key_str.starts_with("i:") {
+                    keys_to_delete.push(key.to_vec());
+                }
+            }
+        }
+        
+        for key in keys_to_delete {
+            batch.delete(&key);
+        }
+        
+        put_batch(&self.db, batch)?;
+        self.chain_tip = None;
+        self.difficulty = Self::POW_LIMIT_BITS;
+        
+        log::info!("✅ Blockchain reset complete");
+        Ok(())
     }
 }

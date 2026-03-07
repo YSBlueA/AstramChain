@@ -43,7 +43,70 @@ impl ExplorerDB {
 
         info!("✅ Explorer database opened at {}", path);
 
-        Ok(ExplorerDB { db: Arc::new(db) })
+        let explorer_db = ExplorerDB { db: Arc::new(db) };
+        
+        // 메타데이터 초기화 (첫 실행 시 기존 데이터 스캔)
+        explorer_db.initialize_metadata()?;
+
+        Ok(explorer_db)
+    }
+
+    /// 메타데이터 초기화: 기존 블록/트랜잭션 개수를 스캔해서 설정
+    fn initialize_metadata(&self) -> Result<()> {
+        let block_count = self.get_block_count()?;
+        let tx_count = self.get_transaction_count()?;
+
+        if block_count == 0 {
+            // DB를 스캔해서 실제 최고 블록 높이 찾기
+            let mut max_height = 0u64;
+            let mut iter = self.db.raw_iterator();
+            iter.seek(b"b:");
+
+            while iter.valid() {
+                if let Some(key) = iter.key() {
+                    if !key.starts_with(b"b:") {
+                        break;
+                    }
+
+                    let key_str = String::from_utf8_lossy(key);
+                    if let Some(height_str) = key_str.strip_prefix("b:") {
+                        if let Ok(height) = height_str.parse::<u64>() {
+                            max_height = max_height.max(height);
+                        }
+                    }
+                }
+                iter.next();
+            }
+
+            if max_height > 0 {
+                self.set_block_count(max_height + 1)?;
+                info!("🔧 Initialized block_count to {} from existing data", max_height + 1);
+            }
+        }
+
+        if tx_count == 0 {
+            // DB를 스캔해서 실제 트랜잭션 개수 세기
+            let mut count = 0u64;
+            let mut iter = self.db.raw_iterator();
+            iter.seek(b"t:");
+
+            while iter.valid() {
+                if let Some(key) = iter.key() {
+                    if !key.starts_with(b"t:") {
+                        break;
+                    }
+                    count += 1;
+                }
+                iter.next();
+            }
+
+            if count > 0 {
+                self.set_transaction_count(count)?;
+                info!("🔧 Initialized tx_count to {} from existing data", count);
+            }
+        }
+
+        Ok(())
     }
 
     /// 블록 저장
@@ -61,6 +124,11 @@ impl ExplorerDB {
         // bh:<hash> -> height (해시로 블록 찾기)
         let hash_key = format!("bh:{}", block.hash);
         batch.put(hash_key.as_bytes(), block.height.to_string().as_bytes());
+
+        // meta:block_count 업데이트 (최고 높이 + 1)
+        let current_count = self.get_block_count().unwrap_or(0);
+        let new_count = current_count.max(block.height + 1);
+        batch.put(b"meta:block_count", new_count.to_string().as_bytes());
 
         self.db.write(batch)?;
         log::info!("✅ ExplorerDB: Block height={} persisted", block.height);
@@ -158,15 +226,25 @@ impl ExplorerDB {
             batch.put(block_tx_key.as_bytes(), tx.hash.as_bytes());
         }
 
+        // meta:tx_count 증가
+        let current_count = self.get_transaction_count().unwrap_or(0);
+        batch.put(b"meta:tx_count", (current_count + 1).to_string().as_bytes());
+
         self.db.write(batch)?;
         Ok(())
     }
 
     /// 트랜잭션 조회
     pub fn get_transaction(&self, hash: &str) -> Result<Option<TransactionInfo>> {
-        for candidate in Self::hash_lookup_candidates(hash) {
+        let candidates = Self::hash_lookup_candidates(hash);
+        log::debug!("🔍 Looking up transaction with {} candidate(s): {:?}", candidates.len(), candidates);
+        
+        for (i, candidate) in candidates.iter().enumerate() {
             let key = format!("t:{}", candidate);
+            log::debug!("   Attempt {}/{}: trying key '{}'", i+1, candidates.len(), key);
+            
             if let Some(data) = self.db.get(key.as_bytes())? {
+                log::debug!("✅ Transaction found using candidate: {}", candidate);
                 let mut tx: TransactionInfo = serde_json::from_slice(&data)?;
                 // Calculate confirmations if transaction is in a block
                 if let Some(block_height) = tx.block_height {
@@ -183,6 +261,7 @@ impl ExplorerDB {
             }
         }
 
+        log::warn!("❌ Transaction not found in DB after trying all candidates");
         Ok(None)
     }
 
