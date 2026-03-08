@@ -529,6 +529,18 @@ async fn fetch_best_nodes_from_dns(
         let result: DnsNodesResponse = response.json().await?;
         info!("Retrieved {} nodes from DNS server", result.count);
 
+        // Log all discovered nodes for visibility
+        for (idx, node) in result.nodes.iter().enumerate() {
+            info!(
+                "  DNS Node {}: {}:{} (height: {}, uptime: {:.1}h)",
+                idx + 1,
+                node.address,
+                node.port,
+                node.height,
+                node.uptime_hours
+            );
+        }
+
         // Filter out self - use public address if available
         let candidates: Vec<DnsNodeInfo> = result
             .nodes
@@ -536,11 +548,11 @@ async fn fetch_best_nodes_from_dns(
             .filter(|node| {
                 let node_id = format!("{}:{}", node.address, node.port);
 
-                // Filter out exact match with public address (if we have it)
+                // Filter out exact match with public address+port (if we have it)
                 if let Some(ref my_public_ip) = my_address {
                     let my_id = format!("{}:{}", my_public_ip, my_port);
                     if node_id == my_id {
-                        info!("  Skipping {} - matches my public address", node_id);
+                        info!("  ⏭️  Skipping {} - exact match with my public IP:port ({})", node_id, my_id);
                         return false;
                     }
                 }
@@ -551,18 +563,19 @@ async fn fetch_best_nodes_from_dns(
                     || node.address == "::1"
                 {
                     info!(
-                        "  Skipping {}:{} - localhost address",
+                        "  ⏭️  Skipping {}:{} - localhost address",
                         node.address, node.port
                     );
                     return false;
                 }
 
+                info!("  ✅ Candidate: {}:{} (height: {})", node.address, node.port, node.height);
                 true
             })
             .collect();
 
         info!(
-            "Testing latency for {} candidate nodes...",
+            "Selected {} candidates for latency testing",
             candidates.len()
         );
 
