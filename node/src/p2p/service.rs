@@ -86,6 +86,9 @@ impl P2PService {
     ) {
         let p2p = self.manager.clone();
 
+        // Create unbounded channel for sequential block processing (prevents deadlock)
+        let (block_tx, mut block_rx) = tokio::sync::mpsc::unbounded_channel::<block::Block>();
+
         // set chain locator callback for syncing (use persisted DB tip, not in-memory cache)
         let nh_locator = node_handle.clone();
         p2p.set_on_get_chain_locator(move || {
@@ -241,33 +244,30 @@ impl P2PService {
             headers
         });
 
-        // block handler
-        let nh2 = node_handle.clone();
-        let chain_for_block = chain_state.clone();
-        let p2p_for_block = p2p.clone();
-        p2p.set_on_block(move |block: block::Block| {
-            info!("[P2P] 📦 Block handler START for block #{} {}", block.header.index, &block.hash[..16]);
-            let handler_start = std::time::Instant::now();
-            
-            let nh_async = nh2.clone();
-            let chain_async = chain_for_block.clone();
-            let p2p_block = p2p_for_block.clone();
-            tokio::spawn(async move {
-                let state = nh_async;
+        // Sequential block processing task (prevents deadlock from concurrent lock acquisition)
+        let nh_processor = node_handle.clone();
+        let chain_processor = chain_state.clone();
+        let p2p_processor = p2p.clone();
+        tokio::spawn(async move {
+            info!("[P2P] 🔄 Sequential block processor task started");
+            while let Some(block) = block_rx.recv().await {
+                info!("[P2P] 📦 Processing block #{} {} from queue", block.header.index, &block.hash[..16]);
+                let handler_start = std::time::Instant::now();
+                
+                let state = nh_processor.clone();
+                let chain_async = chain_processor.clone();
+                let p2p_block = p2p_processor.clone();
 
                 // Check if this is a block we recently mined ourselves
                 {
-                    info!("[P2P] 🔒 Block handler: acquiring chain lock for recently_mined check...");
-                    let lock_start = std::time::Instant::now();
                     let chain = chain_async.lock().unwrap();
-                    info!("[P2P] ✅ Block handler: chain lock acquired (took {:?})", lock_start.elapsed());
                     
                     if chain.recently_mined_blocks.contains_key(&block.hash) {
                         info!(
                             "[INFO] Ignoring block we mined ourselves: index={} hash={}",
                             block.header.index, block.hash
                         );
-                        return;
+                        continue;  // Skip to next block in queue
                     }
                 }
 
@@ -278,37 +278,27 @@ impl P2PService {
                     .store(true, std::sync::atomic::Ordering::SeqCst);
 
                 // Try to insert the block
-                info!("[P2P] 🔒 Block handler: acquiring bc lock for validation...");
-                let lock_start = std::time::Instant::now();
                 let mut bc = state.bc.lock().unwrap();
-                info!("[P2P] ✅ Block handler: bc lock acquired (took {:?})", lock_start.elapsed());
                 
                 let validation_start = std::time::Instant::now();
                 match bc.validate_and_insert_block(&block) {
                     Ok(_) => {
                         info!(
-                            "[P2P] ✅ Block #{} validated and inserted (validation took {:?})",
+                            "[OK] Block #{} added (validation: {:?})",
                             block.header.index, validation_start.elapsed()
-                        );
-                        info!(
-                            "[OK] Block added via p2p: index={} hash={}",
-                            block.header.index, block.hash
                         );
                         
                         // Release bc lock before taking chain lock
                         drop(bc);
                         
                         {
-                            info!("[P2P] 🔒 Block handler: acquiring chain lock for blockchain update...");
-                            let lock_start = std::time::Instant::now();
                             let mut chain = chain_async.lock().unwrap();
-                            info!("[P2P] ✅ Block handler: chain lock acquired (took {:?})", lock_start.elapsed());
                             chain.blockchain.push(block.clone());
                             chain.enforce_memory_limit(); // Security: Enforce memory limit
                         }
 
                         // Update P2P manager height
-                        p2p_block.set_my_height(block.header.index + 1);
+                        p2p_block.set_my_height(block.header.index);
 
                         // Remove transactions from pending pool that are in the new block
                         let block_txids: std::collections::HashSet<String> = block
@@ -319,25 +309,19 @@ impl P2PService {
 
                         let removed_count = block_txids.len().saturating_sub(1); // -1 for coinbase
                         {
-                            info!("[P2P] 🔒 Block handler: acquiring mempool lock to remove txs...");
-                            let lock_start = std::time::Instant::now();
                             let mut mempool = state.mempool.lock().unwrap();
-                            info!("[P2P] ✅ Block handler: mempool lock acquired (took {:?})", lock_start.elapsed());
                             mempool.pending.retain(|tx| !block_txids.contains(&tx.txid));
                         }
 
                         if removed_count > 0 {
                             info!(
-                                "[INFO] Removed {} transactions from mempool (included in peer block)",
+                                "[INFO] Removed {} transactions from mempool",
                                 removed_count
                             );
                         }
 
                         // Reacquire bc lock for reorganization check
-                        info!("[P2P] 🔒 Block handler: reacquiring bc lock for reorg check...");
-                        let lock_start = std::time::Instant::now();
                         let mut bc = state.bc.lock().unwrap();
-                        info!("[P2P] ✅ Block handler: bc lock reacquired (took {:?})", lock_start.elapsed());
                         
                         // Check if this block triggers a chain reorganization
                         match bc.reorganize_if_needed(&block.hash) {
@@ -508,48 +492,50 @@ impl P2PService {
                                 
                                 if let Some(my_genesis) = genesis_hash {
                                     if my_genesis != parent_hash {
-                                        warn!("[SYNC] ⚠️ Genesis mismatch detected during initial sync!");
-                                        warn!("[SYNC]    My genesis:    {}", my_genesis);
-                                        warn!("[SYNC]    Peer genesis:  {}", parent_hash);
-                                        warn!("[SYNC] 🔄 Resetting chain and requesting new genesis...");
+                                        warn!("[SYNC] Genesis mismatch - resetting chain");
                                         
-                                        // 1. 내 체인 리셋
+                                        // 1. Reset chain
                                         {
                                             let mut bc = state.bc.lock().unwrap();
                                             if let Err(e) = bc.reset_chain() {
-                                                warn!("[SYNC] ❌ Failed to reset chain: {:?}", e);
-                                                return;
+                                                warn!("[SYNC] Failed to reset chain: {:?}", e);
+                                                continue;
                                             }
-                                            info!("[SYNC] ✅ Chain reset completed");
                                         }
                                         
-                                        // 2. 피어의 Genesis 블록 요청 (parent_hash = Genesis)
-                                        info!("[SYNC] 📥 Requesting genesis block {}", &parent_hash[..16]);
+                                        // 2. Request peer's genesis
                                         p2p_block.request_block_by_hash(&parent_hash);
                                         
-                                        // 3. orphan pool 초기화 (새로운 체인으로 재시작)
+                                        // 3. Clear orphan pool
                                         drop(chain);
                                         let mut chain_fresh = chain_async.lock().unwrap();
                                         chain_fresh.orphan_blocks.clear();
                                         chain_fresh.blockchain.clear();
-                                        info!("[SYNC] 🔄 Ready for full chain sync from genesis");
                                         
-                                        return;
+                                        continue;
                                     }
                                 }
                             }
                             
-                            // parent block 요청 (역방향 탐색)
+                            // Request parent block
                             p2p_block.request_block_by_hash(&parent_hash);
                             
-                            info!("[P2P] ⏸️ Block handler: orphan block stored (total time {:?})", handler_start.elapsed());
                         } else {
                             warn!("[WARN] Invalid block from p2p: {:?}", e);
-                            info!("[P2P] ❌ Block handler: invalid block rejected (total time {:?})", handler_start.elapsed());
                         }
                     }
                 }
-            });
+                
+                info!("[P2P] ✅ Block #{} processed in {:?}", block.header.index, handler_start.elapsed());
+            }
+            warn!("[P2P] Sequential block processor task ended");
+        });
+
+        // Block handler - just enqueue blocks for sequential processing
+        p2p.set_on_block(move |block: block::Block| {
+            if let Err(e) = block_tx.send(block) {
+                warn!("[P2P] Failed to enqueue block for processing: {:?}", e);
+            }
         });
 
         // transaction handler
