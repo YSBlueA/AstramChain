@@ -278,7 +278,10 @@ impl P2PService {
                     .store(true, std::sync::atomic::Ordering::SeqCst);
 
                 // Try to insert the block
+                let lock_start = std::time::Instant::now();
+                info!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock()...", block.header.index);
                 let mut bc = state.bc.lock().unwrap();
+                info!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() after {:?}", block.header.index, lock_start.elapsed());
                 
                 let validation_start = std::time::Instant::now();
                 match bc.validate_and_insert_block(&block) {
@@ -289,7 +292,10 @@ impl P2PService {
                         );
                         
                         // Release bc lock before taking chain lock
+                        let lock_drop_time = std::time::Instant::now();
+                        info!("[LOCK-DEBUG] ⏳ Block #{} releasing bc.lock()...", block.header.index);
                         drop(bc);
+                        info!("[LOCK-DEBUG] ✅ Block #{} released bc.lock() after {:?}", block.header.index, lock_drop_time.elapsed());
                         
                         {
                             let mut chain = chain_async.lock().unwrap();
@@ -321,7 +327,10 @@ impl P2PService {
                         }
 
                         // Reacquire bc lock for reorganization check
+                        let lock_reacq_time = std::time::Instant::now();
+                        info!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock() for reorg check...", block.header.index);
                         let mut bc = state.bc.lock().unwrap();
+                        info!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() for reorg after {:?}", block.header.index, lock_reacq_time.elapsed());
                         
                         // Check if this block triggers a chain reorganization
                         match bc.reorganize_if_needed(&block.hash) {

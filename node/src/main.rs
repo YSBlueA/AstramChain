@@ -1576,6 +1576,8 @@ async fn mining_loop(
         println!("[DEBUG] Mining: Attempting to acquire WRITE lock...");
         let (snapshot_txs, difficulty, prev_hash, index_snapshot, cancel_flag, hashrate_shared) = {
             println!("[DEBUG] Mining: WRITE lock acquired");
+            let lock_acq_time = std::time::Instant::now();
+            info!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock()...");
 
             // Mark mining as active
             node_handle.mining.active.store(true, OtherOrdering::SeqCst);
@@ -1595,7 +1597,10 @@ async fn mining_loop(
             };
 
             let (prev_hash, next_index, diff) = {
+                let lock_start = std::time::Instant::now();
+                info!("[LOCK-DEBUG] ⏳ Mining: attempting bc.lock() for header read...");
                 let mut bc = node_handle.bc.lock().unwrap();
+                info!("[LOCK-DEBUG] ✅ Mining: acquired bc.lock() after {:?}", lock_start.elapsed());
 
                 // previous tip hash
                 let prev_hash = bc.chain_tip.clone().unwrap_or_else(|| "0".repeat(64));
@@ -1633,6 +1638,12 @@ async fn mining_loop(
                     // Update blockchain difficulty before mining
                     bc.difficulty = diff;
                 }
+
+                let lock_release_time = std::time::Instant::now();
+                info!("[LOCK-DEBUG] ⏳ Mining: releasing bc.lock()...");
+                // bc goes out of scope here - lock released
+                
+                info!("[LOCK-DEBUG] ✅ Mining: released bc.lock() after {:?}", lock_release_time.elapsed());
 
                 (prev_hash, next_index, diff)
             };
@@ -1759,11 +1770,21 @@ async fn mining_loop(
                 // The block is already valid as-is from mining.
 
                 println!("[DEBUG] Validating and inserting block into blockchain DB...");
-                match node_handle
-                    .bc
-                    .lock()
-                    .unwrap()
-                    .validate_and_insert_block(&block)
+                let lock_insert_time = std::time::Instant::now();
+                info!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock() for block insert...");
+                let insert_result = {
+                    let lock_acq_insert = std::time::Instant::now();
+                    let mut bc_insert = node_handle
+                        .bc
+                        .lock()
+                        .unwrap();
+                    info!("[LOCK-DEBUG] ✅ Mining: acquired bc.lock() for insert after {:?}", lock_acq_insert.elapsed());
+                    bc_insert.validate_and_insert_block(&block)
+                    // bc_insert lock released here
+                };
+                info!("[LOCK-DEBUG] ✅ Mining: released bc.lock() after insert");
+                
+                match insert_result
                 {
                     Ok(_) => {
                         println!(
