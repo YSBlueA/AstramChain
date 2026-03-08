@@ -3,7 +3,7 @@ use crate::ChainState;
 use crate::NodeHandle;
 use crate::p2p::manager::{MAX_OUTBOUND, PeerManager};
 use hex;
-use log::{info, warn};
+use log::{debug, info, warn};
 use Astram_core::block;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -279,9 +279,9 @@ impl P2PService {
 
                 // Try to insert the block
                 let lock_start = std::time::Instant::now();
-                info!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock()...", block.header.index);
+                debug!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock()...", block.header.index);
                 let mut bc = state.bc.lock().unwrap();
-                info!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() after {:?}", block.header.index, lock_start.elapsed());
+                debug!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() after {:?}", block.header.index, lock_start.elapsed());
                 
                 let validation_start = std::time::Instant::now();
                 match bc.validate_and_insert_block(&block) {
@@ -293,9 +293,9 @@ impl P2PService {
                         
                         // Release bc lock before taking chain lock
                         let lock_drop_time = std::time::Instant::now();
-                        info!("[LOCK-DEBUG] ⏳ Block #{} releasing bc.lock()...", block.header.index);
+                        debug!("[LOCK-DEBUG] ⏳ Block #{} releasing bc.lock()...", block.header.index);
                         drop(bc);
-                        info!("[LOCK-DEBUG] ✅ Block #{} released bc.lock() after {:?}", block.header.index, lock_drop_time.elapsed());
+                        debug!("[LOCK-DEBUG] ✅ Block #{} released bc.lock() after {:?}", block.header.index, lock_drop_time.elapsed());
                         
                         {
                             let mut chain = chain_async.lock().unwrap();
@@ -328,9 +328,9 @@ impl P2PService {
 
                         // Reacquire bc lock for reorganization check
                         let lock_reacq_time = std::time::Instant::now();
-                        info!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock() for reorg check...", block.header.index);
+                        debug!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock() for reorg check...", block.header.index);
                         let mut bc = state.bc.lock().unwrap();
-                        info!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() for reorg after {:?}", block.header.index, lock_reacq_time.elapsed());
+                        debug!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() for reorg after {:?}", block.header.index, lock_reacq_time.elapsed());
                         
                         // Check if this block triggers a chain reorganization
                         match bc.reorganize_if_needed(&block.hash) {
@@ -420,12 +420,12 @@ impl P2PService {
                             };
 
                             let orphan_release_start = std::time::Instant::now();
-                            info!(
+                            debug!(
                                 "[LOCK-DEBUG] ⏳ Block #{} releasing bc.lock() before orphan handling...",
                                 block.header.index
                             );
                             drop(bc);
-                            info!(
+                            debug!(
                                 "[LOCK-DEBUG] ✅ Block #{} released bc.lock() before orphan handling after {:?}",
                                 block.header.index,
                                 orphan_release_start.elapsed()
@@ -501,9 +501,9 @@ impl P2PService {
                             // Now try to process any orphan blocks that may now be valid
                             {
                                 let lock_orphan_time = std::time::Instant::now();
-                                info!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock() for orphan processing...", block.header.index);
+                                debug!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock() for orphan processing...", block.header.index);
                                 let mut bc_for_orphan = state.bc.lock().unwrap();
-                                info!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() for orphan after {:?}", block.header.index, lock_orphan_time.elapsed());
+                                debug!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() for orphan after {:?}", block.header.index, lock_orphan_time.elapsed());
                                 
                                 let mut chain_for_orphan = chain_async.lock().unwrap();
                                 Self::process_orphan_blocks(

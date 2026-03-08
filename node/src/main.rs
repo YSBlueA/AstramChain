@@ -18,7 +18,7 @@ use astram_node::NodeMeta;
 use astram_node::p2p::service::P2PService;
 use astram_node::server::run_server;
 use hex;
-use log::{info, warn};
+use log::{debug, info, warn};
 use primitive_types::U256;
 use serde::Deserialize;
 use serde_json::Value;
@@ -32,6 +32,18 @@ use std::sync::atomic::Ordering as OtherOrdering;
 use std::sync::{Arc, Mutex};
 use tokio::signal;
 use tokio::time::{Duration, sleep};
+
+#[cfg(debug_assertions)]
+macro_rules! debug_println {
+    ($($arg:tt)*) => {
+        println!($($arg)*);
+    };
+}
+
+#[cfg(not(debug_assertions))]
+macro_rules! debug_println {
+    ($($arg:tt)*) => {};
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct DnsNodeInfo {
@@ -205,13 +217,31 @@ fn to_socket_addr(addr: &str, port: u16, fallback: SocketAddr) -> SocketAddr {
 async fn main() {
     println!("[INFO] Astram node starting...");
 
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .filter_module("warp", log::LevelFilter::Warn)
-        .filter_module("hyper", log::LevelFilter::Warn)
-        .filter_module("reqwest", log::LevelFilter::Warn)
-        .filter_module("Astram::http", log::LevelFilter::Warn)
-        .init();
+    let mut logger = env_logger::Builder::from_default_env();
+
+    #[cfg(debug_assertions)]
+    {
+        logger
+            .filter_level(log::LevelFilter::Info)
+            .filter_module("warp", log::LevelFilter::Warn)
+            .filter_module("hyper", log::LevelFilter::Warn)
+            .filter_module("reqwest", log::LevelFilter::Warn)
+            .filter_module("Astram::http", log::LevelFilter::Warn);
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        // Release: keep operational logs, suppress verbose transport internals.
+        logger
+            .filter_level(log::LevelFilter::Info)
+            .filter_module("astram_node::p2p::manager", log::LevelFilter::Warn)
+            .filter_module("warp", log::LevelFilter::Warn)
+            .filter_module("hyper", log::LevelFilter::Warn)
+            .filter_module("reqwest", log::LevelFilter::Warn)
+            .filter_module("Astram::http", log::LevelFilter::Warn);
+    }
+
+    logger.init();
 
     let cfg = Config::load();
     let node_settings = Arc::new(load_node_settings());
@@ -1573,10 +1603,10 @@ async fn mining_loop(
         }
 
         // Snapshot pending txs + mining params while holding the lock briefly
-        println!("[DEBUG] Mining: Attempting to acquire WRITE lock...");
+        debug_println!("[DEBUG] Mining: Attempting to acquire WRITE lock...");
         let (snapshot_txs, difficulty, prev_hash, index_snapshot, cancel_flag, hashrate_shared) = {
-            println!("[DEBUG] Mining: WRITE lock acquired");
-            info!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock()...");
+            debug_println!("[DEBUG] Mining: WRITE lock acquired");
+            debug!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock()...");
 
             // Mark mining as active
             node_handle.mining.active.store(true, OtherOrdering::SeqCst);
@@ -1597,15 +1627,15 @@ async fn mining_loop(
 
             let (prev_hash, next_index, diff) = {
                 let lock_start = std::time::Instant::now();
-                info!("[LOCK-DEBUG] ⏳ Mining: attempting bc.lock() for header read...");
+                debug!("[LOCK-DEBUG] ⏳ Mining: attempting bc.lock() for header read...");
                 let mut bc = node_handle.bc.lock().unwrap();
-                info!("[LOCK-DEBUG] ✅ Mining: acquired bc.lock() after {:?}", lock_start.elapsed());
+                debug!("[LOCK-DEBUG] ✅ Mining: acquired bc.lock() after {:?}", lock_start.elapsed());
 
                 // previous tip hash
                 let prev_hash = bc.chain_tip.clone().unwrap_or_else(|| "0".repeat(64));
 
                 // determine next index from tip header (so header.index is known before mining)
-                println!("[DEBUG] Mining: Loading tip header to determine next index");
+                debug_println!("[DEBUG] Mining: Loading tip header to determine next index");
                 let next_index: u64 = if let Some(tip_hash) = bc.chain_tip.clone() {
                     println!(
                         "[DEBUG] Mining: Loading header for hash: {}",
@@ -1613,14 +1643,14 @@ async fn mining_loop(
                     );
                     if let Ok(Some(prev_header)) = bc.load_header(&tip_hash) {
                         let next_index = prev_header.index + 1;
-                        println!("[DEBUG] Mining: Got next_index = {}", next_index);
+                        debug_println!("[DEBUG] Mining: Got next_index = {}", next_index);
                         next_index
                     } else {
-                        println!("[DEBUG] Mining: Failed to load header, using 0");
+                        debug_println!("[DEBUG] Mining: Failed to load header, using 0");
                         0
                     }
                 } else {
-                    println!("[DEBUG] Mining: No chain_tip, using next_index = 0");
+                    debug_println!("[DEBUG] Mining: No chain_tip, using next_index = 0");
                     0
                 };
 
@@ -1639,10 +1669,10 @@ async fn mining_loop(
                 }
 
                 let lock_release_time = std::time::Instant::now();
-                info!("[LOCK-DEBUG] ⏳ Mining: releasing bc.lock()...");
+                debug!("[LOCK-DEBUG] ⏳ Mining: releasing bc.lock()...");
                 // bc goes out of scope here - lock released
                 
-                info!("[LOCK-DEBUG] ✅ Mining: released bc.lock() after {:?}", lock_release_time.elapsed());
+                debug!("[LOCK-DEBUG] ✅ Mining: released bc.lock() after {:?}", lock_release_time.elapsed());
 
                 (prev_hash, next_index, diff)
             };
@@ -1659,14 +1689,14 @@ async fn mining_loop(
                 node_handle.mining.current_hashrate.clone(),
             )
         };
-        println!("[DEBUG] Mining: WRITE lock released");
+        debug_println!("[DEBUG] Mining: WRITE lock released");
         // Write lock released - calculate fees OUTSIDE the lock
 
         // Calculate total fees from pending transactions (with separate read lock for DB)
-        println!("[DEBUG] Mining: Attempting to acquire READ lock for fees...");
+        debug_println!("[DEBUG] Mining: Attempting to acquire READ lock for fees...");
         let total_fees = {
             let state = node_handle.clone();
-            println!("[DEBUG] Mining: READ lock acquired for fees");
+            debug_println!("[DEBUG] Mining: READ lock acquired for fees");
             let mut fee_sum = U256::zero();
             let bc = state.bc.lock().unwrap();
 
@@ -1701,7 +1731,7 @@ async fn mining_loop(
 
             fee_sum
         };
-        println!("[DEBUG] Mining: READ lock released after fees");
+        debug_println!("[DEBUG] Mining: READ lock released after fees");
         // Read lock released
 
         // prepare block transactions: coinbase + pending
@@ -1744,7 +1774,7 @@ async fn mining_loop(
         let hashrate_for_thread = hashrate_shared.clone();
 
         // Run mining in a blocking task so we don't block the tokio runtime
-        println!("[DEBUG] ⏳ Spawning mining task on blocking thread pool...");
+        debug_println!("[DEBUG] ⏳ Spawning mining task on blocking thread pool...");
         let mined_block_res: anyhow::Result<Block> = tokio::task::spawn_blocking(move || {
             consensus::mine_block_with_coinbase_cuda(
                 index_local,
@@ -1760,7 +1790,7 @@ async fn mining_loop(
         .await
         .expect("mining task panicked");
 
-        println!("[DEBUG] ✅ Mining task COMPLETED and returned to main thread!");
+        debug_println!("[DEBUG] ✅ Mining task COMPLETED and returned to main thread!");
 
         match mined_block_res {
             Ok(block) => {
@@ -1768,19 +1798,19 @@ async fn mining_loop(
                 // because that would invalidate the PoW nonce that was just found.
                 // The block is already valid as-is from mining.
 
-                println!("[DEBUG] Validating and inserting block into blockchain DB...");
-                info!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock() for block insert...");
+                debug_println!("[DEBUG] Validating and inserting block into blockchain DB...");
+                debug!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock() for block insert...");
                 let insert_result = {
                     let lock_acq_insert = std::time::Instant::now();
                     let mut bc_insert = node_handle
                         .bc
                         .lock()
                         .unwrap();
-                    info!("[LOCK-DEBUG] ✅ Mining: acquired bc.lock() for insert after {:?}", lock_acq_insert.elapsed());
+                    debug!("[LOCK-DEBUG] ✅ Mining: acquired bc.lock() for insert after {:?}", lock_acq_insert.elapsed());
                     bc_insert.validate_and_insert_block(&block)
                     // bc_insert lock released here
                 };
-                info!("[LOCK-DEBUG] ✅ Mining: released bc.lock() after insert");
+                debug!("[LOCK-DEBUG] ✅ Mining: released bc.lock() after insert");
                 
                 match insert_result
                 {
@@ -1892,7 +1922,7 @@ async fn mining_loop(
             }
             sleep(Duration::from_secs(1)).await;
         }
-        println!("[DEBUG] Mining cycle: Sleep completed, starting next iteration...");
+        debug_println!("[DEBUG] Mining cycle: Sleep completed, starting next iteration...");
     }
 }
 

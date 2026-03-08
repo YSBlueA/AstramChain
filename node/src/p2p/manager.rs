@@ -735,7 +735,7 @@ impl PeerManager {
         // writer task: consumes rx and writes framed bytes to the socket
         let write_handle = tokio::spawn(async move {
             let mut rx = rx;
-            info!("[P2P] Writer task started for {}", peer_id);
+            debug!("[P2P] Writer task started for {}", peer_id);
             loop {
                 match rx.recv().await {
                     Some(msg) => {
@@ -747,7 +747,7 @@ impl PeerManager {
 
                                 // convert Vec<u8> -> Bytes (LengthDelimitedCodec accepts bytes)
                                 let bytes: Bytes = Bytes::from(frame);
-                                info!("[P2P] Sending message to {} (size: {} bytes)", peer_id, bytes.len());
+                                debug!("[P2P] Sending message to {} (size: {} bytes)", peer_id, bytes.len());
                                 if let Err(e) = writer.send(bytes).await {
                                     warn!("[P2P] Write error to peer {}: {:?}", peer_id, e);
                                     break;
@@ -761,12 +761,12 @@ impl PeerManager {
                     }
                     None => {
                         // All senders dropped -> normal shutdown of writer
-                        info!("[P2P] Write rx closed for peer {}", peer_id);
+                        debug!("[P2P] Write rx closed for peer {}", peer_id);
                         break;
                     }
                 }
             }
-            info!("[P2P] Writer task ended for {}", peer_id);
+            debug!("[P2P] Writer task ended for {}", peer_id);
 
             // best-effort to close the sink
             let _ = writer.close().await;
@@ -775,11 +775,11 @@ impl PeerManager {
         // read task: read framed bytes, decode, and hand to manager
         let manager_clone = self.clone();
         let read_handle = tokio::spawn(async move {
-            info!("[P2P] Reader task started for {}", peer_id_clone);
+            debug!("[P2P] Reader task started for {}", peer_id_clone);
             loop {
                 match reader.next().await {
                     Some(Ok(bytes_mut)) => {
-                        info!("[P2P] Received {} bytes from {}", bytes_mut.len(), peer_id_clone);
+                        debug!("[P2P] Received {} bytes from {}", bytes_mut.len(), peer_id_clone);
                         // bytes_mut is BytesMut; extract magic-prefixed payload
                         let slice = bytes_mut.as_ref();
                         if slice.len() < 4 {
@@ -810,7 +810,7 @@ impl PeerManager {
 
                         match bincode::decode_from_slice::<P2pMessage, _>(payload, config_read) {
                             Ok((msg, _remaining)) => {
-                                info!("[P2P] Message decoded from {}", peer_id_clone);
+                                debug!("[P2P] Message decoded from {}", peer_id_clone);
                                 // delegate to manager
                                 manager_clone
                                     .handle_message(peer_id_clone.clone(), msg)
@@ -828,12 +828,12 @@ impl PeerManager {
                     }
                     None => {
                         // stream ended (peer disconnected)
-                        info!("[P2P] Peer {} disconnected (reader ended)", peer_id_clone);
+                        debug!("[P2P] Peer {} disconnected (reader ended)", peer_id_clone);
                         break;
                     }
                 }
             }
-            info!("[P2P] Reader task ended for {}", peer_id_clone);
+            debug!("[P2P] Reader task ended for {}", peer_id_clone);
         });
 
         let read_fut = read_handle;
@@ -844,7 +844,7 @@ impl PeerManager {
 
         match future::select(read_fut, write_fut).await {
             future::Either::Left((read_res, write_fut)) => {
-                log::info!("read finished first for peer {}", peer_id_clone2);
+                debug!("read finished first for peer {}", peer_id_clone2);
                 if let Err(e) = read_res {
                     log::warn!("read task error: {:?}", e);
                 }
@@ -853,7 +853,7 @@ impl PeerManager {
                 self.peer_handshakes.lock().remove(&peer_id_clone2);
 
                 // Security: Remove from IP tracking (OPTIMIZED: single lock)
-                info!(
+                debug!(
                     "[P2P] 🔒 cleanup {}: acquiring peer_ips lock for removal...",
                     peer_id_clone2
                 );
@@ -880,7 +880,7 @@ impl PeerManager {
                 let _ = write_fut.await; // await the remaining writer
             }
             future::Either::Right((write_res, read_fut)) => {
-                log::info!("write finished first for peer {}", peer_id_clone2);
+                debug!("write finished first for peer {}", peer_id_clone2);
                 if let Err(e) = write_res {
                     log::warn!("write task error: {:?}", e);
                 }
@@ -889,7 +889,7 @@ impl PeerManager {
                 self.peer_handshakes.lock().remove(&peer_id_clone2);
 
                 // Security: Remove from IP tracking (OPTIMIZED: single lock)
-                info!(
+                debug!(
                     "[P2P] 🔒 cleanup {}: acquiring peer_ips lock for removal...",
                     peer_id_clone2
                 );
