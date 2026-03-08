@@ -672,18 +672,27 @@ impl P2PService {
             
             match object_type {
                 InventoryType::Block => {
-                    // Load and send requested blocks
+                    // Load and send requested blocks in order.
+                    // IMPORTANT: do not spawn per-block tasks here, otherwise block
+                    // responses can be reordered and create orphan storms on peers.
+                    let mut sent_count = 0usize;
                     for hash_bytes in hashes {
                         let hash_hex = hex::encode(&hash_bytes);
                         // Try to load block from DB
                         if let Ok(Some(block)) = state.bc.lock().unwrap().load_block(&hash_hex) {
-                            // Send block to peer
-                            let peer_id_clone = peer_id.clone();
-                            let p2p_for_send = p2p_inner.clone();
-                            tokio::spawn(async move {
-                                p2p_for_send.send_block_to_peer(&peer_id_clone, &block).await;
-                            });
+                            // Send immediately via peer writer queue to preserve ordering
+                            p2p_inner.send_to_peer(
+                                &peer_id,
+                                crate::p2p::messages::P2pMessage::Block { block },
+                            );
+                            sent_count += 1;
                         }
+                    }
+                    if sent_count > 0 {
+                        info!(
+                            "[SYNC] Sent {} requested blocks to {} in-order",
+                            sent_count, peer_id
+                        );
                     }
                 }
                 InventoryType::Transaction => {
