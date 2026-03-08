@@ -1576,7 +1576,6 @@ async fn mining_loop(
         println!("[DEBUG] Mining: Attempting to acquire WRITE lock...");
         let (snapshot_txs, difficulty, prev_hash, index_snapshot, cancel_flag, hashrate_shared) = {
             println!("[DEBUG] Mining: WRITE lock acquired");
-            let lock_acq_time = std::time::Instant::now();
             info!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock()...");
 
             // Mark mining as active
@@ -1770,7 +1769,6 @@ async fn mining_loop(
                 // The block is already valid as-is from mining.
 
                 println!("[DEBUG] Validating and inserting block into blockchain DB...");
-                let lock_insert_time = std::time::Instant::now();
                 info!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock() for block insert...");
                 let insert_result = {
                     let lock_acq_insert = std::time::Instant::now();

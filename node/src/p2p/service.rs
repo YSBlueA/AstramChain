@@ -404,23 +404,32 @@ impl P2PService {
                                     }
                                 }
                                 
-                                return;
+                                continue;
                             }
                             
                             // Regular orphan handling
-                            // 동기화 중: 현재 높이보다 너무 높은 orphan은 무시 (메모리 절약)
-                            let current_height = {
-                                let bc_temp = state.bc.lock().unwrap();
-                                if let Some(tip_hash) = &bc_temp.chain_tip {
-                                    if let Ok(Some(header)) = bc_temp.load_header(tip_hash) {
-                                        header.index + 1
-                                    } else {
-                                        0
-                                    }
+                            // Use the currently-held bc lock to avoid self-deadlock on re-lock.
+                            let current_height = if let Some(tip_hash) = &bc.chain_tip {
+                                if let Ok(Some(header)) = bc.load_header(tip_hash) {
+                                    header.index + 1
                                 } else {
                                     0
                                 }
+                            } else {
+                                0
                             };
+
+                            let orphan_release_start = std::time::Instant::now();
+                            info!(
+                                "[LOCK-DEBUG] ⏳ Block #{} releasing bc.lock() before orphan handling...",
+                                block.header.index
+                            );
+                            drop(bc);
+                            info!(
+                                "[LOCK-DEBUG] ✅ Block #{} released bc.lock() before orphan handling after {:?}",
+                                block.header.index,
+                                orphan_release_start.elapsed()
+                            );
 
                             // 동기화 중: 현재 높이 + 1000 이상 차이나는 블록은 무시
                             if block.header.index > current_height + 1000 {
@@ -428,7 +437,7 @@ impl P2PService {
                                     "[SYNC] ⚠️ Block #{} too far ahead (current: {}), ignoring to save memory during sync",
                                     block.header.index, current_height
                                 );
-                                return;
+                                continue;
                             }
 
                             // Security: Check orphan pool size limit before adding
@@ -494,7 +503,7 @@ impl P2PService {
                                 let lock_orphan_time = std::time::Instant::now();
                                 info!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock() for orphan processing...", block.header.index);
                                 let mut bc_for_orphan = state.bc.lock().unwrap();
-                                info!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() for orphан after {:?}", block.header.index, lock_orphan_time.elapsed());
+                                info!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() for orphan after {:?}", block.header.index, lock_orphan_time.elapsed());
                                 
                                 let mut chain_for_orphan = chain_async.lock().unwrap();
                                 Self::process_orphan_blocks(
