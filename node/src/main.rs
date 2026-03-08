@@ -505,6 +505,56 @@ struct ScoredPeer {
     score: f64,
 }
 
+/// Get the appropriate localhost address for connecting to a local peer
+/// - In WSL: Returns the Windows host IP (from default gateway)
+/// - Otherwise: Returns 127.0.0.1
+fn get_localhost_address() -> String {
+    // Check if we're in WSL environment
+    if std::env::var("WSL_DISTRO_NAME").is_ok() || 
+       std::env::var("WSL_INTEROP").is_ok() {
+        // Method 1: Try to get default gateway from 'ip route' command
+        if let Ok(output) = std::process::Command::new("ip")
+            .args(&["route", "show", "default"])
+            .output() 
+        {
+            if let Ok(route_output) = String::from_utf8(output.stdout) {
+                // Parse: "default via 172.25.128.1 dev eth0"
+                for part in route_output.split_whitespace() {
+                    // Look for IP address pattern after "via"
+                    if part.contains('.') && !part.starts_with("127.") {
+                        // Basic validation: check if it looks like an IP
+                        let segments: Vec<&str> = part.split('.').collect();
+                        if segments.len() == 4 && segments.iter().all(|s| s.parse::<u8>().is_ok()) {
+                            info!("🔧 WSL detected: using Windows host IP {} (from default gateway)", part);
+                            return part.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Method 2: Fallback to /etc/resolv.conf nameserver
+        if let Ok(contents) = std::fs::read_to_string("/etc/resolv.conf") {
+            for line in contents.lines() {
+                if line.trim().starts_with("nameserver") {
+                    if let Some(ip) = line.split_whitespace().nth(1) {
+                        // Validate it's not a loopback address
+                        if !ip.starts_with("127.") {
+                            info!("🔧 WSL detected: using Windows host IP {} (from /etc/resolv.conf)", ip);
+                            return ip.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        
+        warn!("⚠️  WSL detected but could not determine Windows host IP, falling back to 127.0.0.1");
+    }
+    
+    // Default to standard localhost
+    "127.0.0.1".to_string()
+}
+
 /// Fetch best nodes from DNS server, excluding self
 async fn fetch_best_nodes_from_dns(
     node_meta: Arc<NodeMeta>,
@@ -594,7 +644,8 @@ async fn fetch_best_nodes_from_dns(
             // Convert to localhost if it's the same public IP (for local node discovery)
             let test_addr = if let Some(ref my_public_ip) = my_address {
                 if node.address == *my_public_ip {
-                    let localhost_addr = format!("127.0.0.1:{}", node.port);
+                    let localhost_ip = get_localhost_address();
+                    let localhost_addr = format!("{}:{}", localhost_ip, node.port);
                     info!("  Testing latency to {} (using {} for local connection)...", addr, localhost_addr);
                     localhost_addr
                 } else {
@@ -1284,7 +1335,8 @@ async fn start_services(
             let connection_addr = if let Some(ref my_ip) = my_public_ip_clone {
                 if let Some((peer_ip, peer_port)) = addr.split_once(':') {
                     if peer_ip == my_ip {
-                        let localhost_addr = format!("127.0.0.1:{}", peer_port);
+                        let localhost_ip = get_localhost_address();
+                        let localhost_addr = format!("{}:{}", localhost_ip, peer_port);
                         info!("[P2P] Converting {} to {} for local connection", addr, localhost_addr);
                         localhost_addr
                     } else {
@@ -1360,7 +1412,8 @@ async fn start_services(
                                 let connection_addr = if let Some(ref my_ip) = my_public_ip_clone {
                                     if let Some((peer_ip, peer_port)) = addr.split_once(':') {
                                         if peer_ip == my_ip {
-                                            format!("127.0.0.1:{}", peer_port)
+                                            let localhost_ip = get_localhost_address();
+                                            format!("{}:{}", localhost_ip, peer_port)
                                         } else {
                                             addr.clone()
                                         }
