@@ -587,8 +587,10 @@ async fn fetch_best_nodes_from_dns(
         // Measure latency for each candidate in parallel
         let mut scored_peers = Vec::new();
 
+        info!("🔍 Starting latency measurements for {} candidates...", candidates.len());
         for node in candidates.into_iter() {
             let addr = format!("{}:{}", node.address, node.port);
+            info!("  Testing latency to {}...", addr);
             let latency = measure_latency(&addr).await;
 
             if let Some(latency_ms) = latency {
@@ -599,7 +601,7 @@ async fn fetch_best_nodes_from_dns(
 
                 // For scoring, we need to normalize. We'll do final scoring after collecting all
                 scored_peers.push(ScoredPeer {
-                    address: addr,
+                    address: addr.clone(),
                     height: node.height,
                     uptime_hours: node.uptime_hours,
                     latency_ms,
@@ -607,24 +609,31 @@ async fn fetch_best_nodes_from_dns(
                 });
 
                 info!(
-                    "  {} - height: {}, uptime: {:.1}h, latency: {}ms",
-                    scored_peers.last().unwrap().address,
+                    "  ✅ {} - height: {}, uptime: {:.1}h, latency: {}ms",
+                    addr,
                     node.height,
                     node.uptime_hours,
                     latency_ms
                 );
             } else {
-                info!("  {}:{} - unreachable", node.address, node.port);
+                warn!("  ❌ {} - unreachable (latency probe failed)", addr);
             }
         }
+
+        info!("📊 Latency testing complete: {}/{} peers reachable", scored_peers.len(), fallback_candidates.len());
 
         if scored_peers.is_empty() {
             let fallback_count = fallback_candidates.len().min(limit);
             if fallback_count > 0 {
                 warn!(
-                    "No peers passed latency probe; falling back to {} raw DNS candidates",
+                    "⚠️  No peers passed latency probe; falling back to {} raw DNS candidates",
                     fallback_count
                 );
+                for (idx, addr) in fallback_candidates.iter().take(fallback_count).enumerate() {
+                    info!("  Fallback {}: {}", idx + 1, addr);
+                }
+            } else {
+                warn!("❌ No peers available (DNS candidates and latency probes both failed)");
             }
             return Ok(fallback_candidates.into_iter().take(limit).collect());
         }
