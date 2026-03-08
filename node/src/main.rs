@@ -1078,7 +1078,7 @@ async fn start_services(
     let initial_height = if let Ok(bc) = node_handle.bc.try_lock() {
         if let Some(tip_hash) = &bc.chain_tip {
             if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                header.index + 1
+                header.index
             } else {
                 0
             }
@@ -1127,20 +1127,29 @@ async fn start_services(
                     info!("[DNS] ⏰ Re-registration tick START");
 
                     // Get current height for DNS (non-blocking attempt)
-                    let height = if let Ok(bc) = dns_node_handle.bc.try_lock() {
+                    let height_opt = if let Ok(bc) = dns_node_handle.bc.try_lock() {
                         info!("[DNS] bc.try_lock() success");
                         if let Some(tip_hash) = &bc.chain_tip {
                             if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                                header.index + 1
+                                Some(header.index)
                             } else {
-                                0
+                                None
                             }
                         } else {
-                            0
+                            Some(0)  // Empty blockchain
                         }
                     } else {
-                        warn!("[DNS] bc.try_lock() failed - lock contended");
-                        0 // If mining is running and lock is held, just use 0
+                        warn!("[DNS] bc.try_lock() failed - lock contended, skipping re-registration");
+                        None  // Skip re-registration instead of using 0
+                    };
+
+                    // Skip re-registration if we couldn't determine height
+                    let height = match height_opt {
+                        Some(h) => h,
+                        None => {
+                            warn!("[DNS] Skipping re-registration tick (cannot determine height)");
+                            continue;  // Skip this tick
+                        }
                     };
 
                     info!("[DNS] Height determined: {} (took {:?})", height, tick_start.elapsed());
@@ -1330,7 +1339,25 @@ async fn start_services(
 
     // Wait for initial P2P connections to establish
     info!("[INFO] Waiting for P2P connections to establish...");
-    sleep(Duration::from_secs(5)).await;
+    
+    // Wait longer for latency tests and connections to complete
+    // (latency test: 3s × N peers + connection time)
+    let mut wait_count = 0;
+    while wait_count < 15 {  // Max 15 seconds
+        sleep(Duration::from_secs(1)).await;
+        wait_count += 1;
+        
+        // Check if we have any peers connected
+        let peer_count = p2p_handle.get_peer_heights().len();
+        if peer_count > 0 {
+            info!("[INFO] {} peer(s) connected, proceeding...", peer_count);
+            break;
+        }
+        
+        if wait_count % 5 == 0 {
+            info!("[INFO] Still waiting for peer connections... ({}/15s elapsed)", wait_count);
+        }
+    }
 
     // Step 5: Synchronize blockchain with peers
     info!("[INFO] Step 5: Synchronizing blockchain with peers...");
