@@ -473,57 +473,36 @@ impl P2PService {
                             chain.orphan_blocks.insert(block.hash.clone(), (block.clone(), now));
                             
                             info!(
-                                "[INFO] Orphan block received (index={}, hash={}), storing for later (orphan pool size: {})",
+                                "[SYNC] 📦 Orphan block STORED: index={}, hash={}, parent={}, pool_size={}",
                                 block.header.index,
                                 &block.hash[..16],
+                                &block.header.previous_hash[..16],
                                 chain.orphan_blocks.len()
                             );
                             
                             // 3. 역방향 탐색: parent block 요청
                             let parent_hash = block.header.previous_hash.clone();
-                            info!("[SYNC] 🔍 Block #{} parent not found, requesting parent block {}", 
-                                  block.header.index, &parent_hash[..16]);
+                            info!("[SYNC] 📥 Requesting parent block {} for orphan #{}", 
+                                  &parent_hash[..16], block.header.index);
                             
-                            // Block #1을 받는 경우: 초기 동기화 중일 때만 의미 있음
-                            if block.header.index == 1 {
-                                // 초기 동기화 중: Genesis 확인
-                                let genesis_hash = {
-                                    let bc = state.bc.lock().unwrap();
-                                    // i:0 키로 Genesis hash 조회
-                                    let key = format!("i:{}", 0);
-                                    match bc.db.get(key.as_bytes()) {
-                                        Ok(Some(hash_bytes)) => {
-                                            Some(String::from_utf8_lossy(&hash_bytes).to_string())
-                                        }
-                                        _ => None,
-                                    }
-                                };
+                            // Drop chain lock before reacquiring bc lock for process_orphan_blocks
+                            // This prevents potential deadlock
+                            drop(chain);
+                            
+                            // Now try to process any orphan blocks that may now be valid
+                            {
+                                let lock_orphan_time = std::time::Instant::now();
+                                info!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock() for orphan processing...", block.header.index);
+                                let mut bc_for_orphan = state.bc.lock().unwrap();
+                                info!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() for orphан after {:?}", block.header.index, lock_orphan_time.elapsed());
                                 
-                                if let Some(my_genesis) = genesis_hash {
-                                    if my_genesis != parent_hash {
-                                        warn!("[SYNC] Genesis mismatch - resetting chain");
-                                        
-                                        // 1. Reset chain
-                                        {
-                                            let mut bc = state.bc.lock().unwrap();
-                                            if let Err(e) = bc.reset_chain() {
-                                                warn!("[SYNC] Failed to reset chain: {:?}", e);
-                                                continue;
-                                            }
-                                        }
-                                        
-                                        // 2. Request peer's genesis
-                                        p2p_block.request_block_by_hash(&parent_hash);
-                                        
-                                        // 3. Clear orphan pool
-                                        drop(chain);
-                                        let mut chain_fresh = chain_async.lock().unwrap();
-                                        chain_fresh.orphan_blocks.clear();
-                                        chain_fresh.blockchain.clear();
-                                        
-                                        continue;
-                                    }
-                                }
+                                let mut chain_for_orphan = chain_async.lock().unwrap();
+                                Self::process_orphan_blocks(
+                                    &mut bc_for_orphan,
+                                    &mut chain_for_orphan,
+                                    &state.mempool,
+                                    p2p_block.clone(),
+                                );
                             }
                             
                             // Request parent block
@@ -715,6 +694,10 @@ impl P2PService {
         mempool: &std::sync::Mutex<crate::MempoolState>,
         p2p_handle: Arc<PeerManager>,
     ) {
+        if !chain.orphan_blocks.is_empty() {
+            info!("[SYNC] 🔨 process_orphan_blocks called with {} orphans", chain.orphan_blocks.len());
+        }
+        
         let mut processed_any = true;
         let max_iterations = 100; // Prevent infinite loops
         let mut iterations = 0;
@@ -733,6 +716,7 @@ impl P2PService {
             for (hash, block) in orphans_to_try {
                 // Check if parent exists now
                 if let Ok(Some(_)) = bc.load_block(&block.header.previous_hash) {
+                    info!("[SYNC] ✅ Parent found for orphan block #{}, retrying...", block.header.index);
                     // Parent exists! Try to validate and insert
                     match bc.validate_and_insert_block(&block) {
                         Ok(_) => {
