@@ -33,44 +33,120 @@ pub const MAINNET_NETWORK_ID: &str = "Astram-mainnet";
 pub const TESTNET_NETWORK_ID: &str = "Astram-testnet";
 pub const MAINNET_CHAIN_ID: u64 = 1;
 pub const TESTNET_CHAIN_ID: u64 = 8888;
+pub const MAINNET_NETWORK_MAGIC: u32 = 0xA57A_0001;
+pub const TESTNET_NETWORK_MAGIC: u32 = 0xA57A_22B8;
 
 static NETWORK_ID: OnceLock<String> = OnceLock::new();
 static CHAIN_ID: OnceLock<u64> = OnceLock::new();
+static NETWORK_MAGIC: OnceLock<u32> = OnceLock::new();
+
+// Security: Network identity hardcoding for production releases
+//
+// Release builds (compiled with --release) use hardcoded mainnet parameters to prevent
+// accidental or malicious network misconfiguration that could cause consensus failures,
+// chain forks, or eclipse attacks.
+//
+// Debug builds allow environment variable overrides (ASTRAM_NETWORK, ASTRAM_NETWORK_ID,
+// ASTRAM_CHAIN_ID, ASTRAM_NETWORK_MAGIC) for development, testing, and testnet operation.
+//
+// This compile-time enforcement ensures production nodes always connect to the official
+// Astram mainnet with verified genesis hash and chain parameters, protecting the network
+// from operational errors and malicious configuration tampering.
 
 fn resolve_network_id() -> &'static str {
     NETWORK_ID
         .get_or_init(|| {
-            if let Ok(value) = std::env::var("ASTRAM_NETWORK_ID") {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
+            #[cfg(debug_assertions)]
+            {
+                // Debug builds: allow environment variable overrides for testing
+                if let Ok(value) = std::env::var("ASTRAM_NETWORK_ID") {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
+                }
+
+                let network = std::env::var("ASTRAM_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+                if network.eq_ignore_ascii_case("testnet") {
+                    return TESTNET_NETWORK_ID.to_string();
                 }
             }
 
-            let network = std::env::var("ASTRAM_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
-            if network.eq_ignore_ascii_case("testnet") {
-                TESTNET_NETWORK_ID.to_string()
-            } else {
-                MAINNET_NETWORK_ID.to_string()
-            }
+            // Release builds: hardcoded mainnet only
+            MAINNET_NETWORK_ID.to_string()
         })
         .as_str()
 }
 
 fn resolve_chain_id() -> u64 {
     *CHAIN_ID.get_or_init(|| {
-        if let Ok(value) = std::env::var("ASTRAM_CHAIN_ID") {
-            if let Ok(parsed) = value.trim().parse::<u64>() {
-                return parsed;
+        #[cfg(debug_assertions)]
+        {
+            // Debug builds: allow environment variable overrides for testing
+            if let Ok(value) = std::env::var("ASTRAM_CHAIN_ID") {
+                if let Ok(parsed) = value.trim().parse::<u64>() {
+                    return parsed;
+                }
+            }
+
+            let network = std::env::var("ASTRAM_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+            if network.eq_ignore_ascii_case("testnet") {
+                return TESTNET_CHAIN_ID;
             }
         }
 
-        let network = std::env::var("ASTRAM_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
-        if network.eq_ignore_ascii_case("testnet") {
-            TESTNET_CHAIN_ID
-        } else {
-            MAINNET_CHAIN_ID
+        // Release builds: hardcoded mainnet only
+        MAINNET_CHAIN_ID
+    })
+}
+
+#[cfg(debug_assertions)]
+fn parse_network_magic(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+
+    if trimmed.len() == 8 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(parsed) = u32::from_str_radix(trimmed, 16) {
+            return Some(parsed);
         }
+    }
+
+    trimmed.parse::<u32>().ok()
+}
+
+fn resolve_network_magic() -> u32 {
+    *NETWORK_MAGIC.get_or_init(|| {
+        #[cfg(debug_assertions)]
+        {
+            // Debug builds: allow environment variable overrides for testing
+            if let Ok(value) = std::env::var("ASTRAM_NETWORK_MAGIC") {
+                if let Some(parsed) = parse_network_magic(&value) {
+                    return parsed;
+                }
+
+                warn!(
+                    "Invalid ASTRAM_NETWORK_MAGIC='{}', using network defaults",
+                    value
+                );
+            }
+
+            let network = std::env::var("ASTRAM_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
+            if network.eq_ignore_ascii_case("testnet") {
+                return TESTNET_NETWORK_MAGIC;
+            }
+        }
+
+        // Release builds: hardcoded mainnet only
+        MAINNET_NETWORK_MAGIC
     })
 }
 
@@ -95,6 +171,7 @@ pub struct PeerManager {
     my_listening_port: Arc<Mutex<u16>>,
     my_bind_addr: Arc<Mutex<String>>,
     my_public_ip: Arc<Mutex<Option<String>>>,
+    is_syncing: Arc<Mutex<bool>>, // 블록 동기화 중 플래그 (Tx Inv 필터링용)
     /// callback when a new block is received
     on_block: Arc<Mutex<Option<Arc<dyn Fn(block::Block) + Send + Sync>>>>,
     /// callback when a new transaction is received
@@ -108,7 +185,9 @@ pub struct PeerManager {
     >,
     on_getdata: Arc<Mutex<Option<Arc<dyn Fn(PeerId, InventoryType, Vec<Vec<u8>>) + Send + Sync>>>>,
     on_get_chain_locator: Arc<Mutex<Option<Arc<dyn Fn() -> Vec<Vec<u8>> + Send + Sync>>>>,
-    on_headers: Arc<Mutex<Option<Arc<dyn Fn(PeerId, Vec<block::BlockHeader>) + Send + Sync>>>>,
+    on_headers: Arc<
+        Mutex<Option<Arc<dyn Fn(PeerId, Vec<block::BlockHeader>) -> bool + Send + Sync>>>,
+    >,
 }
 
 impl PeerManager {
@@ -122,6 +201,7 @@ impl PeerManager {
             my_listening_port: Arc::new(Mutex::new(8335)), // Default port
             my_bind_addr: Arc::new(Mutex::new("0.0.0.0".to_string())),
             my_public_ip: Arc::new(Mutex::new(None)),
+            is_syncing: Arc::new(Mutex::new(false)),
             on_block: Arc::new(Mutex::new(None)),
             on_tx: Arc::new(Mutex::new(None)),
             on_getheaders: Arc::new(Mutex::new(None)),
@@ -161,7 +241,7 @@ impl PeerManager {
 
     pub fn set_on_headers<F>(&self, cb: F)
     where
-        F: Fn(PeerId, Vec<block::BlockHeader>) + Send + Sync + 'static,
+        F: Fn(PeerId, Vec<block::BlockHeader>) -> bool + Send + Sync + 'static,
     {
         *self.on_headers.lock() = Some(Arc::new(cb));
     }
@@ -179,6 +259,18 @@ impl PeerManager {
 
     pub fn get_my_height(&self) -> u64 {
         *self.my_height.lock()
+    }
+
+    pub fn get_network_id(&self) -> &'static str {
+        resolve_network_id()
+    }
+
+    pub fn get_chain_id(&self) -> u64 {
+        resolve_chain_id()
+    }
+
+    pub fn get_network_magic(&self) -> u32 {
+        resolve_network_magic()
     }
 
     pub fn set_my_listening_port(&self, port: u16) {
@@ -228,6 +320,13 @@ impl PeerManager {
         }
 
         peer_socket.ip().is_loopback()
+    }
+
+    fn disconnect_peer(&self, peer_id: &PeerId, reason: &str) {
+        warn!("[P2P] Disconnecting {}: {}", peer_id, reason);
+        self.peers.lock().remove(peer_id);
+        self.peer_heights.lock().remove(peer_id);
+        self.peer_handshakes.lock().remove(peer_id);
     }
 
     /// Get handshake info for a specific peer
@@ -561,6 +660,7 @@ impl PeerManager {
                 ],
                 network_id: resolve_network_id().to_string(),
                 chain_id: resolve_chain_id(),
+                network_magic: resolve_network_magic(),
                 height: my_height,
                 listening_port: my_port,
             };
@@ -575,6 +675,8 @@ impl PeerManager {
 
         let config = bincode::config::standard();
         let config_read = bincode::config::standard();
+        let expected_network_magic = resolve_network_magic();
+        let expected_magic_bytes = expected_network_magic.to_be_bytes();
 
         // writer task: consumes rx and writes framed bytes to the socket
         let write_handle = tokio::spawn(async move {
@@ -584,9 +686,13 @@ impl PeerManager {
                 match rx.recv().await {
                     Some(msg) => {
                         match bincode::encode_to_vec(&msg, config) {
-                            Ok(vec) => {
+                            Ok(payload) => {
+                                let mut frame = Vec::with_capacity(expected_magic_bytes.len() + payload.len());
+                                frame.extend_from_slice(&expected_magic_bytes);
+                                frame.extend_from_slice(&payload);
+
                                 // convert Vec<u8> -> Bytes (LengthDelimitedCodec accepts bytes)
-                                let bytes: Bytes = Bytes::from(vec);
+                                let bytes: Bytes = Bytes::from(frame);
                                 info!("[P2P] Sending message to {} (size: {} bytes)", peer_id, bytes.len());
                                 if let Err(e) = writer.send(bytes).await {
                                     warn!("[P2P] Write error to peer {}: {:?}", peer_id, e);
@@ -620,9 +726,35 @@ impl PeerManager {
                 match reader.next().await {
                     Some(Ok(bytes_mut)) => {
                         info!("[P2P] Received {} bytes from {}", bytes_mut.len(), peer_id_clone);
-                        // bytes_mut is BytesMut; get slice for bincode
+                        // bytes_mut is BytesMut; extract magic-prefixed payload
                         let slice = bytes_mut.as_ref();
-                        match bincode::decode_from_slice::<P2pMessage, _>(slice, config_read) {
+                        if slice.len() < 4 {
+                            warn!(
+                                "[P2P] Peer {} sent undersized frame ({} bytes)",
+                                peer_id_clone,
+                                slice.len()
+                            );
+                            break;
+                        }
+
+                        let received_magic = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]);
+                        if received_magic != expected_network_magic {
+                            warn!(
+                                "[P2P] Peer {} frame magic mismatch: got 0x{:08x}, expected 0x{:08x}",
+                                peer_id_clone,
+                                received_magic,
+                                expected_network_magic
+                            );
+                            break;
+                        }
+
+                        let payload = &slice[4..];
+                        if payload.is_empty() {
+                            warn!("[P2P] Peer {} sent empty payload after magic", peer_id_clone);
+                            break;
+                        }
+
+                        match bincode::decode_from_slice::<P2pMessage, _>(payload, config_read) {
                             Ok((msg, _remaining)) => {
                                 info!("[P2P] Message decoded from {}", peer_id_clone);
                                 // delegate to manager
@@ -739,36 +871,64 @@ impl PeerManager {
         match msg {
             Handshake { info } => {
                 info!(
-                    "[P2P] ✅ Handshake received from {}: protocol={}, version={}, network={}, chain={}, height={}, features={:?}",
+                    "[P2P] ✅ Handshake received from {}: protocol={}, version={}, network={}, chain={}, magic=0x{:08x}, height={}, features={:?}",
                     peer_id,
                     info.protocol_version,
                     info.software_version,
                     info.network_id,
                     info.chain_id,
+                    info.network_magic,
                     info.height,
                     info.supported_features
                 );
 
+                let expected_network_id = resolve_network_id();
+                let expected_chain_id = resolve_chain_id();
+                let expected_network_magic = resolve_network_magic();
+
                 // Validate protocol compatibility
                 if info.protocol_version != PROTOCOL_VERSION {
-                    warn!(
-                        "Peer {} has incompatible protocol version {}",
-                        peer_id, info.protocol_version
+                    self.disconnect_peer(
+                        &peer_id,
+                        &format!(
+                            "incompatible protocol version {} (expected {})",
+                            info.protocol_version, PROTOCOL_VERSION
+                        ),
                     );
-                    // Could disconnect here
+                    return;
                 }
 
-                if info.network_id != resolve_network_id() {
-                    warn!(
-                        "Peer {} is on different network: {}",
-                        peer_id, info.network_id
+                if info.network_magic != expected_network_magic {
+                    self.disconnect_peer(
+                        &peer_id,
+                        &format!(
+                            "network magic mismatch 0x{:08x} (expected 0x{:08x})",
+                            info.network_magic, expected_network_magic
+                        ),
                     );
-                    // Could disconnect here
+                    return;
                 }
 
-                if info.chain_id != resolve_chain_id() {
-                    warn!("Peer {} has different chain_id: {}", peer_id, info.chain_id);
-                    // Could disconnect here
+                if info.network_id != expected_network_id {
+                    self.disconnect_peer(
+                        &peer_id,
+                        &format!(
+                            "network_id mismatch '{}' (expected '{}')",
+                            info.network_id, expected_network_id
+                        ),
+                    );
+                    return;
+                }
+
+                if info.chain_id != expected_chain_id {
+                    self.disconnect_peer(
+                        &peer_id,
+                        &format!(
+                            "chain_id mismatch {} (expected {})",
+                            info.chain_id, expected_chain_id
+                        ),
+                    );
+                    return;
                 }
 
                 // Check if this is ourselves (endpoint-aware check)
@@ -778,10 +938,7 @@ impl PeerManager {
                         "Detected self-connection to {} (matching self endpoint on port {}), disconnecting",
                         peer_id, my_port
                     );
-                    // Remove from peers map to disconnect
-                    self.peers.lock().remove(&peer_id);
-                    self.peer_heights.lock().remove(&peer_id);
-                    self.peer_handshakes.lock().remove(&peer_id);
+                    self.disconnect_peer(&peer_id, "self-connection detected during handshake");
                     return; // Exit handler
                 }
 
@@ -807,6 +964,7 @@ impl PeerManager {
                         ],
                         network_id: resolve_network_id().to_string(),
                         chain_id: resolve_chain_id(),
+                        network_magic: resolve_network_magic(),
                         height: my_height,
                         listening_port: my_port,
                     };
@@ -836,14 +994,63 @@ impl PeerManager {
 
             HandshakeAck { info } => {
                 info!(
-                    "HandshakeAck from {}: protocol={}, version={}, network={}, chain={}, height={}",
+                    "HandshakeAck from {}: protocol={}, version={}, network={}, chain={}, magic=0x{:08x}, height={}",
                     peer_id,
                     info.protocol_version,
                     info.software_version,
                     info.network_id,
                     info.chain_id,
+                    info.network_magic,
                     info.height
                 );
+
+                let expected_network_id = resolve_network_id();
+                let expected_chain_id = resolve_chain_id();
+                let expected_network_magic = resolve_network_magic();
+
+                if info.protocol_version != PROTOCOL_VERSION {
+                    self.disconnect_peer(
+                        &peer_id,
+                        &format!(
+                            "HandshakeAck protocol mismatch {} (expected {})",
+                            info.protocol_version, PROTOCOL_VERSION
+                        ),
+                    );
+                    return;
+                }
+
+                if info.network_magic != expected_network_magic {
+                    self.disconnect_peer(
+                        &peer_id,
+                        &format!(
+                            "HandshakeAck magic mismatch 0x{:08x} (expected 0x{:08x})",
+                            info.network_magic, expected_network_magic
+                        ),
+                    );
+                    return;
+                }
+
+                if info.network_id != expected_network_id {
+                    self.disconnect_peer(
+                        &peer_id,
+                        &format!(
+                            "HandshakeAck network_id mismatch '{}' (expected '{}')",
+                            info.network_id, expected_network_id
+                        ),
+                    );
+                    return;
+                }
+
+                if info.chain_id != expected_chain_id {
+                    self.disconnect_peer(
+                        &peer_id,
+                        &format!(
+                            "HandshakeAck chain_id mismatch {} (expected {})",
+                            info.chain_id, expected_chain_id
+                        ),
+                    );
+                    return;
+                }
 
                 // Check if this is ourselves (endpoint-aware check)
                 if self.is_self_connection(&peer_id, info.listening_port) {
@@ -852,10 +1059,7 @@ impl PeerManager {
                         "Detected self-connection in HandshakeAck from {} (matching self endpoint on port {}), disconnecting",
                         peer_id, my_port
                     );
-                    // Remove from peers map to disconnect
-                    self.peers.lock().remove(&peer_id);
-                    self.peer_heights.lock().remove(&peer_id);
-                    self.peer_handshakes.lock().remove(&peer_id);
+                    self.disconnect_peer(&peer_id, "self-connection detected during HandshakeAck");
                     return; // Exit handler
                 }
 
@@ -930,11 +1134,21 @@ impl PeerManager {
             Headers { headers } => {
                 info!("{} sent {} headers", peer_id, headers.len());
                 if !headers.is_empty() {
-                    // Call headers callback for chain validation/reorg detection
-                    if let Some(cb) = &*self.on_headers.lock() {
-                        (cb)(peer_id.clone(), headers.clone());
+                    let accepted = if let Some(cb) = &*self.on_headers.lock() {
+                        (cb)(peer_id.clone(), headers.clone())
+                    } else {
+                        true
+                    };
+
+                    if !accepted {
+                        warn!("[P2P] Ignoring headers from {} due to header policy", peer_id);
+                        warn!("[P2P] Disconnecting {} due to incompatible chain policy", peer_id);
+                        self.peers.lock().remove(&peer_id);
+                        self.peer_heights.lock().remove(&peer_id);
+                        self.peer_handshakes.lock().remove(&peer_id);
+                        return;
                     }
-                    
+
                     // request full blocks for these headers
                     let mut hashes: Vec<Vec<u8>> = Vec::new();
                     for hdr in headers.iter() {
@@ -968,7 +1182,15 @@ impl PeerManager {
                     return; // Drop the message
                 }
 
-                info!("{} inv {} items", peer_id, hashes.len());
+                // 동기화 중: 모든 외부 Inv 무시 (요청한 headers에 대한 블록만 수신)
+                let is_syncing = *self.is_syncing.lock();
+                if is_syncing {
+                    debug!("[SYNC] 🔄 Ignoring external INV from peer {} during block sync ({:?} {})", 
+                           peer_id, object_type, hashes.len());
+                    return;
+                }
+
+                info!("{} inv {:?} {} items", peer_id, object_type, hashes.len());
                 if let Some(tx) = self.peers.lock().get(&peer_id) {
                     let _ = tx.send(GetData {
                         object_type,
@@ -1095,6 +1317,21 @@ impl PeerManager {
         );
     }
 
+    /// Request a specific block by hash from all connected peers
+    pub fn request_block_by_hash(&self, block_hash: &str) {
+        if let Ok(hash_bytes) = hex::decode(block_hash) {
+            let peers = self.peers.lock().clone();
+            info!("[SYNC] 🔄 Requesting block {} from {} peers (backward search)", &block_hash[..16], peers.len());
+            
+            for (_id, tx) in peers {
+                let _ = tx.send(P2pMessage::GetData {
+                    object_type: InventoryType::Block,
+                    hashes: vec![hash_bytes.clone()],
+                });
+            }
+        }
+    }
+
     pub fn load_saved_peers(&self) -> Vec<SavedPeer> {
         if let Ok(data) = std::fs::read_to_string(PEERS_FILE) {
             if let Ok(peers) = serde_json::from_str::<Vec<SavedPeer>>(&data) {
@@ -1189,6 +1426,22 @@ impl PeerManager {
                 locator_hashes: locator_hashes.clone(),
                 stop_hash: stop_hash.clone(),
             });
+        }
+    }
+
+    /// 블록 동기화 상태 설정 (동기화 중엔 모든 Inv 무시)
+    pub fn set_syncing(&self, is_syncing: bool) {
+        let mut state = self.is_syncing.lock();
+        let prev_state = *state;
+        *state = is_syncing;
+        
+        // 상태 변화가 있을 때만 로그 출력
+        if prev_state != is_syncing {
+            if is_syncing {
+                info!("[SYNC] 🔄 Sync mode ENABLED - filtering all INV messages");
+            } else {
+                info!("[SYNC] ✅ Sync mode DISABLED - accepting all INV messages");
+            }
         }
     }
 
@@ -1398,4 +1651,18 @@ struct DnsNodeInfo {
 struct DnsNodesResponse {
     nodes: Vec<DnsNodeInfo>,
     count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_network_magic;
+
+    #[test]
+    fn parse_network_magic_formats() {
+        assert_eq!(parse_network_magic("0xA57A0001"), Some(0xA57A_0001));
+        assert_eq!(parse_network_magic("a57a22b8"), Some(0xA57A_22B8));
+        assert_eq!(parse_network_magic("2776236033"), Some(0xA57A_0001));
+        assert_eq!(parse_network_magic(""), None);
+        assert_eq!(parse_network_magic("not-a-number"), None);
+    }
 }

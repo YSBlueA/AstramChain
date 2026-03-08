@@ -33,7 +33,7 @@ impl P2PService {
         self.start_listener(bind_addr).await;
         self.connect_initial_peers().await;
         self.register_handlers(node_handle.clone(), chain_state.clone());
-        self.start_header_sync(chain_state.clone());
+        self.start_block_sync(node_handle.clone());
 
         Ok(())
     }
@@ -86,83 +86,95 @@ impl P2PService {
     ) {
         let p2p = self.manager.clone();
 
-        // set chain locator callback for syncing
-        let chain_for_locator = chain_state.clone();
+        // set chain locator callback for syncing (use persisted DB tip, not in-memory cache)
+        let nh_locator = node_handle.clone();
         p2p.set_on_get_chain_locator(move || {
             let mut locator = Vec::new();
-            let chain = chain_for_locator.lock().unwrap();
-            for b in chain.blockchain.iter().rev().take(10) {
-                if let Ok(bytes) = hex::decode(&b.hash) {
+            let bc = nh_locator.bc.lock().unwrap();
+
+            let mut current_hash = bc.chain_tip.clone();
+            while let Some(hash) = current_hash {
+                if let Ok(bytes) = hex::decode(&hash) {
                     locator.push(bytes);
                 }
+
+                if locator.len() >= 10 {
+                    break;
+                }
+
+                match bc.load_header(&hash) {
+                    Ok(Some(header)) if header.index > 0 => {
+                        current_hash = Some(header.previous_hash.clone());
+                    }
+                    _ => break,
+                }
             }
+
             locator
         });
 
         // headers handler - detect chain reorg from genesis
         let nh_headers = node_handle.clone();
-        let chain_headers = chain_state.clone();
-        p2p.set_on_headers(move |_peer_id, headers| {
+        let p2p_for_reset = p2p.clone();
+        let chain_for_reset = chain_state.clone();
+        p2p.set_on_headers(move |peer_id, headers| {
             if headers.is_empty() {
-                return;
+                return false;
             }
 
             // Check if this is a genesis-starting chain that differs from ours
             let first_header = &headers[0];
             if first_header.index == 0 {
                 let bc = nh_headers.bc.lock().unwrap();
-                
+
                 // Check our genesis
                 if let Ok(Some(our_genesis_hash)) = bc.db.get(b"i:0") {
                     let our_genesis_hash_str = String::from_utf8_lossy(&our_genesis_hash);
                     if let Ok(received_genesis_hash) = Astram_core::block::compute_header_hash(first_header) {
-                        
                         if our_genesis_hash_str != received_genesis_hash {
-                            // Different genesis! Need full chain reorg
                             let our_height = bc.chain_tip.as_ref()
                                 .and_then(|tip| bc.load_header(tip).ok().flatten())
                                 .map(|h| h.index)
                                 .unwrap_or(0);
-                            
+
                             let their_height = headers.last().map(|h| h.index).unwrap_or(0);
-                            
+
                             log::warn!(
-                                "🔄 DIFFERENT GENESIS DETECTED! Our height: {}, Their height: {}",
+                                "🔄 DIFFERENT GENESIS DETECTED from peer {}! Our height: {}, Their height: {}",
+                                peer_id,
                                 our_height, their_height
                             );
                             log::warn!("   Our genesis:   {}", our_genesis_hash_str);
                             log::warn!("   Their genesis: {}", received_genesis_hash);
+                            log::warn!("🔄 Resetting chain and accepting new genesis...");
                             
-                            // Security: Only auto-reset if peer chain is SIGNIFICANTLY longer (10+ blocks)
-                            // This prevents attack from single malicious peer
-                            const MIN_HEIGHT_ADVANTAGE: u64 = 10;
-                            
-                            if their_height > our_height + MIN_HEIGHT_ADVANTAGE {
-                                log::error!("🚨 CHAIN REORG REQUIRED: Peer has significantly longer chain with different genesis!");
-                                log::warn!("   Difference: {} blocks (minimum {} required for auto-reset)", their_height - our_height, MIN_HEIGHT_ADVANTAGE);
-                                
-                                // Reset chain and let sync continue
-                                drop(bc);
-                                let mut bc_mut = nh_headers.bc.lock().unwrap();
-                                if let Err(e) = bc_mut.reset_chain() {
-                                    log::error!("Failed to reset chain: {}", e);
-                                } else {
-                                    // Clear in-memory chain state
-                                    let mut chain = chain_headers.lock().unwrap();
-                                    chain.blockchain.clear();
-                                    chain.orphan_blocks.clear();
-                                    log::info!("✅ Chain reset complete, will sync from genesis");
-                                }
-                            } else if their_height > our_height {
-                                log::warn!("   Peer chain is longer but not significantly ({} blocks difference < {} minimum)", their_height - our_height, MIN_HEIGHT_ADVANTAGE);
-                                log::warn!("   Manual intervention recommended: check which genesis is correct");
-                            } else {
-                                log::warn!("   Our chain is longer/equal, keeping our chain");
+                            // 체인 리셋 (현재 bc는 immutable이므로 drop 후 재취득)
+                            drop(bc);
+                            let mut bc_mut = nh_headers.bc.lock().unwrap();
+                            if let Err(e) = bc_mut.reset_chain() {
+                                log::error!("❌ Failed to reset chain: {:?}", e);
+                                return false;
                             }
+                            drop(bc_mut);
+                            
+                            // 메모리 체인도 초기화
+                            let mut chain = chain_for_reset.lock().unwrap();
+                            chain.orphan_blocks.clear();
+                            chain.blockchain.clear();
+                            drop(chain);
+                            
+                            // P2P 높이도 초기화
+                            p2p_for_reset.set_my_height(0);
+                            
+                            log::info!("✅ Chain reset completed, ready to sync new genesis");
+                            // true 반환하여 새 genesis 블록들을 받도록 함
+                            return true;
                         }
                     }
                 }
             }
+
+            true
         });
 
         // getheaders handler - load headers from DB
@@ -403,24 +415,60 @@ impl P2PService {
                             }
                             
                             // Regular orphan handling
+                            // 동기화 중: 현재 높이보다 너무 높은 orphan은 무시 (메모리 절약)
+                            let current_height = {
+                                let bc_temp = state.bc.lock().unwrap();
+                                if let Some(tip_hash) = &bc_temp.chain_tip {
+                                    if let Ok(Some(header)) = bc_temp.load_header(tip_hash) {
+                                        header.index + 1
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                }
+                            };
+
+                            // 동기화 중: 현재 높이 + 1000 이상 차이나는 블록은 무시
+                            if block.header.index > current_height + 1000 {
+                                warn!(
+                                    "[SYNC] ⚠️ Block #{} too far ahead (current: {}), ignoring to save memory during sync",
+                                    block.header.index, current_height
+                                );
+                                return;
+                            }
+
                             // Security: Check orphan pool size limit before adding
                             let now = chrono::Utc::now().timestamp();
                             
                             let mut chain = chain_async.lock().unwrap();
+                            
+                            // 동기화 중: 높이가 먼 orphan부터 먼저 정리
+                            let max_orphan_height_gap = 1000;
+                            chain.orphan_blocks.retain(|_, (orphan_block, _)| {
+                                // 현재 높이보다 너무 높은 orphan은 버림
+                                orphan_block.header.index <= current_height + max_orphan_height_gap
+                            });
+                            
                             if chain.orphan_blocks.len() >= crate::MAX_ORPHAN_BLOCKS {
                                 warn!(
-                                    "[WARN] Orphan pool full ({} blocks), dropping oldest orphan to accept new one",
+                                    "[WARN] Orphan pool full ({} blocks), removing highest-indexed blocks",
                                     chain.orphan_blocks.len()
                                 );
                                 
-                                // Find and remove oldest orphan
-                                let oldest_hash = chain.orphan_blocks
+                                // Sort and remove orphans with highest index (closest to target)
+                                let mut orphan_vec: Vec<_> = chain.orphan_blocks
                                     .iter()
-                                    .min_by_key(|(_, (_, timestamp))| *timestamp)
-                                    .map(|(h, _)| h.clone());
+                                    .map(|(h, (block, ts))| (h.clone(), block.header.index, *ts))
+                                    .collect();
                                 
-                                if let Some(hash) = oldest_hash {
-                                    chain.orphan_blocks.remove(&hash);
+                                // 동기화 중이므로 가장 가까운 높이부터 제거 (top-down)
+                                orphan_vec.sort_by(|a, b| b.1.cmp(&a.1)); // 높이 역순
+                                
+                                // 상위 25%만 제거해서 즉시 가득 찬 상태 해결
+                                let remove_count = (crate::MAX_ORPHAN_BLOCKS / 4).max(1);
+                                for (hash, _, _) in orphan_vec.iter().take(remove_count) {
+                                    chain.orphan_blocks.remove(hash);
                                 }
                             }
                             
@@ -438,8 +486,62 @@ impl P2PService {
                                 chain.orphan_blocks.len()
                             );
                             
-                            // Request the parent block
-                            // TODO: implement getdata request for parent block
+                            // 3. 역방향 탐색: parent block 요청
+                            let parent_hash = block.header.previous_hash.clone();
+                            info!("[SYNC] 🔍 Block #{} parent not found, requesting parent block {}", 
+                                  block.header.index, &parent_hash[..16]);
+                            
+                            // Block #1을 받는 경우: 초기 동기화 중일 때만 의미 있음
+                            if block.header.index == 1 {
+                                // 초기 동기화 중: Genesis 확인
+                                let genesis_hash = {
+                                    let bc = state.bc.lock().unwrap();
+                                    // i:0 키로 Genesis hash 조회
+                                    let key = format!("i:{}", 0);
+                                    match bc.db.get(key.as_bytes()) {
+                                        Ok(Some(hash_bytes)) => {
+                                            Some(String::from_utf8_lossy(&hash_bytes).to_string())
+                                        }
+                                        _ => None,
+                                    }
+                                };
+                                
+                                if let Some(my_genesis) = genesis_hash {
+                                    if my_genesis != parent_hash {
+                                        warn!("[SYNC] ⚠️ Genesis mismatch detected during initial sync!");
+                                        warn!("[SYNC]    My genesis:    {}", my_genesis);
+                                        warn!("[SYNC]    Peer genesis:  {}", parent_hash);
+                                        warn!("[SYNC] 🔄 Resetting chain and requesting new genesis...");
+                                        
+                                        // 1. 내 체인 리셋
+                                        {
+                                            let mut bc = state.bc.lock().unwrap();
+                                            if let Err(e) = bc.reset_chain() {
+                                                warn!("[SYNC] ❌ Failed to reset chain: {:?}", e);
+                                                return;
+                                            }
+                                            info!("[SYNC] ✅ Chain reset completed");
+                                        }
+                                        
+                                        // 2. 피어의 Genesis 블록 요청 (parent_hash = Genesis)
+                                        info!("[SYNC] 📥 Requesting genesis block {}", &parent_hash[..16]);
+                                        p2p_block.request_block_by_hash(&parent_hash);
+                                        
+                                        // 3. orphan pool 초기화 (새로운 체인으로 재시작)
+                                        drop(chain);
+                                        let mut chain_fresh = chain_async.lock().unwrap();
+                                        chain_fresh.orphan_blocks.clear();
+                                        chain_fresh.blockchain.clear();
+                                        info!("[SYNC] 🔄 Ready for full chain sync from genesis");
+                                        
+                                        return;
+                                    }
+                                }
+                            }
+                            
+                            // parent block 요청 (역방향 탐색)
+                            p2p_block.request_block_by_hash(&parent_hash);
+                            
                             info!("[P2P] ⏸️ Block handler: orphan block stored (total time {:?})", handler_start.elapsed());
                         } else {
                             warn!("[WARN] Invalid block from p2p: {:?}", e);
@@ -700,21 +802,66 @@ impl P2PService {
         }
     }
 
-    fn start_header_sync(&self, chain_state: Arc<std::sync::Mutex<ChainState>>) {
+    fn start_block_sync(&self, node_handle: NodeHandle) {
         let p2p = self.manager.clone();
         tokio::spawn(async move {
+            let mut last_syncing_state = false;  // 이전 동기화 상태 추적
+            
             loop {
-                let mut locator = Vec::new();
-                {
-                    let chain = chain_state.lock().unwrap();
-                    for b in chain.blockchain.iter().rev().take(10) {
-                        if let Ok(bytes) = hex::decode(&b.hash) {
-                            locator.push(bytes);
+                // 1. 내 현재 블록 높이 확인
+                let my_height = {
+                    let bc = node_handle.bc.lock().unwrap();
+                    if let Some(tip_hash) = &bc.chain_tip {
+                        if let Ok(Some(header)) = bc.load_header(tip_hash) {
+                            header.index + 1
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    }
+                };
+
+                // 2. 피어들의 블록 높이 확인
+                let peer_heights = p2p.get_peer_heights();
+                let max_peer_height = peer_heights.values().max().copied().unwrap_or(0);
+
+                // 3. 동기화 상태 설정 및 다음 블록 요청 (my_height)
+                let should_sync = my_height < max_peer_height;
+                
+                if should_sync {
+                    // 동기화 중: 상태 변화가 있을 때만 호출
+                    if !last_syncing_state {
+                        p2p.set_syncing(true);
+                        last_syncing_state = true;
+                    }
+                    
+                    info!("[SYNC] Requesting next block #{} (peer max: {})", my_height, max_peer_height);
+                    
+                    // GetHeaders 대신 직접 블록 요청
+                    // 다음 블록의 인덱스를 기준으로 요청
+                    let mut locator = Vec::new();
+                    {
+                        let bc = node_handle.bc.lock().unwrap();
+                        if let Some(tip_hash) = &bc.chain_tip {
+                            if let Ok(bytes) = hex::decode(tip_hash) {
+                                locator.push(bytes);
+                            }
                         }
                     }
+                    
+                    // 헤더를 요청하면 블록이 자동으로 따라옴
+                    p2p.request_headers_from_peers(locator, None);
+                } else {
+                    // 동기화 완료: 상태 변화가 있을 때만 호출
+                    if last_syncing_state {
+                        p2p.set_syncing(false);
+                        last_syncing_state = false;
+                    }
                 }
-                p2p.request_headers_from_peers(locator, None);
-                sleep(Duration::from_secs(15)).await;
+
+                // 빠른 동기화를 위해 1초 대기 (15초 -> 1초)
+                sleep(Duration::from_secs(1)).await;
             }
         });
     }

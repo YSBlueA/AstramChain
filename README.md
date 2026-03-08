@@ -104,13 +104,16 @@ Default values:
 
 Node settings are read from `config/nodeSettings.conf` in the release package or working directory.
 
-Network selection (mainnet/testnet):
+Network parameters:
 
-- Default is mainnet (no setting needed).
-- To use testnet, set `ASTRAM_NETWORK=testnet`.
-- Mainnet: Network ID `Astram-mainnet`, Chain ID `1`.
-- Testnet: Network ID `Astram-testnet`, Chain ID `8888`.
-- Optional overrides: `ASTRAM_NETWORK_ID`, `ASTRAM_CHAIN_ID`.
+- **Release builds** use hardcoded mainnet values for security (cannot be overridden).
+  - Network ID: `Astram-mainnet`
+  - Chain ID: `1`
+  - Network Magic: `0xA57A0001`
+  - Genesis Hash: `0047bb75cef130263090ec45c9e5b464ab0f56c556821cb3a40d59dbf31e7216`
+- **Debug builds** allow testnet and custom network overrides via environment variables:
+  - Set `ASTRAM_NETWORK=testnet` for testnet (Chain ID `8888`, Magic `0xA57A22B8`)
+  - Optional overrides: `ASTRAM_NETWORK_ID`, `ASTRAM_CHAIN_ID`, `ASTRAM_NETWORK_MAGIC`
 
 ## Dashboard and Explorer
 

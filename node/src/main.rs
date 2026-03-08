@@ -23,6 +23,7 @@ use primitive_types::U256;
 use serde::Deserialize;
 use serde_json::Value;
 
+use std::collections::HashSet;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -62,6 +63,7 @@ struct NodeSettings {
     eth_rpc_bind_addr: String,
     eth_rpc_port: u16,
     dns_server_url: String,
+    bootstrap_peers: Vec<String>,
 }
 
 impl Default for NodeSettings {
@@ -75,6 +77,7 @@ impl Default for NodeSettings {
             eth_rpc_bind_addr: "127.0.0.1".to_string(),
             eth_rpc_port: 8545,
             dns_server_url: "http://161.33.19.183:8053".to_string(),
+            bootstrap_peers: Vec::new(),
         }
     }
 }
@@ -160,6 +163,27 @@ fn load_node_settings() -> NodeSettings {
                         settings.eth_rpc_port = value.parse().unwrap_or(settings.eth_rpc_port)
                     }
                     "DNS_SERVER_URL" => settings.dns_server_url = value.to_string(),
+                    "ASTRAM_NETWORK" | "ASTRAM_NETWORK_ID" | "ASTRAM_CHAIN_ID" | "ASTRAM_NETWORK_MAGIC" => {
+                        #[cfg(debug_assertions)]
+                        {
+                            // Debug builds: allow environment variable overrides for testing
+                            unsafe {
+                                std::env::set_var(key, value);
+                            }
+                        }
+                        #[cfg(not(debug_assertions))]
+                        {
+                            // Release builds: network parameters are hardcoded, ignore config overrides
+                            warn!("[RELEASE] Network parameter override '{}' ignored - using hardcoded mainnet values", key);
+                        }
+                    }
+                    "BOOTSTRAP_PEERS" => {
+                        settings.bootstrap_peers = value
+                            .split(',')
+                            .map(|entry| entry.trim().to_string())
+                            .filter(|entry| !entry.is_empty())
+                            .collect();
+                    }
                     _ => println!("[WARN] Unknown node setting key: {}", key),
                 }
             }
@@ -244,6 +268,52 @@ async fn main() {
     };
     let bc = Arc::new(Mutex::new(bc));
 
+    // Check and recover tip if needed
+    {
+        let mut bc_guard = bc.lock().unwrap();
+        
+        // Always count blocks for diagnostic purposes
+        let block_count = bc_guard.count_blocks();
+        log::info!("📊 Database contains {} blocks", block_count);
+        
+        if let Some(tip_hash) = &bc_guard.chain_tip {
+            // Tip exists - verify it's the highest block
+            if let Ok(Some(header)) = bc_guard.load_header(tip_hash) {
+                log::info!("✅ Chain tip verified at height {}", header.index);
+                
+                // Check for significant mismatch and auto-recover
+                if block_count > 100 && header.index + 1 < block_count as u64 / 2 {
+                    log::warn!(
+                        "⚠️  Potential issue: tip at height {} but {} blocks in DB",
+                        header.index, block_count
+                    );
+                    log::warn!("   Automatically triggering tip recovery...");
+                    if let Err(e) = bc_guard.recover_tip() {
+                        log::error!("Failed to recover tip: {}", e);
+                    } else {
+                        // Log the new tip after recovery
+                        if let Some(new_tip_hash) = &bc_guard.chain_tip {
+                            if let Ok(Some(new_header)) = bc_guard.load_header(new_tip_hash) {
+                                log::info!("🎉 Tip successfully recovered to height {}", new_header.index);
+                            }
+                        }
+                    }
+                }
+            } else {
+                log::warn!("⚠️  Chain tip points to missing block, attempting recovery...");
+                if let Err(e) = bc_guard.recover_tip() {
+                    log::error!("Failed to recover tip: {}", e);
+                }
+            }
+        } else {
+            // No tip - check if there are blocks in DB that need recovery
+            log::info!("No tip found, checking if recovery needed...");
+            if let Err(e) = bc_guard.recover_tip() {
+                log::debug!("No blocks to recover (fresh database): {}", e);
+            }
+        }
+    }
+
     // Initialize P2P networking
     let p2p_service = P2PService::new();
 
@@ -270,12 +340,24 @@ async fn main() {
     let my_height = {
         let bc = node_handle.bc.lock().unwrap();
         if let Some(tip_hash) = &bc.chain_tip {
-            if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                header.index + 1
-            } else {
-                0
+            log::info!("[INIT] Chain tip hash: {}", tip_hash);
+            match bc.load_header(tip_hash) {
+                Ok(Some(header)) => {
+                    let height = header.index;
+                    log::info!("[INIT] Successfully loaded tip header at height {}", height);
+                    height
+                }
+                Ok(None) => {
+                    log::error!("[INIT] Chain tip '{}' exists but header not found in DB!", tip_hash);
+                    0
+                }
+                Err(e) => {
+                    log::error!("[INIT] Failed to load chain tip header: {}", e);
+                    0
+                }
             }
         } else {
+            log::info!("[INIT] No chain tip found (empty blockchain)");
             0
         }
     };
@@ -403,7 +485,14 @@ async fn measure_latency(address: &str) -> Option<u64> {
             let latency = start.elapsed().as_millis() as u64;
             Some(latency)
         }
-        _ => None,
+        Ok(Err(e)) => {
+            log::debug!("Connection to {} failed: {}", address, e);
+            None
+        }
+        Err(_) => {
+            log::debug!("Connection to {} timed out after 3s", address);
+            None
+        }
     }
 }
 
@@ -477,10 +566,15 @@ async fn fetch_best_nodes_from_dns(
             candidates.len()
         );
 
+        let fallback_candidates: Vec<String> = candidates
+            .iter()
+            .map(|node| format!("{}:{}", node.address, node.port))
+            .collect();
+
         // Measure latency for each candidate in parallel
         let mut scored_peers = Vec::new();
 
-        for node in candidates {
+        for node in candidates.into_iter() {
             let addr = format!("{}:{}", node.address, node.port);
             let latency = measure_latency(&addr).await;
 
@@ -512,7 +606,14 @@ async fn fetch_best_nodes_from_dns(
         }
 
         if scored_peers.is_empty() {
-            return Ok(vec![]);
+            let fallback_count = fallback_candidates.len().min(limit);
+            if fallback_count > 0 {
+                warn!(
+                    "No peers passed latency probe; falling back to {} raw DNS candidates",
+                    fallback_count
+                );
+            }
+            return Ok(fallback_candidates.into_iter().take(limit).collect());
         }
 
         // Normalize and calculate final scores
@@ -573,6 +674,63 @@ async fn fetch_best_nodes_from_dns(
     }
 }
 
+fn build_fallback_peer_targets(
+    p2p_handle: &Arc<astram_node::p2p::manager::PeerManager>,
+    settings: &NodeSettings,
+    my_public_ip: Option<String>,
+    my_port: u16,
+    limit: usize,
+) -> Vec<String> {
+    let mut unique = HashSet::new();
+    let mut targets = Vec::new();
+    let my_public_id = my_public_ip.map(|ip| format!("{}:{}", ip, my_port));
+
+    for raw in &settings.bootstrap_peers {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = if trimmed.contains(':') {
+            trimmed.to_string()
+        } else {
+            format!("{}:{}", trimmed, my_port)
+        };
+
+        if my_public_id.as_deref() == Some(normalized.as_str()) {
+            continue;
+        }
+
+        if unique.insert(normalized.clone()) {
+            targets.push(normalized);
+        }
+
+        if targets.len() >= limit {
+            return targets;
+        }
+    }
+
+    for saved in p2p_handle.load_saved_peers() {
+        let addr = saved.addr.trim().to_string();
+        if addr.is_empty() {
+            continue;
+        }
+        if my_public_id.as_deref() == Some(addr.as_str()) {
+            continue;
+        }
+
+        if unique.insert(addr.clone()) {
+            targets.push(addr);
+        }
+
+        if targets.len() >= limit {
+            return targets;
+        }
+    }
+
+    targets
+}
+
 /// Register this node with the DNS server (non-blocking version)
 /// Height is optional and only used for informational purposes
 /// Returns the public IP address as seen by the DNS server.
@@ -591,7 +749,7 @@ async fn register_with_dns(
 
     let payload = serde_json::json!({
         "port": node_port,
-        "version": "0.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "height": height
     });
 
@@ -632,7 +790,7 @@ async fn sync_blockchain(
         let bc = node_handle.bc.lock().unwrap();
         if let Some(tip_hash) = &bc.chain_tip {
             if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                header.index + 1
+                header.index
             } else {
                 0
             }
@@ -668,25 +826,12 @@ async fn sync_blockchain(
         blocks_behind, my_height, max_peer_height
     );
 
-    // For initial sync (when we have no blocks), request genesis block first
-    if my_height == 0 {
-        info!("[INFO] Requesting genesis block from peers...");
-        // Request with empty locator to get blocks from the beginning
-        p2p_handle.request_headers_from_peers(vec![], None);
-    } else {
-        // Request headers from our current tip
-        let mut locator_hashes = Vec::new();
-        {
-            let bc = node_handle.bc.lock().unwrap();
-            if let Some(tip_hash) = &bc.chain_tip {
-                if let Ok(bytes) = hex::decode(tip_hash) {
-                    locator_hashes.push(bytes);
-                }
-            }
-        }
-        info!("[INFO] Requesting headers from peers...");
-        p2p_handle.request_headers_from_peers(locator_hashes, None);
-    }
+    // Request next block we need (my_height + 1)
+    info!("[SYNC] Requesting block #{} from peers...", my_height + 1);
+    
+    // 방법: 블록 높이를 직접 요청하도록 피어들에게 알림
+    // P2P 매니저를 통해 다음 블록 요청
+    // (request_next_block 기능이 구현되어야 함)
 
     // Wait for blocks to arrive (give peers time to respond)
     // Increase timeout for larger syncs
@@ -790,7 +935,7 @@ async fn wait_for_complete_sync(
             let bc = node_handle.bc.lock().unwrap();
             if let Some(tip_hash) = &bc.chain_tip {
                 if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                    header.index + 1
+                    header.index
                 } else {
                     0
                 }
@@ -1045,33 +1190,57 @@ async fn start_services(
         sleep(Duration::from_secs(2)).await;
 
         // Initial connection to best nodes
-        match fetch_best_nodes_from_dns(node_meta_for_p2p.clone(), &settings_p2p, my_node_port, 10)
-            .await
+        let mut initial_targets = match fetch_best_nodes_from_dns(
+            node_meta_for_p2p.clone(),
+            &settings_p2p,
+            my_node_port,
+            10,
+        )
+        .await
         {
-            Ok(peer_addrs) => {
-                info!(
-                    "[INFO] Connecting to {} best nodes from DNS",
-                    peer_addrs.len()
-                );
-                for addr in peer_addrs {
-                    let p2p_clone = p2p_handle_for_task.clone();
-                    let addr_clone = addr.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = p2p_clone.connect_peer(&addr_clone).await {
-                            log::warn!("Failed to connect to peer {}: {:?}", addr_clone, e);
-                        } else {
-                            info!("[OK] Connected to peer: {}", addr_clone);
-                        }
-                    });
-                }
-            }
+            Ok(peer_addrs) => peer_addrs,
             Err(e) => {
                 log::warn!("Failed to fetch best nodes from DNS: {}", e);
+                Vec::new()
+            }
+        };
+
+        if initial_targets.is_empty() {
+            let my_public_ip = { node_meta_for_p2p.my_public_address.lock().unwrap().clone() };
+            let fallback = build_fallback_peer_targets(
+                &p2p_handle_for_task,
+                &settings_p2p,
+                my_public_ip,
+                my_node_port,
+                10,
+            );
+            if !fallback.is_empty() {
+                warn!(
+                    "[P2P] DNS returned no peer targets, falling back to {} bootstrap/saved peers",
+                    fallback.len()
+                );
+                initial_targets = fallback;
             }
         }
 
-        // Periodically refresh connections to best nodes (every 10 minutes)
-        let mut interval = tokio::time::interval(Duration::from_secs(600));
+        info!(
+            "[INFO] Connecting to {} best nodes from discovery",
+            initial_targets.len()
+        );
+        for addr in initial_targets {
+            let p2p_clone = p2p_handle_for_task.clone();
+            let addr_clone = addr.clone();
+            tokio::spawn(async move {
+                if let Err(e) = p2p_clone.connect_peer(&addr_clone).await {
+                    log::warn!("Failed to connect to peer {}: {:?}", addr_clone, e);
+                } else {
+                    info!("[OK] Connected to peer: {}", addr_clone);
+                }
+            });
+        }
+
+        // Periodically refresh connections to best nodes (every 60 seconds)
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.tick().await; // Skip first immediate tick
 
         loop {
@@ -1089,23 +1258,41 @@ async fn start_services(
                     )
                     .await
                     {
-                Ok(peer_addrs) => {
-                    info!(
-                        "[INFO] Refreshing connections to {} best nodes",
-                        peer_addrs.len()
-                    );
-                    for addr in peer_addrs {
-                        let p2p_clone = p2p_handle_for_task.clone();
-                        let addr_clone = addr.clone();
-                        tokio::spawn(async move {
-                            let _ = p2p_clone.connect_peer(&addr_clone).await;
-                        });
+                        Ok(mut peer_addrs) => {
+                            if peer_addrs.is_empty() {
+                                let my_public_ip = { node_meta_for_p2p.my_public_address.lock().unwrap().clone() };
+                                let fallback = build_fallback_peer_targets(
+                                    &p2p_handle_for_task,
+                                    &settings_p2p,
+                                    my_public_ip,
+                                    my_node_port,
+                                    10,
+                                );
+                                if !fallback.is_empty() {
+                                    warn!(
+                                        "[P2P] Refresh found no DNS targets, using {} fallback peers",
+                                        fallback.len()
+                                    );
+                                    peer_addrs = fallback;
+                                }
+                            }
+
+                            info!(
+                                "[INFO] Refreshing connections to {} discovered peers",
+                                peer_addrs.len()
+                            );
+                            for addr in peer_addrs {
+                                let p2p_clone = p2p_handle_for_task.clone();
+                                let addr_clone = addr.clone();
+                                tokio::spawn(async move {
+                                    let _ = p2p_clone.connect_peer(&addr_clone).await;
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to refresh nodes from DNS: {}", e);
+                        }
                     }
-                }
-                Err(e) => {
-                    log::warn!("Failed to refresh nodes from DNS: {}", e);
-                }
-            }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
                     // Check shutdown flag every second for quick response

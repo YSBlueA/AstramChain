@@ -111,21 +111,41 @@ impl Blockchain {
         let tip = db.get(b"tip")?;
         let chain_tip = tip.map(|v| String::from_utf8(v).unwrap());
 
+        // Debug: Log chain tip information
+        if let Some(ref tip_hash) = chain_tip {
+            log::info!("Found chain tip in DB: {}", tip_hash);
+        } else {
+            log::info!("No chain tip found in DB (fresh database)");
+        }
+
         // Load current difficulty from chain tip
         let difficulty = if let Some(ref tip_hash) = chain_tip {
             // Try to load the tip block header
-            if let Ok(Some(blob)) = db.get(format!("b:{}", tip_hash).as_bytes()) {
-                if let Ok((block, _)) =
-                    bincode::decode_from_slice::<Block, _>(&blob, *BINCODE_CONFIG)
-                {
-                    block.header.difficulty
-                } else {
-                    log::warn!("Failed to decode tip block, using default difficulty");
+            match db.get(format!("b:{}", tip_hash).as_bytes()) {
+                Ok(Some(blob)) => {
+                    match bincode::decode_from_slice::<Block, _>(&blob, *BINCODE_CONFIG) {
+                        Ok((block, _)) => {
+                            log::info!(
+                                "Loaded tip block #{} (hash: {})",
+                                block.header.index,
+                                tip_hash
+                            );
+                            block.header.difficulty
+                        }
+                        Err(e) => {
+                            log::error!("Failed to decode tip block: {}", e);
+                            Self::POW_LIMIT_BITS
+                        }
+                    }
+                }
+                Ok(None) => {
+                    log::error!("Tip block '{}' not found in database!", tip_hash);
                     Self::POW_LIMIT_BITS
                 }
-            } else {
-                log::warn!("Tip block not found, using default difficulty");
-                Self::POW_LIMIT_BITS
+                Err(e) => {
+                    log::error!("Failed to read tip block from DB: {}", e);
+                    Self::POW_LIMIT_BITS
+                }
             }
         } else {
             // No chain exists yet, use default
@@ -208,6 +228,15 @@ impl Blockchain {
             return Err(anyhow!(
                 "header hash mismatch: computed {} != block.hash {}",
                 computed,
+                block.hash
+            ));
+        }
+
+        // 1.5) Checkpoint policy anchors (official chain protection)
+        if !crate::checkpoint::validate_against_checkpoints(block.header.index, &block.hash) {
+            return Err(anyhow!(
+                "checkpoint policy violation at height {} for hash {}",
+                block.header.index,
                 block.hash
             ));
         }
@@ -330,6 +359,15 @@ impl Blockchain {
             ));
         }
 
+        // 1.5) Checkpoint policy anchors (official chain protection)
+        if !crate::checkpoint::validate_against_checkpoints(block.header.index, &block.hash) {
+            return Err(anyhow!(
+                "checkpoint policy violation at height {} for hash {}",
+                block.header.index,
+                block.hash
+            ));
+        }
+
         // 2) Proof-of-Work verification
         if !Self::is_valid_pow(&block.hash, block.header.difficulty)? {
             return Err(anyhow!(
@@ -363,13 +401,23 @@ impl Blockchain {
             }
 
             // longest chain rule
-            if let Some(ref tip_hash) = self.chain_tip {
-                if &block.header.previous_hash != tip_hash {
-                    return Err(anyhow!(
-                        "fork detected: prev {} != tip {}",
-                        block.header.previous_hash,
+            if let Some(tip_hash) = self.chain_tip.clone() {
+                if self.load_header(&tip_hash)?.is_none() {
+                    log::warn!(
+                        "⚠️  Tip {} is missing before block validation; recovering tip first...",
                         tip_hash
-                    ));
+                    );
+                    self.recover_tip()?;
+                }
+
+                if let Some(ref recovered_tip_hash) = self.chain_tip {
+                    if &block.header.previous_hash != recovered_tip_hash {
+                        return Err(anyhow!(
+                            "fork detected: prev {} != tip {}",
+                            block.header.previous_hash,
+                            recovered_tip_hash
+                        ));
+                    }
                 }
             }
         }
@@ -1033,13 +1081,45 @@ impl Blockchain {
     /// Reorganize chain to new tip if it has more work
     /// Returns true if reorg happened, false if current chain is already best
     pub fn reorganize_if_needed(&mut self, new_block_hash: &str) -> Result<bool> {
-        let current_tip = match &self.chain_tip {
+        let mut current_tip = match &self.chain_tip {
             Some(tip) => tip.clone(),
             None => {
                 // No current chain, accept any valid block
                 return Ok(false);
             }
         };
+
+        let mut current_header = self
+            .load_header(&current_tip)?
+            .ok_or_else(|| anyhow!("Cannot load current tip header"))?;
+
+        // Safety: If tip height is suspiciously low compared to DB block count,
+        // recover tip first to avoid accidental reorg to a shorter fork.
+        if current_header.index < 100 {
+            let block_count = self.count_blocks() as u64;
+            if block_count > 100 && current_header.index + 1 < block_count / 2 {
+                log::warn!(
+                    "⚠️  Stale tip detected before reorg (tip height: {}, block_count: {}), recovering tip...",
+                    current_header.index,
+                    block_count
+                );
+
+                self.recover_tip()?;
+
+                current_tip = self
+                    .chain_tip
+                    .clone()
+                    .ok_or_else(|| anyhow!("Tip recovery failed: chain tip is missing"))?;
+                current_header = self
+                    .load_header(&current_tip)?
+                    .ok_or_else(|| anyhow!("Tip recovery failed: recovered tip header missing"))?;
+
+                log::info!(
+                    "✅ Tip recovered before reorg check: now at height {}",
+                    current_header.index
+                );
+            }
+        }
 
         // Calculate chain work for both tips
         let current_work = self.calculate_chain_work(&current_tip)?;
@@ -1075,9 +1155,6 @@ impl Blockchain {
         log::info!("Common ancestor: {}", &ancestor[..16]);
 
         // 🔒 Security: Check reorganization depth to prevent 51% attacks
-        let current_header = self
-            .load_header(&current_tip)?
-            .ok_or_else(|| anyhow!("Cannot load current tip header"))?;
         let ancestor_header = self
             .load_header(&ancestor)?
             .ok_or_else(|| anyhow!("Cannot load ancestor header"))?;
@@ -1304,5 +1381,67 @@ impl Blockchain {
         
         log::info!("✅ Blockchain reset complete");
         Ok(())
+    }
+
+    /// Recover chain tip by scanning database for highest valid block
+    /// Use this when tip pointer is incorrect but blocks still exist
+    pub fn recover_tip(&mut self) -> Result<()> {
+        log::warn!("🔧 Attempting to recover chain tip from database...");
+        
+        let mut highest_block: Option<(u64, String, Block)> = None;
+        let mut block_count = 0;
+        
+        // Scan all block keys
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            if let Ok((key, value)) = item {
+                let key_str = String::from_utf8_lossy(&key);
+                
+                // Check if this is a block key (b:{hash})
+                if key_str.starts_with("b:") {
+                    block_count += 1;
+                    if let Ok((block, _)) = bincode::decode_from_slice::<Block, _>(&value, *BINCODE_CONFIG) {
+                        let block_height = block.header.index;
+                        let block_hash = key_str.strip_prefix("b:").unwrap_or("").to_string();
+                        
+                        // Update if this is the highest block so far
+                        if highest_block.is_none() || block_height > highest_block.as_ref().unwrap().0 {
+                            highest_block = Some((block_height, block_hash, block));
+                        }
+                    }
+                }
+            }
+        }
+        
+        log::info!("📊 Found {} blocks in database", block_count);
+        
+        if let Some((height, hash, _block)) = highest_block {
+            log::info!("✅ Found highest block: #{} (hash: {})", height, hash);
+            
+            // Update tip pointer
+            self.db.put(b"tip", hash.as_bytes())?;
+            self.chain_tip = Some(hash.clone());
+            
+            log::info!("✅ Chain tip recovered successfully to block #{}", height);
+            Ok(())
+        } else {
+            log::error!("❌ No blocks found in database");
+            Err(anyhow!("No blocks found in database"))
+        }
+    }
+
+    /// Count blocks in database (diagnostic utility)
+    pub fn count_blocks(&self) -> usize {
+        let mut count = 0;
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            if let Ok((key, _)) = item {
+                let key_str = String::from_utf8_lossy(&key);
+                if key_str.starts_with("b:") {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 }

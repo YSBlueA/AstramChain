@@ -40,7 +40,7 @@ pub fn get_checkpoints() -> Vec<Checkpoint> {
         // Genesis block - immutable network origin
         Checkpoint {
             height: 0,
-            hash: "".to_string(), // Set after genesis creation
+            hash: "0047bb75cef130263090ec45c9e5b464ab0f56c556821cb3a40d59dbf31e7216".to_string(),
             description: "Genesis Block - Network Origin".to_string(),
         },
         // Add more checkpoints as network matures
@@ -113,7 +113,9 @@ pub fn check_reorg_against_checkpoints(
     let latest_checkpoint = get_latest_checkpoint_height();
     let reorg_target_height = current_height.saturating_sub(reorg_depth);
 
-    if reorg_target_height <= latest_checkpoint {
+    // Allow reorg to checkpoint height itself (< instead of <=)
+    // This allows initial sync and reorg to genesis
+    if reorg_target_height < latest_checkpoint {
         return (
             false,
             Some(format!(
@@ -135,8 +137,10 @@ mod tests {
         // Valid block at non-checkpoint height
         assert!(validate_against_checkpoints(50, "any_hash"));
 
-        // Genesis checkpoint (empty hash = not enforced yet)
-        assert!(validate_against_checkpoints(0, "any_hash"));
+        // Genesis checkpoint must match the official mainnet genesis hash
+        let genesis_hash = "0047bb75cef130263090ec45c9e5b464ab0f56c556821cb3a40d59dbf31e7216";
+        assert!(validate_against_checkpoints(0, genesis_hash));
+        assert!(!validate_against_checkpoints(0, "any_hash"));
     }
 
     #[test]
@@ -151,10 +155,9 @@ mod tests {
         let (allowed, _) = check_reorg_against_checkpoints(10, 100);
         assert!(allowed);
 
-        // Deep reorg that would go below genesis (checkpoint at 0)
+        // Reorg to genesis itself is allowed by current policy (<, not <=)
         let (allowed, reason) = check_reorg_against_checkpoints(150, 100);
-        assert!(!allowed);
-        assert!(reason.is_some());
-        assert!(reason.unwrap().contains("checkpoint"));
+        assert!(allowed);
+        assert!(reason.is_none());
     }
 }

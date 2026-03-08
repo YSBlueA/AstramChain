@@ -81,7 +81,7 @@ Astram consists of:
 
 - Genesis timestamp lower bound: 1738800000 (Unix time).
 - Blocks with timestamps earlier than this are rejected.
-- Genesis block hash: TBD.
+- Genesis block hash: 0047bb75cef130263090ec45c9e5b464ab0f56c556821cb3a40d59dbf31e7216.
 - Genesis merkle root: TBD.
 - Genesis block content and hash are defined by the implementation and build artifacts.
 
@@ -130,18 +130,22 @@ Astram consists of:
 - Protocol version: 1.
 - Mainnet Network ID: Astram-mainnet.
 - Mainnet Chain ID: 1.
+- Mainnet Network Magic: 0xA57A0001.
 - Testnet Network ID: Astram-testnet.
 - Testnet Chain ID: 8888.
+- Testnet Network Magic: 0xA57A22B8.
 
 ### Network selection
 
-- Default is mainnet when no environment variables are set.
-- Set `ASTRAM_NETWORK=testnet` to switch to testnet defaults.
-- Override with `ASTRAM_NETWORK_ID` or `ASTRAM_CHAIN_ID` for custom networks.
+- **Release builds**: Hardcoded to mainnet parameters for security. Environment variable overrides are disabled.
+- **Debug builds**: Allow network selection via environment variables for development and testing.
+  - Set `ASTRAM_NETWORK=testnet` to switch to testnet defaults.
+  - Override with `ASTRAM_NETWORK_ID`, `ASTRAM_CHAIN_ID`, or `ASTRAM_NETWORK_MAGIC` for custom networks.
 
 ### Message set
 
-- `Handshake` and `HandshakeAck` exchange `HandshakeInfo` (protocol version, software version, features, network/chain IDs, height, listening port).
+- Length-delimited P2P frames include a 4-byte network magic prefix before message payload.
+- `Handshake` and `HandshakeAck` exchange `HandshakeInfo` (protocol version, software version, features, network/chain IDs, network magic, height, listening port).
 - `Version` and `VerAck` provide lightweight version confirmation.
 - `GetHeaders` / `Headers` are used for header synchronization.
 - `Inv` / `GetData` relay inventory and request payloads.
@@ -174,8 +178,10 @@ Astram consists of:
 | Network   | Protocol version          | 1                                                             |
 | Network   | Mainnet Network ID        | Astram-mainnet                                                |
 | Network   | Mainnet Chain ID          | 1                                                             |
+| Network   | Mainnet Network Magic     | 0xA57A0001                                                    |
 | Network   | Testnet Network ID        | Astram-testnet                                                |
 | Network   | Testnet Chain ID          | 8888                                                          |
+| Network   | Testnet Network Magic     | 0xA57A22B8                                                    |
 | Network   | Max outbound peers        | 8                                                             |
 | Network   | Max peers per IP          | 3                                                             |
 | Network   | Max peers per /24         | 2                                                             |

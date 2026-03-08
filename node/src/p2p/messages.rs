@@ -13,6 +13,7 @@ pub struct HandshakeInfo {
     pub supported_features: Vec<String>,
     pub network_id: String,
     pub chain_id: u64,
+    pub network_magic: u32,
     pub height: u64,
     /// Listening port of this node (to detect self-connections)
     pub listening_port: u16,

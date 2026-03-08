@@ -250,11 +250,12 @@ DNS_SERVER_URL=http://161.33.19.183:8053
 # Network selection (default: mainnet)
 # Uncomment to use testnet:
 # ASTRAM_NETWORK=testnet
-# Mainnet: Network ID Astram-mainnet, Chain ID 1
-# Testnet: Network ID Astram-testnet, Chain ID 8888
+# Mainnet: Network ID Astram-mainnet, Chain ID 1, Network Magic 0xA57A0001
+# Testnet: Network ID Astram-testnet, Chain ID 8888, Network Magic 0xA57A22B8
 # Optional overrides:
 # ASTRAM_NETWORK_ID=custom-network-id
 # ASTRAM_CHAIN_ID=12345
+# ASTRAM_NETWORK_MAGIC=0xA57A0001
 
 # Data directory
 DATA_DIR=%USERPROFILE%\.Astram\data
@@ -319,6 +320,8 @@ Edit `config/nodeSettings.conf` to choose a network:
 
 - Mainnet: Network ID Astram-mainnet, Chain ID 1
 - Testnet: Network ID Astram-testnet, Chain ID 8888
+- Mainnet Network Magic: 0xA57A0001
+- Testnet Network Magic: 0xA57A22B8
 
 ## Support
 

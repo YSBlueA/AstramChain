@@ -36,7 +36,7 @@ pub struct PaginationParams {
 pub async fn health() -> HttpResponse {
     HttpResponse::Ok().json(HealthResponse {
         status: "healthy".to_string(),
-        version: "0.1.0".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         timestamp: Utc::now().to_rfc3339(),
     })
 }

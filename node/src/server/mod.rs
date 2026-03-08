@@ -231,6 +231,7 @@ pub async fn run_server(
                 pending_tx,
                 seen_tx,
                 chain_tip,
+                genesis_hash,
                 is_mining,
                 current_difficulty,
                 hashrate,
@@ -241,12 +242,20 @@ pub async fn run_server(
                 let state = node.clone();
 
                 let _bc_lock_start = std::time::Instant::now();
-                let chain_tip = {
+                let (chain_tip, genesis_hash) = {
                     let bc = state.bc.lock().unwrap();
-                    bc.chain_tip
+                    let tip = bc.chain_tip
                         .as_ref()
                         .map(|h| hex::encode(h))
-                        .unwrap_or_else(|| "none".to_string())
+                        .unwrap_or_else(|| "none".to_string());
+                    let genesis = bc
+                        .db
+                        .get(b"i:0")
+                        .ok()
+                        .flatten()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                        .unwrap_or_else(|| "none".to_string());
+                    (tip, genesis)
                 };
                 let _chain_lock_start = std::time::Instant::now();
                 let memory_count = {
@@ -274,6 +283,7 @@ pub async fn run_server(
                     pending_count,
                     seen_count,
                     chain_tip,
+                    genesis_hash,
                     state.mining.active.load(std::sync::atomic::Ordering::Relaxed),
                     diff,
                     hash,
@@ -295,19 +305,23 @@ pub async fn run_server(
 
             let connected_peers = peer_heights.len();
             let block_height = my_height;
+            let network_id = p2p.get_network_id().to_string();
+            let chain_id = p2p.get_chain_id();
+            let network_magic = format!("0x{:08x}", p2p.get_network_magic());
 
             // Get validation statistics (lock-free)
             let validation_stats = Astram_core::security::VALIDATION_STATS.get_stats();
             let total_failures: u64 = validation_stats.iter().map(|(_, count)| count).sum();
             let response = serde_json::json!({
                 "node": {
-                    "version": "0.1.0",
+                    "version": env!("CARGO_PKG_VERSION"),
                     "uptime_seconds": uptime_secs,
                 },
                 "blockchain": {
                     "height": block_height,
                     "memory_blocks": memory_blocks,
                     "chain_tip": chain_tip,
+                    "genesis_hash": genesis_hash,
                     "my_height": my_height,
                     "difficulty": current_difficulty,
                 },
@@ -318,6 +332,9 @@ pub async fn run_server(
                     "max_bytes": crate::MAX_MEMPOOL_BYTES,
                 },
                 "network": {
+                    "network_id": network_id,
+                    "chain_id": chain_id,
+                    "network_magic": network_magic,
                     "connected_peers": connected_peers,
                     "peer_heights": peer_heights,
                     "subnet_diversity": {
