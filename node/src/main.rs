@@ -590,8 +590,23 @@ async fn fetch_best_nodes_from_dns(
         info!("🔍 Starting latency measurements for {} candidates...", candidates.len());
         for node in candidates.into_iter() {
             let addr = format!("{}:{}", node.address, node.port);
-            info!("  Testing latency to {}...", addr);
-            let latency = measure_latency(&addr).await;
+            
+            // Convert to localhost if it's the same public IP (for local node discovery)
+            let test_addr = if let Some(ref my_public_ip) = my_address {
+                if node.address == *my_public_ip {
+                    let localhost_addr = format!("127.0.0.1:{}", node.port);
+                    info!("  Testing latency to {} (using {} for local connection)...", addr, localhost_addr);
+                    localhost_addr
+                } else {
+                    info!("  Testing latency to {}...", addr);
+                    addr.clone()
+                }
+            } else {
+                info!("  Testing latency to {}...", addr);
+                addr.clone()
+            };
+            
+            let latency = measure_latency(&test_addr).await;
 
             if let Some(latency_ms) = latency {
                 // Calculate composite score:
@@ -1258,14 +1273,36 @@ async fn start_services(
             "[INFO] Connecting to {} best nodes from discovery",
             initial_targets.len()
         );
+        
+        let my_public_ip_for_connect = { node_meta_for_p2p.my_public_address.lock().unwrap().clone() };
+        
         for addr in initial_targets {
             let p2p_clone = p2p_handle_for_task.clone();
-            let addr_clone = addr.clone();
-            tokio::spawn(async move {
-                if let Err(e) = p2p_clone.connect_peer(&addr_clone).await {
-                    log::warn!("Failed to connect to peer {}: {:?}", addr_clone, e);
+            let my_public_ip_clone = my_public_ip_for_connect.clone();
+            
+            // Convert to localhost if it's the same public IP (for local node discovery)
+            let connection_addr = if let Some(ref my_ip) = my_public_ip_clone {
+                if let Some((peer_ip, peer_port)) = addr.split_once(':') {
+                    if peer_ip == my_ip {
+                        let localhost_addr = format!("127.0.0.1:{}", peer_port);
+                        info!("[P2P] Converting {} to {} for local connection", addr, localhost_addr);
+                        localhost_addr
+                    } else {
+                        addr.clone()
+                    }
                 } else {
-                    info!("[OK] Connected to peer: {}", addr_clone);
+                    addr.clone()
+                }
+            } else {
+                addr.clone()
+            };
+            
+            let original_addr = addr.clone();
+            tokio::spawn(async move {
+                if let Err(e) = p2p_clone.connect_peer(&connection_addr).await {
+                    log::warn!("Failed to connect to peer {} ({}): {:?}", original_addr, connection_addr, e);
+                } else {
+                    info!("[OK] Connected to peer: {} (via {})", original_addr, connection_addr);
                 }
             });
         }
@@ -1312,11 +1349,30 @@ async fn start_services(
                                 "[INFO] Refreshing connections to {} discovered peers",
                                 peer_addrs.len()
                             );
+                            
+                            let my_public_ip_refresh = { node_meta_for_p2p.my_public_address.lock().unwrap().clone() };
+                            
                             for addr in peer_addrs {
                                 let p2p_clone = p2p_handle_for_task.clone();
-                                let addr_clone = addr.clone();
+                                let my_public_ip_clone = my_public_ip_refresh.clone();
+                                
+                                // Convert to localhost if it's the same public IP
+                                let connection_addr = if let Some(ref my_ip) = my_public_ip_clone {
+                                    if let Some((peer_ip, peer_port)) = addr.split_once(':') {
+                                        if peer_ip == my_ip {
+                                            format!("127.0.0.1:{}", peer_port)
+                                        } else {
+                                            addr.clone()
+                                        }
+                                    } else {
+                                        addr.clone()
+                                    }
+                                } else {
+                                    addr.clone()
+                                };
+                                
                                 tokio::spawn(async move {
-                                    let _ = p2p_clone.connect_peer(&addr_clone).await;
+                                    let _ = p2p_clone.connect_peer(&connection_addr).await;
                                 });
                             }
                         }
