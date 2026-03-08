@@ -300,10 +300,6 @@ impl PeerManager {
             Err(_) => return false,
         };
 
-        if peer_socket.port() != my_port {
-            return false;
-        }
-
         let peer_ip = peer_socket.ip().to_string();
 
         if let Some(my_public_ip) = self.my_public_ip.lock().clone() {
@@ -319,6 +315,7 @@ impl PeerManager {
             return true;
         }
 
+        // NOTE: source port is ephemeral; loopback + same advertised listening port means self.
         peer_socket.ip().is_loopback()
     }
 
@@ -456,6 +453,57 @@ impl PeerManager {
 
     /// outbound connection to peer
     pub async fn connect_peer(self: Arc<Self>, addr: &str) -> anyhow::Result<()> {
+        // Fast-path self-connection guard for common textual addresses.
+        if let Some((host, port_str)) = addr.rsplit_once(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                let my_port = self.get_my_listening_port();
+                if port == my_port {
+                    let host_trimmed = host.trim().trim_matches(['[', ']']);
+                    if host_trimmed.eq_ignore_ascii_case("localhost")
+                        || host_trimmed == "127.0.0.1"
+                        || host_trimmed == "::1"
+                    {
+                        warn!("[P2P] Skipping localhost self-connection attempt: {}", addr);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Socket-level self-connection guard (same listening endpoint).
+        if let Ok(peer_socket) = addr.parse::<SocketAddr>() {
+            let my_port = self.get_my_listening_port();
+            if peer_socket.port() == my_port {
+                let peer_ip = peer_socket.ip().to_string();
+
+                if peer_socket.ip().is_loopback() {
+                    warn!("[P2P] Skipping loopback self-connection attempt: {}", addr);
+                    return Ok(());
+                }
+
+                if let Some(my_public_ip) = self.my_public_ip.lock().clone() {
+                    if peer_ip == my_public_ip {
+                        warn!("[P2P] Skipping public self-connection attempt: {}", addr);
+                        return Ok(());
+                    }
+                }
+
+                let my_bind_addr = self.my_bind_addr.lock().clone();
+                let is_wildcard_bind = my_bind_addr == "0.0.0.0" || my_bind_addr == "::";
+                if !is_wildcard_bind && !my_bind_addr.is_empty() && peer_ip == my_bind_addr {
+                    warn!("[P2P] Skipping bind-address self-connection attempt: {}", addr);
+                    return Ok(());
+                }
+            }
+        }
+
+        // Avoid reconnect storms: if this exact outbound peer is already connected,
+        // do not open another socket that would replace the existing sender.
+        if self.peers.lock().contains_key(addr) {
+            info!("[P2P] Skipping duplicate outbound connection to already-connected peer {}", addr);
+            return Ok(());
+        }
+
         let stream = TcpStream::connect(addr).await?;
         let peer_id = addr.to_string();
         self.spawn_peer_loop(stream, peer_id).await?;
@@ -595,6 +643,12 @@ impl PeerManager {
         stream: TcpStream,
         peer_id: PeerId,
     ) -> anyhow::Result<()> {
+        // Final duplicate guard against race conditions between parallel connect attempts.
+        if self.peers.lock().contains_key(&peer_id) {
+            info!("[P2P] Duplicate peer loop suppressed for {}", peer_id);
+            return Ok(());
+        }
+
         let (r, w) = tokio::io::split(stream);
 
         let reader = FramedRead::new(r, LengthDelimitedCodec::new());
