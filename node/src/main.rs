@@ -1544,6 +1544,34 @@ async fn mining_loop(
             break;
         }
 
+        // During synchronization, check if we're catching up with peers
+        // If yes, skip mining to allow blocks to be processed without lock contention
+        let peer_heights = p2p_handle.get_peer_heights();
+        let my_height = {
+            if let Ok(bc) = node_handle.bc.try_lock() {
+                if let Some(tip_hash) = &bc.chain_tip {
+                    if let Ok(Some(header)) = bc.load_header(tip_hash) {
+                        Some(header.index)
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(0)
+                }
+            } else {
+                None // Can't acquire lock, skip mining this round
+            }
+        };
+        
+        // Skip mining during sync if we're more than 5 blocks behind
+        if let (Some(my_h), Some(&peer_h)) = (my_height, peer_heights.values().max()) {
+            if peer_h > my_h + 5 {
+                info!("[MINING] Skipping mining during sync (local: {}, peer max: {})", my_h, peer_h);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        }
+
         // Snapshot pending txs + mining params while holding the lock briefly
         println!("[DEBUG] Mining: Attempting to acquire WRITE lock...");
         let (snapshot_txs, difficulty, prev_hash, index_snapshot, cancel_flag, hashrate_shared) = {
