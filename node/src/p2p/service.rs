@@ -393,14 +393,17 @@ impl P2PService {
                                             }
                                             Ok(false) => {
                                                 info!("[P2P] Fork block exists but our chain has more work, keeping current chain");
+                                                drop(bc);  // Release lock before continue
                                             }
                                             Err(reorg_err) => {
                                                 warn!("[WARN] Reorganization failed: {:?}", reorg_err);
+                                                drop(bc);  // Release lock before continue
                                             }
                                         }
                                     }
                                     Err(val_err) => {
                                         warn!("[WARN] Fork block validation failed: {:?}", val_err);
+                                        drop(bc);  // Release lock before continue
                                     }
                                 }
                                 
