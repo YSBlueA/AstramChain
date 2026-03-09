@@ -1139,7 +1139,20 @@ impl PeerManager {
             Version { version, height } => {
                 info!("{} sent version v{} height {}", peer_id, version, height);
                 let lock_start = std::time::Instant::now();
-                self.peer_heights.lock().insert(peer_id.clone(), height);
+                {
+                    let mut peer_heights = self.peer_heights.lock();
+                    let prev_height = peer_heights.get(&peer_id).copied().unwrap_or(0);
+
+                    // Keep handshake-discovered height if a legacy Version message reports zero.
+                    if prev_height > 0 && height == 0 {
+                        debug!(
+                            "[P2P] Ignoring zero Version height from {} (keeping {})",
+                            peer_id, prev_height
+                        );
+                    } else {
+                        peer_heights.insert(peer_id.clone(), height);
+                    }
+                }
                 if lock_start.elapsed().as_micros() > 100 {
                     info!(
                         "[P2P] 🔒 Version: peer_heights lock took {:?}",

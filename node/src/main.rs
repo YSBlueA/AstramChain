@@ -302,44 +302,20 @@ async fn main() {
     {
         let mut bc_guard = bc.lock().unwrap();
         
-        // Always count blocks for diagnostic purposes
+        // Always scan DB and recover tip to ensure correct height before sync
         let block_count = bc_guard.count_blocks();
         log::info!("📊 Database contains {} blocks", block_count);
         
-        if let Some(tip_hash) = &bc_guard.chain_tip {
-            // Tip exists - verify it's the highest block
-            if let Ok(Some(header)) = bc_guard.load_header(tip_hash) {
-                log::info!("✅ Chain tip verified at height {}", header.index);
-                
-                // Check for significant mismatch and auto-recover
-                if block_count > 100 && header.index + 1 < block_count as u64 / 2 {
-                    log::warn!(
-                        "⚠️  Potential issue: tip at height {} but {} blocks in DB",
-                        header.index, block_count
-                    );
-                    log::warn!("   Automatically triggering tip recovery...");
-                    if let Err(e) = bc_guard.recover_tip() {
-                        log::error!("Failed to recover tip: {}", e);
-                    } else {
-                        // Log the new tip after recovery
-                        if let Some(new_tip_hash) = &bc_guard.chain_tip {
-                            if let Ok(Some(new_header)) = bc_guard.load_header(new_tip_hash) {
-                                log::info!("🎉 Tip successfully recovered to height {}", new_header.index);
-                            }
-                        }
-                    }
-                }
-            } else {
-                log::warn!("⚠️  Chain tip points to missing block, attempting recovery...");
-                if let Err(e) = bc_guard.recover_tip() {
-                    log::error!("Failed to recover tip: {}", e);
-                }
-            }
+        if block_count == 0 {
+            log::info!("📭 Empty database - starting fresh blockchain");
         } else {
-            // No tip - check if there are blocks in DB that need recovery
-            log::info!("No tip found, checking if recovery needed...");
+            log::info!("🔍 Scanning database to find highest block...");
             if let Err(e) = bc_guard.recover_tip() {
-                log::debug!("No blocks to recover (fresh database): {}", e);
+                log::error!("❌ Failed to recover tip: {}", e);
+            } else if let Some(tip_hash) = &bc_guard.chain_tip {
+                if let Ok(Some(header)) = bc_guard.load_header(tip_hash) {
+                    log::info!("✅ Blockchain tip recovered: height {} (hash: {})", header.index, &tip_hash[..16]);
+                }
             }
         }
     }
@@ -1848,7 +1824,7 @@ async fn mining_loop(
                         // pending already cleared earlier
 
                         // Update P2P manager height
-                        p2p_handle.set_my_height(block.header.index + 1);
+                        p2p_handle.set_my_height(block.header.index);
 
                         // Track this block as recently mined (to ignore when received from peers)
                         let now = chrono::Utc::now().timestamp();

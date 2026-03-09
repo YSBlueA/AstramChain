@@ -118,8 +118,6 @@ impl P2PService {
 
         // headers handler - detect chain reorg from genesis
         let nh_headers = node_handle.clone();
-        let p2p_for_reset = p2p.clone();
-        let chain_for_reset = chain_state.clone();
         p2p.set_on_headers(move |peer_id, headers| {
             if headers.is_empty() {
                 return false;
@@ -149,29 +147,12 @@ impl P2PService {
                             );
                             log::warn!("   Our genesis:   {}", our_genesis_hash_str);
                             log::warn!("   Their genesis: {}", received_genesis_hash);
-                            log::warn!("🔄 Resetting chain and accepting new genesis...");
-                            
-                            // 체인 리셋 (현재 bc는 immutable이므로 drop 후 재취득)
-                            drop(bc);
-                            let mut bc_mut = nh_headers.bc.lock().unwrap();
-                            if let Err(e) = bc_mut.reset_chain() {
-                                log::error!("❌ Failed to reset chain: {:?}", e);
-                                return false;
-                            }
-                            drop(bc_mut);
-                            
-                            // 메모리 체인도 초기화
-                            let mut chain = chain_for_reset.lock().unwrap();
-                            chain.orphan_blocks.clear();
-                            chain.blockchain.clear();
-                            drop(chain);
-                            
-                            // P2P 높이도 초기화
-                            p2p_for_reset.set_my_height(0);
-                            
-                            log::info!("✅ Chain reset completed, ready to sync new genesis");
-                            // true 반환하여 새 genesis 블록들을 받도록 함
-                            return true;
+                            log::warn!(
+                                "❌ Rejecting peer {} due to incompatible genesis (keeping local chain)",
+                                peer_id
+                            );
+                            // Return false so manager drops this peer.
+                            return false;
                         }
                     }
                 }
@@ -251,7 +232,7 @@ impl P2PService {
         tokio::spawn(async move {
             info!("[P2P] 🔄 Sequential block processor task started");
             while let Some(block) = block_rx.recv().await {
-                info!("[P2P] 📦 Processing block #{} {} from queue", block.header.index, &block.hash[..16]);
+                debug!("[P2P] 📦 Processing block #{} {} from queue", block.header.index, &block.hash[..16]);
                 let handler_start = std::time::Instant::now();
                 
                 let state = nh_processor.clone();
@@ -364,18 +345,18 @@ impl P2PService {
                         let error_msg = format!("{:?}", e);
                         
                         if error_msg.contains("previous header not found") || error_msg.contains("fork detected") {
-                            info!("[P2P] Block #{} is orphan/fork: {}", block.header.index, error_msg);
+                            debug!("[P2P] Block #{} is orphan/fork: {}", block.header.index, error_msg);
                             
                             // For fork blocks, try to store and trigger reorganization
                             if error_msg.contains("fork detected") {
                                 // This is a fork block - parent exists but not on our chain tip
                                 // Store it separately and check if it creates a better chain
-                                info!("[P2P] 🔀 Fork block detected at height {}, attempting chain reorganization...", block.header.index);
+                                debug!("[P2P] 🔀 Fork block detected at height {}, attempting chain reorganization...", block.header.index);
                                 
                                 // Validate the fork block without chain tip check
                                 match bc.validate_fork_block(&block) {
                                     Ok(_) => {
-                                        info!("[P2P] ✅ Fork block validated, checking if reorg needed...");
+                                        debug!("[P2P] ✅ Fork block validated, checking if reorg needed...");
                                         
                                         // Try to reorganize to this fork
                                         match bc.reorganize_if_needed(&block.hash) {
@@ -388,11 +369,11 @@ impl P2PService {
                                                 chain.blockchain.push(block.clone());
                                                 chain.enforce_memory_limit();
                                                 
-                                                p2p_block.set_my_height(block.header.index + 1);
+                                                p2p_block.set_my_height(block.header.index);
                                                 info!("[INFO] Mining cancelled, restarted with new chain after reorg");
                                             }
                                             Ok(false) => {
-                                                info!("[P2P] Fork block exists but our chain has more work, keeping current chain");
+                                                debug!("[P2P] Fork block exists but our chain has more work, keeping current chain");
                                                 drop(bc);  // Release lock before continue
                                             }
                                             Err(reorg_err) => {
@@ -521,12 +502,12 @@ impl P2PService {
                             p2p_block.request_block_by_hash(&parent_hash);
                             
                         } else {
-                            warn!("[WARN] Invalid block from p2p: {:?}", e);
+                            debug!("[DEBUG] Invalid block from p2p: {:?}", e);
                         }
                     }
                 }
                 
-                info!("[P2P] ✅ Block #{} processed in {:?}", block.header.index, handler_start.elapsed());
+                debug!("[P2P] ✅ Block #{} processed in {:?}", block.header.index, handler_start.elapsed());
             }
             warn!("[P2P] Sequential block processor task ended");
         });
@@ -692,7 +673,7 @@ impl P2PService {
                         }
                     }
                     if sent_count > 0 {
-                        info!(
+                        debug!(
                             "[SYNC] Sent {} requested blocks to {} in-order",
                             sent_count, peer_id
                         );
@@ -751,7 +732,7 @@ impl P2PService {
                             processed_any = true;
 
                             // Update P2P manager height
-                            p2p_handle.set_my_height(block.header.index + 1);
+                            p2p_handle.set_my_height(block.header.index);
 
                             // Remove transactions from mempool
                             let block_txids: std::collections::HashSet<String> = block

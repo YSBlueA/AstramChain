@@ -730,7 +730,7 @@ pub async fn run_server(
                         chain.blockchain.push(block.clone());
                         chain.enforce_memory_limit();
                     }
-                    p2p.set_my_height(block.header.index + 1);
+                    p2p.set_my_height(block.header.index);
 
                     let now = chrono::Utc::now().timestamp();
                     {

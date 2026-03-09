@@ -342,7 +342,7 @@ impl Blockchain {
         
         put_batch(&self.db, batch)?;
         
-        log::info!("Fork block #{} stored in DB (hash: {})", block.header.index, &block.hash[..16]);
+        log::debug!("Fork block #{} stored in DB (hash: {})", block.header.index, &block.hash[..16]);
         
         Ok(())
     }
@@ -747,7 +747,7 @@ impl Blockchain {
 
         let next_bits = Self::target_to_compact(new_target);
 
-        log::info!(
+        log::debug!(
             "DWG3 retarget @{}: bits 0x{:08x} -> 0x{:08x}, actual={}s, target={}s, avg={:.1}s/block",
             current_index,
             previous_bits,
@@ -1125,7 +1125,7 @@ impl Blockchain {
         let current_work = self.calculate_chain_work(&current_tip)?;
         let new_work = self.calculate_chain_work(new_block_hash)?;
 
-        log::info!(
+        log::debug!(
             "Chain work comparison: current={} (hash={}), new={} (hash={})",
             current_work,
             &current_tip[..16],
@@ -1135,7 +1135,7 @@ impl Blockchain {
 
         // Keep current chain if it has equal or more work
         if current_work >= new_work {
-            log::info!("Current chain has more work, keeping it");
+            log::debug!("Current chain has more work, keeping it");
             return Ok(false);
         }
 
