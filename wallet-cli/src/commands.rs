@@ -225,8 +225,7 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
         return;
     }
 
-    let mut selected_inputs = vec![];
-    let mut input_sum = U256::zero();
+    let mut input_pool: Vec<(TransactionInput, U256)> = Vec::new();
 
     for (_i, u) in utxos.iter().enumerate() {
         let txid = u["txid"].as_str().unwrap().to_string();
@@ -266,16 +265,23 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
                 .unwrap_or_else(U256::zero)
         };
 
-        selected_inputs.push(TransactionInput {
+        input_pool.push((TransactionInput {
             txid,
             vout,
             pubkey: wallet.address.clone(),
             signature: None,
-        });
+        }, amt));
+    }
+
+    let mut selected_inputs: Vec<TransactionInput> = vec![];
+    let mut input_sum = U256::zero();
+    let mut cursor = 0usize;
+
+    while cursor < input_pool.len() && input_sum < amount_ram {
+        let (inp, amt) = input_pool[cursor].clone();
+        selected_inputs.push(inp);
         input_sum = input_sum + amt;
-        if input_sum >= amount_ram {
-            break;
-        }
+        cursor += 1;
     }
 
     if input_sum < amount_ram {
@@ -286,69 +292,111 @@ pub fn send_transaction(to: &str, amount_ram: U256) {
         );
         return;
     }
-
-    // Calculate estimated transaction size and fee
-    // Typical transaction structure (conservative estimate):
-    // - Base: ~100 bytes
-    // - Per input: ~150 bytes (txid, vout, pubkey, signature)
-    // - Per output: ~60 bytes (address, amount)
-    let estimated_tx_size = 100 + (selected_inputs.len() * 150) + (2 * 60); // Assume 2 outputs max
-    let fee = Astram_core::config::calculate_default_fee(estimated_tx_size);
-
-    println!("Transaction Details:");
-    println!("   Inputs: {} UTXO(s)", selected_inputs.len());
-    println!("   Estimated size: {} bytes", estimated_tx_size);
-    println!("   Fee: {} ASRM ({} ram)", ram_to_asrm(fee), fee);
-
-    // Check if we have enough for amount + fee
-    if input_sum < amount_ram + fee {
-        println!(
-            "[WARN] Insufficient balance for amount + fee: have {} ASRM, need {} ASRM",
-            ram_to_asrm(input_sum),
-            ram_to_asrm(amount_ram + fee)
-        );
-        return;
-    }
-
-    let mut outputs = vec![TransactionOutput::new(to.to_string(), amount_ram)];
-
-    let change = input_sum - amount_ram - fee;
-    if change > U256::zero() {
-        outputs.push(TransactionOutput::new(wallet.address.clone(), change));
-    } else {
-        println!("   No change (exact amount + fee)");
-    }
-
-    let mut tx = Transaction {
-        txid: "".to_string(),
-        inputs: selected_inputs,
-        outputs,
-        timestamp: chrono::Utc::now().timestamp(),
-    };
-
     // Step 5: Sign transaction (Ed25519)
     use Astram_core::crypto::WalletKeypair;
 
     let keypair = WalletKeypair::from_secret_hex(&wallet.secret_hex())
         .expect("Invalid secret key");
 
-    if let Err(e) = tx.sign(&keypair) {
-        println!("❌Failed to sign transaction: {}", e);
-        return;
+    // Build transaction with exact serialized size-based fee.
+    // If fee grows, keep adding UTXOs until amount + fee is covered.
+    let mut fee = U256::zero();
+    let mut final_tx: Option<Transaction> = None;
+    let mut final_tx_size: usize = 0;
+    let mut final_change = U256::zero();
+
+    for _ in 0..16 {
+        while input_sum < amount_ram + fee {
+            if cursor >= input_pool.len() {
+                println!(
+                    "[WARN] Insufficient balance for amount + fee: have {} ASRM, need {} ASRM",
+                    ram_to_asrm(input_sum),
+                    ram_to_asrm(amount_ram + fee)
+                );
+                return;
+            }
+            let (inp, amt) = input_pool[cursor].clone();
+            selected_inputs.push(inp);
+            input_sum = input_sum + amt;
+            cursor += 1;
+        }
+
+        let change = input_sum - amount_ram - fee;
+        let mut outputs = vec![TransactionOutput::new(to.to_string(), amount_ram)];
+        if change > U256::zero() {
+            outputs.push(TransactionOutput::new(wallet.address.clone(), change));
+        }
+
+        let mut candidate_tx = Transaction {
+            txid: "".to_string(),
+            inputs: selected_inputs.clone(),
+            outputs,
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        if let Err(e) = candidate_tx.sign(&keypair) {
+            println!("[ERROR] Failed to sign transaction: {}", e);
+            return;
+        }
+
+        match candidate_tx.verify_signatures() {
+            Ok(true) => {}
+            Ok(false) => {
+                println!("[ERROR] Signature verification failed after signing");
+                return;
+            }
+            Err(e) => {
+                println!("[ERROR] Signature verification error: {}", e);
+                return;
+            }
+        }
+
+        candidate_tx = candidate_tx.with_hashes();
+
+        let candidate_body = match bincode::encode_to_vec(&candidate_tx, *BINCODE_CONFIG) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("[ERROR] Failed to serialize transaction: {}", e);
+                return;
+            }
+        };
+
+        let candidate_size = candidate_body.len();
+        let candidate_fee = Astram_core::config::calculate_default_fee(candidate_size);
+
+        if candidate_fee > fee {
+            fee = candidate_fee;
+            continue;
+        }
+
+        final_tx = Some(candidate_tx);
+        final_tx_size = candidate_size;
+        final_change = change;
+        break;
     }
 
-    tx.verify_signatures()
-        .expect("Signature verification failed after signing");
+    let tx = match final_tx {
+        Some(t) => t,
+        None => {
+            println!("[ERROR] Failed to converge transaction fee calculation");
+            return;
+        }
+    };
 
-    // Step 6: Populate txid
-    tx = tx.with_hashes();
+    println!("Transaction Details:");
+    println!("   Inputs: {} UTXO(s)", tx.inputs.len());
+    println!("   Serialized size: {} bytes", final_tx_size);
+    println!("   Fee: {} ASRM ({} ram)", ram_to_asrm(fee), fee);
+    if final_change == U256::zero() {
+        println!("   No change (exact amount + fee)");
+    }
 
     println!("[OK] Transaction created successfully!");
     println!("   TXID (internal): {}", tx.txid);
     println!("   Amount: {} ASRM", ram_to_asrm(amount_ram));
     println!("   Fee: {} ASRM ({} ram)", ram_to_asrm(fee), fee);
-    if change > U256::zero() {
-        println!("   Change: {} ASRM", ram_to_asrm(change));
+    if final_change > U256::zero() {
+        println!("   Change: {} ASRM", ram_to_asrm(final_change));
     }
     println!(
         "Signature: {}",
