@@ -163,66 +163,55 @@ impl P2PService {
         });
 
         // getheaders handler - load headers from DB
+        //
+        // PERFORMANCE: Use index-based forward scan (O(locator + 200) DB reads) instead of
+        // walking the entire chain backwards (O(N) reads). The old approach loaded every block
+        // while holding bc lock, freezing P2P/RPC as the chain grew.
         let nh = node_handle.clone();
         p2p.set_on_getheaders(move |locator_hashes, _stop_hash| {
-            let mut headers = Vec::new();
-
             let bc = nh.bc.lock().unwrap();
 
-            // Get chain tip
-            let tip_hash = match &bc.chain_tip {
-                Some(h) => h.clone(),
-                None => return headers,
-            };
-
-            // Build full chain from tip backwards
-            let mut chain = Vec::new();
-            let mut current_hash = Some(tip_hash);
-            
-            while let Some(hash) = current_hash {
-                if let Ok(Some(header)) = bc.load_header(&hash) {
-                    chain.push(header.clone());
-                    if header.index == 0 {
-                        break;
-                    }
-                    current_hash = Some(header.previous_hash.clone());
-                } else {
-                    break;
-                }
-            }
-            
-            // Reverse to get genesis-first order
-            chain.reverse();
-
-            // Determine starting point
-            let start_index = if locator_hashes.is_empty() {
-                // No locator - start from genesis
+            // Step 1: determine the start index from the locator hashes.
+            // Each locator hash is loaded individually (fast O(1) DB lookup per entry).
+            let start_index: u64 = if locator_hashes.is_empty() {
                 0
             } else {
-                // Find first matching locator
-                let mut found_index = 0;
-                for loc_hash in &locator_hashes {
-                    let hash_hex = hex::encode(loc_hash);
-                    if let Some(pos) = chain.iter().position(|h| {
-                        if let Ok(computed) = Astram_core::block::compute_header_hash(h) {
-                            computed == hash_hex
-                        } else {
-                            false
-                        }
-                    }) {
-                        found_index = pos + 1; // Start from next block
+                let mut found = 0u64;
+                for loc_bytes in &locator_hashes {
+                    let hash_hex = hex::encode(loc_bytes);
+                    // load_header reads "b:{hash}" - one DB read, no chain walk
+                    if let Ok(Some(header)) = bc.load_header(&hash_hex) {
+                        found = header.index + 1;
                         break;
                     }
                 }
-                found_index
+                found
             };
 
-            // Return up to 200 headers starting from start_index
-            headers = chain.into_iter()
-                .skip(start_index)
-                .take(200)
-                .collect();
+            // Step 2: forward scan using index keys "i:{n}" → hash → header.
+            // At most 200 reads regardless of chain length.
+            let mut headers = Vec::new();
+            let mut index = start_index;
+            while headers.len() < 200 {
+                let key = format!("i:{}", index);
+                match bc.db.get(key.as_bytes()) {
+                    Ok(Some(hash_bytes)) => {
+                        if let Ok(hash) = String::from_utf8(hash_bytes.to_vec()) {
+                            if let Ok(Some(header)) = bc.load_header(&hash) {
+                                headers.push(header);
+                            }
+                        }
+                        index += 1;
+                    }
+                    _ => break,
+                }
+            }
 
+            debug!(
+                "[P2P] GetHeaders: returning {} headers starting at index {}",
+                headers.len(),
+                start_index
+            );
             headers
         });
 

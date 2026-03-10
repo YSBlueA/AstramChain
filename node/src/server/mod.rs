@@ -59,9 +59,14 @@ pub async fn run_server(
         .and(warp::get())
         .and(node_filter.clone())
         .and_then(|node: NodeHandle| async move {
+            // get_all_blocks() is O(N) DB scan — run off tokio threads to avoid blocking the runtime.
             let state = node.clone();
-            let bc = state.bc.lock().unwrap();
-            match bc.get_all_blocks() {
+            let result = tokio::task::spawn_blocking(move || {
+                state.bc.lock().unwrap().get_all_blocks()
+            })
+            .await
+            .expect("spawn_blocking panicked");
+            match result {
                 Ok(all_blocks) => {
                     let bincode_bytes =
                         bincode::encode_to_vec(&all_blocks, *BINCODE_CONFIG).unwrap();
@@ -181,10 +186,29 @@ pub async fn run_server(
         .and(node_filter.clone())
         .and_then(|node: NodeHandle| async move {
             let state = node.clone();
-            let bc = state.bc.lock().unwrap();
-            let blocks = bc.get_all_blocks().map(|b| b.len()).unwrap_or(0);
-            let transactions = bc.count_transactions().unwrap_or(0);
-            let volume = bc.calculate_total_volume().unwrap_or(U256::zero());
+            // Block count: read chain_tip header index (O(1)) — never load all blocks.
+            let blocks = {
+                let bc = state.bc.lock().unwrap();
+                if let Some(ref tip_hash) = bc.chain_tip.clone() {
+                    bc.load_header(tip_hash)
+                        .ok()
+                        .flatten()
+                        .map(|h| (h.index + 1) as usize)
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            };
+            // Transaction count and volume are slow full-DB scans; run off tokio threads.
+            let bc_arc = state.bc.clone();
+            let (transactions, volume) = tokio::task::spawn_blocking(move || {
+                let bc = bc_arc.lock().unwrap();
+                let txs = bc.count_transactions().unwrap_or(0);
+                let vol = bc.calculate_total_volume().unwrap_or(U256::zero());
+                (txs, vol)
+            })
+            .await
+            .unwrap_or((0, U256::zero()));
             log::info!(
                 "Counts endpoint - blocks: {}, transactions: {}, volume: {}",
                 blocks,
@@ -292,15 +316,20 @@ pub async fn run_server(
                     wallet_addr,
                 )
             };
-            // Get wallet balance OUTSIDE the lock (DB operation)
-            let _balance_start = std::time::Instant::now();
+            // Get wallet balance with spawn_blocking: full UTXO scan must not hold
+            // the bc Mutex on a tokio thread (would starve P2P and mining).
             let wallet_balance = {
-                node
-                    .bc
-                    .lock()
-                    .unwrap()
-                    .get_address_balance_from_db(&miner_address)
-                    .unwrap_or(U256::zero())
+                let bc_arc = node.bc.clone();
+                let addr = miner_address.clone();
+                tokio::task::spawn_blocking(move || {
+                    bc_arc
+                        .lock()
+                        .unwrap()
+                        .get_address_balance_from_db(&addr)
+                        .unwrap_or(U256::zero())
+                })
+                .await
+                .unwrap_or(U256::zero())
             };
 
             let connected_peers = peer_heights.len();

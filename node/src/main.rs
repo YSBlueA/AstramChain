@@ -1864,21 +1864,25 @@ async fn mining_loop(
                 let error_msg = format!("{}", e);
 
                 // Check if mining was cancelled (not an actual error)
-                if error_msg.contains("cancelled") || error_msg.contains("Mining cancelled") {
+                let is_cancelled = error_msg.contains("cancelled") || error_msg.contains("Mining cancelled");
+                if is_cancelled {
                     info!("[INFO] Mining cancelled (normal)");
                 } else {
                     eprintln!("[ERROR] Mining error: {}", e);
+                    // Only reset hashrate on actual errors, not cancellations.
+                    // On cancellation we keep the last known hashrate so the dashboard
+                    // doesn't flicker to 0 H/s during the brief inter-round gap.
+                    *node_handle.mining.current_hashrate.lock().unwrap() = 0.0;
                 }
 
-                // Mark mining as inactive and reset hashrate
+                // Mark mining as inactive
                 node_handle
                     .mining
                     .active
                     .store(false, OtherOrdering::SeqCst);
-                *node_handle.mining.current_hashrate.lock().unwrap() = 0.0;
 
                 // Only requeue txs if it wasn't a cancellation
-                if !error_msg.contains("cancelled") && !error_msg.contains("Mining cancelled") {
+                if !is_cancelled {
                     let mut mempool = node_handle.mempool.lock().unwrap();
                     for tx in snapshot_txs.into_iter() {
                         mempool.pending.push(tx);
