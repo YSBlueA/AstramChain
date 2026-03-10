@@ -168,7 +168,6 @@ pub fn load_wallet() -> Wallet {
     }
     
     println!("[INFO] Wallet loaded: {}", wallet.address);
-    println!("Private key: {}", wallet_json.secret_key);
 
     wallet
 }
