@@ -256,6 +256,7 @@ pub async fn run_server(
                 seen_tx,
                 chain_tip,
                 genesis_hash,
+                chain_height,
                 is_mining,
                 current_difficulty,
                 hashrate,
@@ -266,7 +267,7 @@ pub async fn run_server(
                 let state = node.clone();
 
                 let _bc_lock_start = std::time::Instant::now();
-                let (chain_tip, genesis_hash) = {
+                let (chain_tip, genesis_hash, chain_height) = {
                     let bc = state.bc.lock().unwrap();
                     let tip = bc.chain_tip
                         .as_ref()
@@ -279,7 +280,14 @@ pub async fn run_server(
                         .flatten()
                         .and_then(|bytes| String::from_utf8(bytes).ok())
                         .unwrap_or_else(|| "none".to_string());
-                    (tip, genesis)
+                    // Authoritative height: read directly from chain_tip header (1 DB lookup).
+                    // This is never 0 due to P2P lock contention.
+                    let height = bc.chain_tip
+                        .as_ref()
+                        .and_then(|tip_hash| bc.load_header(tip_hash).ok().flatten())
+                        .map(|h| h.index)
+                        .unwrap_or(0);
+                    (tip, genesis, height)
                 };
                 let _chain_lock_start = std::time::Instant::now();
                 let memory_count = {
@@ -308,6 +316,7 @@ pub async fn run_server(
                     seen_count,
                     chain_tip,
                     genesis_hash,
+                    chain_height,
                     state.mining.active.load(std::sync::atomic::Ordering::Relaxed),
                     diff,
                     hash,
@@ -333,7 +342,10 @@ pub async fn run_server(
             };
 
             let connected_peers = peer_heights.len();
-            let block_height = my_height;
+            // Use chain_height from bc.chain_tip (authoritative DB source) for the
+            // displayed height. my_height from P2P is only used for network sync status
+            // and can show 0 when P2P locks are contended.
+            let block_height = chain_height;
             let network_id = p2p.get_network_id().to_string();
             let chain_id = p2p.get_chain_id();
             let network_magic = format!("0x{:08x}", p2p.get_network_magic());
