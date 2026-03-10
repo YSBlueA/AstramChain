@@ -34,6 +34,7 @@ impl P2PService {
         self.connect_initial_peers().await;
         self.register_handlers(node_handle.clone(), chain_state.clone());
         self.start_block_sync(node_handle.clone());
+        self.start_peer_maintenance();
 
         Ok(())
     }
@@ -781,6 +782,58 @@ impl P2PService {
         if !chain.orphan_blocks.is_empty() {
             info!("Orphan pool size: {}", chain.orphan_blocks.len());
         }
+    }
+
+    /// 피어 유지 관리: heartbeat(Ping) 전송 + 피어 수 부족 시 재연결
+    fn start_peer_maintenance(&self) {
+        let p2p = self.manager.clone();
+
+        // Heartbeat: 30초마다 Ping을 보내서 NAT/방화벽 연결 유지
+        let p2p_ping = p2p.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(30)).await;
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let peer_count = p2p_ping.get_connected_peer_count();
+                if peer_count > 0 {
+                    debug!("[P2P] Sending Ping to {} peers (heartbeat)", peer_count);
+                    p2p_ping.broadcast_ping(nonce);
+                }
+            }
+        });
+
+        // 재연결: 30초마다 피어 수 확인, 부족하면 저장된 피어에 재연결 시도
+        tokio::spawn(async move {
+            // 초기 연결 후 30초 대기
+            sleep(Duration::from_secs(30)).await;
+
+            loop {
+                let peer_count = p2p.get_connected_peer_count();
+
+                if peer_count < MAX_OUTBOUND / 2 {
+                    info!(
+                        "[P2P] Low peer count ({}/{}), attempting reconnect to saved peers...",
+                        peer_count,
+                        MAX_OUTBOUND
+                    );
+
+                    let saved = p2p.load_saved_peers();
+                    for sp in saved.into_iter().take(MAX_OUTBOUND) {
+                        let p2p_clone = p2p.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = p2p_clone.connect_peer(&sp.addr).await {
+                                warn!("[P2P] Reconnect to {} failed: {:?}", sp.addr, e);
+                            }
+                        });
+                    }
+                }
+
+                sleep(Duration::from_secs(30)).await;
+            }
+        });
     }
 
     fn start_block_sync(&self, node_handle: NodeHandle) {

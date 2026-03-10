@@ -1335,8 +1335,15 @@ impl PeerManager {
                 }
             }
 
-            _ => {
-                info!("{} sent {:?}", peer_id, msg);
+            Ping(nonce) => {
+                debug!("[P2P] Ping from {}", peer_id);
+                if let Some(tx) = self.peers.lock().get(&peer_id) {
+                    let _ = tx.send(P2pMessage::Pong(nonce));
+                }
+            }
+
+            Pong(_nonce) => {
+                debug!("[P2P] Pong from {}", peer_id);
             }
         }
     }
@@ -1493,6 +1500,19 @@ impl PeerManager {
                 locator_hashes: locator_hashes.clone(),
                 stop_hash: stop_hash.clone(),
             });
+        }
+    }
+
+    /// 현재 연결된 피어 수 반환
+    pub fn get_connected_peer_count(&self) -> usize {
+        self.peers.lock().len()
+    }
+
+    /// 모든 피어에게 Ping 전송 (연결 유지용)
+    pub fn broadcast_ping(&self, nonce: u64) {
+        let peers = self.peers.lock().clone();
+        for (_, tx) in peers {
+            let _ = tx.send(P2pMessage::Ping(nonce));
         }
     }
 

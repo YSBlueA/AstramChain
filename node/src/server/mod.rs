@@ -723,7 +723,10 @@ pub async fn run_server(
             };
 
             let state = node.clone();
-            match state.bc.lock().unwrap().validate_and_insert_block(&block) {
+            // bc 락을 먼저 획득하고 validate 완료 후 즉시 해제
+            // (bc 락을 잡은 채로 chain_state 락을 잡으면 데드락 발생 가능)
+            let validate_result = state.bc.lock().unwrap().validate_and_insert_block(&block);
+            match validate_result {
                 Ok(_) => {
                     {
                         let mut chain = chain_state.lock().unwrap();

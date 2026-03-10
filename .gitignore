@@ -22,6 +22,7 @@ explorer/web/public/
 .vscode/
 .history/
 *.code-workspace
+.claude/
 
 # JetBrains (CLion / IntelliJ / RustRover)
 .idea/
