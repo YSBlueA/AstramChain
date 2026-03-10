@@ -1216,6 +1216,17 @@ impl PeerManager {
                         return;
                     }
 
+                    // 피어 높이 업데이트: 수신된 헤더 중 가장 높은 인덱스로 갱신
+                    if let Some(last_hdr) = headers.last() {
+                        let reported_height = last_hdr.index + 1;
+                        let mut peer_heights = self.peer_heights.lock();
+                        let current = peer_heights.get(&peer_id).copied().unwrap_or(0);
+                        if reported_height > current {
+                            peer_heights.insert(peer_id.clone(), reported_height);
+                            debug!("[P2P] Updated peer {} height: {} -> {}", peer_id, current, reported_height);
+                        }
+                    }
+
                     // request full blocks for these headers
                     let mut hashes: Vec<Vec<u8>> = Vec::new();
                     for hdr in headers.iter() {

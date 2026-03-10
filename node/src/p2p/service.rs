@@ -840,7 +840,9 @@ impl P2PService {
         let p2p = self.manager.clone();
         tokio::spawn(async move {
             let mut last_syncing_state = false;  // 이전 동기화 상태 추적
-            
+            let mut last_height_refresh = std::time::Instant::now();
+            const HEIGHT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
             loop {
                 // 1. 내 현재 블록 높이 확인
                 let my_height = {
@@ -891,6 +893,22 @@ impl P2PService {
                     if last_syncing_state {
                         p2p.set_syncing(false);
                         last_syncing_state = false;
+                    }
+
+                    // 동기화 완료 후에도 60초마다 피어 높이 갱신 (GetHeaders 전송)
+                    if last_height_refresh.elapsed() >= HEIGHT_REFRESH_INTERVAL {
+                        last_height_refresh = std::time::Instant::now();
+                        let mut locator = Vec::new();
+                        {
+                            let bc = node_handle.bc.lock().unwrap();
+                            if let Some(tip_hash) = &bc.chain_tip {
+                                if let Ok(bytes) = hex::decode(tip_hash) {
+                                    locator.push(bytes);
+                                }
+                            }
+                        }
+                        debug!("[P2P] Periodic height refresh: requesting headers from peers");
+                        p2p.request_headers_from_peers(locator, None);
                     }
                 }
 
