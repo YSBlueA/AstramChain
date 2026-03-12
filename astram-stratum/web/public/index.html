@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Mine ASRM on the Astram Mining Pool. GPU-optimized Blake3-DAG algorithm. PPLNS payouts. Join now and start earning." />
+  <title>Astram Mining Pool — pool.Astramchin.com</title>
+  <style>
+    :root {
+      --bg:       #080c14;
+      --bg2:      #0d1420;
+      --surface:  #111827;
+      --border:   #1f2d3d;
+      --accent:   #3b82f6;
+      --accent2:  #8b5cf6;
+      --green:    #10b981;
+      --yellow:   #f59e0b;
+      --text:     #e2e8f0;
+      --muted:    #64748b;
+      --radius:   12px;
+    }
+    *{box-sizing:border-box;margin:0;padding:0;}
+    html{scroll-behavior:smooth;}
+    body{
+      background:var(--bg);
+      color:var(--text);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      font-size:15px;
+      line-height:1.6;
+      overflow-x:hidden;
+    }
+    a{color:var(--accent);text-decoration:none;}
+    a:hover{text-decoration:underline;}
+
+    /* ── Noise overlay ── */
+    body::before{
+      content:'';
+      position:fixed;inset:0;
+      background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+      pointer-events:none;z-index:0;
+    }
+
+    /* ── Navigation ── */
+    nav{
+      position:sticky;top:0;z-index:100;
+      background:rgba(8,12,20,.85);
+      backdrop-filter:blur(12px);
+      border-bottom:1px solid var(--border);
+      padding:0 2rem;
+      height:60px;
+      display:flex;align-items:center;justify-content:space-between;
+    }
+    .nav-logo{
+      display:flex;align-items:center;gap:10px;
+      font-size:17px;font-weight:700;color:var(--text);
+    }
+    .nav-logo span{color:var(--accent);}
+    .nav-links{display:flex;gap:2rem;list-style:none;}
+    .nav-links a{color:var(--muted);font-size:14px;transition:color .2s;}
+    .nav-links a:hover{color:var(--text);text-decoration:none;}
+    .nav-cta{
+      background:var(--accent);
+      color:#fff;padding:7px 18px;
+      border-radius:8px;font-size:14px;font-weight:600;
+      transition:opacity .2s;
+    }
+    .nav-cta:hover{opacity:.85;text-decoration:none;}
+
+    /* ── Hero ── */
+    .hero{
+      position:relative;
+      min-height:92vh;
+      display:flex;align-items:center;justify-content:center;
+      text-align:center;
+      padding:5rem 1rem;
+      overflow:hidden;
+    }
+    .hero-bg{
+      position:absolute;inset:0;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% -10%, rgba(59,130,246,.18) 0%, transparent 70%),
+        radial-gradient(ellipse 50% 40% at 80% 80%, rgba(139,92,246,.12) 0%, transparent 60%);
+    }
+    .hero-grid{
+      position:absolute;inset:0;
+      background-image:
+        linear-gradient(rgba(59,130,246,.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(59,130,246,.04) 1px, transparent 1px);
+      background-size:60px 60px;
+    }
+    .hero-content{position:relative;max-width:760px;}
+    .hero-badge{
+      display:inline-flex;align-items:center;gap:8px;
+      background:rgba(59,130,246,.1);
+      border:1px solid rgba(59,130,246,.3);
+      border-radius:100px;
+      padding:5px 16px;font-size:13px;color:var(--accent);
+      margin-bottom:1.5rem;
+    }
+    .hero-badge .dot{
+      width:7px;height:7px;border-radius:50%;
+      background:var(--green);animation:pulse 2s infinite;
+    }
+    @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+    h1{
+      font-size:clamp(2.4rem,6vw,4.5rem);
+      font-weight:800;
+      line-height:1.1;
+      letter-spacing:-.02em;
+      margin-bottom:1.2rem;
+    }
+    h1 span{
+      background:linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+      background-clip:text;
+    }
+    .hero-sub{
+      font-size:1.15rem;color:var(--muted);
+      max-width:520px;margin:0 auto 2.5rem;
+    }
+    .hero-actions{
+      display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;
+    }
+    .btn{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:12px 28px;border-radius:10px;
+      font-size:15px;font-weight:600;
+      transition:transform .15s, box-shadow .15s;
+      cursor:pointer;
+    }
+    .btn:hover{transform:translateY(-2px);text-decoration:none;}
+    .btn-primary{
+      background:linear-gradient(135deg, var(--accent), var(--accent2));
+      color:#fff;
+      box-shadow:0 4px 20px rgba(59,130,246,.35);
+    }
+    .btn-primary:hover{box-shadow:0 6px 28px rgba(59,130,246,.5);}
+    .btn-secondary{
+      background:var(--surface);
+      border:1px solid var(--border);
+      color:var(--text);
+    }
+    .btn-secondary:hover{border-color:var(--accent);}
+
+    /* ── Live stats bar ── */
+    .stats-bar{
+      background:var(--surface);
+      border-top:1px solid var(--border);
+      border-bottom:1px solid var(--border);
+      padding:1.2rem 2rem;
+      display:flex;gap:0;overflow-x:auto;
+    }
+    .stat-item{
+      flex:1;min-width:150px;
+      text-align:center;
+      padding:0 1.5rem;
+      border-right:1px solid var(--border);
+    }
+    .stat-item:last-child{border-right:none;}
+    .stat-value{font-size:1.7rem;font-weight:700;color:var(--accent);}
+    .stat-label{font-size:12px;color:var(--muted);margin-top:2px;}
+
+    /* ── Sections ── */
+    section{padding:5rem 1rem;position:relative;}
+    .container{max-width:1100px;margin:0 auto;}
+    .section-tag{
+      display:inline-block;
+      background:rgba(59,130,246,.08);
+      border:1px solid rgba(59,130,246,.2);
+      border-radius:100px;
+      padding:3px 14px;font-size:12px;font-weight:600;
+      color:var(--accent);text-transform:uppercase;letter-spacing:.08em;
+      margin-bottom:1rem;
+    }
+    h2{font-size:clamp(1.6rem,3.5vw,2.4rem);font-weight:700;margin-bottom:.6rem;}
+    .section-sub{color:var(--muted);font-size:1rem;max-width:540px;}
+
+    /* ── Steps ── */
+    .steps{
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+      gap:1.5rem;
+      margin-top:3rem;
+    }
+    .step{
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      padding:1.8rem;
+      position:relative;
+      transition:border-color .2s, transform .2s;
+    }
+    .step:hover{border-color:rgba(59,130,246,.4);transform:translateY(-3px);}
+    .step-num{
+      width:36px;height:36px;
+      background:linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius:50%;
+      display:flex;align-items:center;justify-content:center;
+      font-size:14px;font-weight:800;color:#fff;
+      margin-bottom:1rem;
+    }
+    .step h3{font-size:1.05rem;font-weight:700;margin-bottom:.5rem;}
+    .step p{color:var(--muted);font-size:.9rem;}
+
+    /* ── Download cards ── */
+    .dl-grid{
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
+      gap:1.5rem;margin-top:3rem;
+    }
+    .dl-card{
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      padding:1.8rem;
+      display:flex;flex-direction:column;gap:1rem;
+      transition:border-color .2s;
+    }
+    .dl-card:hover{border-color:var(--accent);}
+    .dl-icon{
+      width:48px;height:48px;
+      background:rgba(59,130,246,.1);
+      border-radius:10px;
+      display:flex;align-items:center;justify-content:center;
+    }
+    .dl-icon svg{width:24px;height:24px;stroke:var(--accent);}
+    .dl-card h3{font-size:1.05rem;font-weight:700;}
+    .dl-card p{color:var(--muted);font-size:.875rem;flex:1;}
+    .dl-btn{
+      display:inline-flex;align-items:center;gap:8px;
+      background:rgba(59,130,246,.1);
+      border:1px solid rgba(59,130,246,.25);
+      color:var(--accent);
+      padding:9px 18px;border-radius:8px;
+      font-size:13px;font-weight:600;
+      transition:background .2s;
+      width:fit-content;
+    }
+    .dl-btn:hover{background:rgba(59,130,246,.2);text-decoration:none;}
+
+    /* ── Stratum config box ── */
+    .config-box{
+      background:var(--bg2);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      padding:1.5rem;margin-top:2rem;
+      font-family:monospace;font-size:13px;
+    }
+    .config-box .comment{color:var(--muted);}
+    .config-box .key{color:#7dd3fc;}
+    .config-box .val{color:#86efac;}
+    .config-box .cmd{color:#f9a8d4;}
+
+    /* ── PPLNS explainer ── */
+    .pplns-flow{
+      display:flex;align-items:center;gap:0;
+      margin-top:2.5rem;flex-wrap:wrap;
+    }
+    .pplns-step{
+      flex:1;min-width:160px;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      padding:1.4rem;text-align:center;
+    }
+    .pplns-arrow{
+      font-size:1.4rem;color:var(--muted);
+      padding:0 .5rem;
+    }
+    .pplns-icon{font-size:2rem;margin-bottom:.5rem;}
+    .pplns-step h4{font-size:.9rem;font-weight:700;margin-bottom:.3rem;}
+    .pplns-step p{font-size:.8rem;color:var(--muted);}
+
+    /* ── Feature list ── */
+    .features{
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
+      gap:1rem;margin-top:3rem;
+    }
+    .feature{
+      display:flex;gap:.8rem;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:1.2rem;
+    }
+    .feature-icon{
+      width:36px;height:36px;flex-shrink:0;
+      background:rgba(16,185,129,.1);
+      border-radius:8px;
+      display:flex;align-items:center;justify-content:center;
+      font-size:1.1rem;
+    }
+    .feature h4{font-size:.9rem;font-weight:700;margin-bottom:.2rem;}
+    .feature p{font-size:.8rem;color:var(--muted);}
+
+    /* ── FAQ ── */
+    .faq{display:flex;flex-direction:column;gap:.8rem;margin-top:2.5rem;}
+    details{
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:1.1rem 1.4rem;
+    }
+    summary{
+      font-weight:600;cursor:pointer;
+      list-style:none;
+      display:flex;justify-content:space-between;align-items:center;
+    }
+    summary::after{content:'＋';color:var(--muted);transition:transform .2s;}
+    details[open] summary::after{content:'－';}
+    details p{margin-top:.8rem;color:var(--muted);font-size:.9rem;}
+
+    /* ── Footer ── */
+    footer{
+      background:var(--surface);
+      border-top:1px solid var(--border);
+      padding:3rem 2rem 2rem;
+    }
+    .footer-inner{
+      max-width:1100px;margin:0 auto;
+      display:grid;grid-template-columns:2fr 1fr 1fr;gap:3rem;
+    }
+    .footer-brand p{color:var(--muted);font-size:.875rem;margin-top:.8rem;max-width:260px;}
+    .footer-col h4{font-size:.85rem;font-weight:700;color:var(--muted);
+      text-transform:uppercase;letter-spacing:.08em;margin-bottom:1rem;}
+    .footer-col ul{list-style:none;display:flex;flex-direction:column;gap:.5rem;}
+    .footer-col a{color:var(--muted);font-size:.875rem;}
+    .footer-col a:hover{color:var(--text);}
+    .footer-bottom{
+      max-width:1100px;margin:2rem auto 0;
+      padding-top:1.5rem;
+      border-top:1px solid var(--border);
+      display:flex;justify-content:space-between;
+      align-items:center;
+      color:var(--muted);font-size:.8rem;
+      flex-wrap:wrap;gap:.5rem;
+    }
+
+    /* ── Responsive ── */
+    @media(max-width:700px){
+      .nav-links{display:none;}
+      .footer-inner{grid-template-columns:1fr;}
+      .pplns-arrow{display:none;}
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-logo">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+    </svg>
+    Astram<span>Pool</span>
+  </div>
+  <ul class="nav-links">
+    <li><a href="#start">Get Started</a></li>
+    <li><a href="#download">Download</a></li>
+    <li><a href="#payout">Payouts</a></li>
+    <li><a href="#faq">FAQ</a></li>
+    <li><a href="/dashboard">Pool Stats</a></li>
+  </ul>
+  <a class="btn nav-cta" href="#download">Start Mining</a>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-grid"></div>
+  <div class="hero-content">
+    <div class="hero-badge"><span class="dot"></span> Live · Block <span id="h-height">…</span></div>
+    <h1>Mine <span>ASRM</span> with<br>the Astram Pool</h1>
+    <p class="hero-sub">
+      GPU-accelerated Blake3-DAG mining. PPLNS payouts. Low 1% fee.
+      Connect your GPU and start earning Astram in minutes.
+    </p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#download">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download Miner
+      </a>
+      <a class="btn btn-secondary" href="/dashboard">View Pool Stats →</a>
+    </div>
+  </div>
+</section>
+
+<!-- LIVE STATS BAR -->
+<div class="stats-bar">
+  <div class="stat-item"><div class="stat-value" id="s-blocks">—</div><div class="stat-label">Blocks Found</div></div>
+  <div class="stat-item"><div class="stat-value" id="s-miners">—</div><div class="stat-label">Active Miners</div></div>
+  <div class="stat-item"><div class="stat-value" id="s-shares">—</div><div class="stat-label">Total Shares</div></div>
+  <div class="stat-item"><div class="stat-value" id="s-fee">1%</div><div class="stat-label">Pool Fee</div></div>
+  <div class="stat-item"><div class="stat-value">PPLNS</div><div class="stat-label">Payout Method</div></div>
+  <div class="stat-item"><div class="stat-value">~2 min</div><div class="stat-label">Block Time</div></div>
+</div>
+
+<!-- GET STARTED -->
+<section id="start">
+  <div class="container">
+    <span class="section-tag">Quick Start</span>
+    <h2>Start mining in 3 steps</h2>
+    <p class="section-sub">Get your GPU contributing in under 5 minutes.</p>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Download the miner</h3>
+        <p>Download the Astram node for your OS. It includes the GPU miner and wallet tools. An NVIDIA GPU with 4 GB+ VRAM is required for pool mining.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>Create your wallet</h3>
+        <p>Run <code style="color:var(--accent);background:rgba(59,130,246,.1);padding:1px 6px;border-radius:4px;">wallet-cli new</code> to generate a fresh address. This is where your ASRM rewards will be sent.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>Launch with pool config</h3>
+        <p>Run the start script (included in the download). Your miner will connect to <code style="color:var(--green);">pool.Astramchin.com:3333</code> and begin submitting shares immediately.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- DOWNLOAD -->
+<section id="download" style="background:var(--bg2);border-top:1px solid var(--border);border-bottom:1px solid var(--border);">
+  <div class="container">
+    <span class="section-tag">Downloads</span>
+    <h2>Get the Astram Miner</h2>
+    <p class="section-sub">
+      One download. Extract and double-click to start mining.
+      Everything — GPU miner, wallet, pool launcher — is included.
+    </p>
+
+    <!-- ── Hero download card ───────────────────────────────────────────────── -->
+    <div id="dl-hero" style="
+      margin-top:2.5rem;
+      background:linear-gradient(135deg,rgba(59,130,246,.12),rgba(139,92,246,.08));
+      border:1px solid rgba(59,130,246,.35);
+      border-radius:16px;
+      padding:2.4rem 2.8rem;
+      display:flex;align-items:center;gap:2.5rem;flex-wrap:wrap;
+    ">
+      <!-- Left: icon + version -->
+      <div style="display:flex;align-items:center;gap:1.4rem;flex:1;min-width:220px;">
+        <div style="
+          width:64px;height:64px;flex-shrink:0;
+          background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.3);
+          border-radius:14px;display:flex;align-items:center;justify-content:center;
+        ">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </div>
+        <div>
+          <div style="font-size:1.25rem;font-weight:800;line-height:1.2;">Astram Miner</div>
+          <div style="display:flex;align-items:center;gap:.6rem;margin-top:.3rem;flex-wrap:wrap;">
+            <span id="release-tag" style="
+              background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.3);
+              color:var(--green);border-radius:100px;
+              padding:2px 10px;font-size:12px;font-weight:700;
+            ">Loading…</span>
+            <span id="release-date" style="font-size:12px;color:var(--muted);"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: OS buttons -->
+      <div style="display:flex;flex-direction:column;gap:.75rem;min-width:220px;">
+        <!-- detected OS hint -->
+        <div id="os-hint" style="font-size:12px;color:var(--muted);text-align:right;"></div>
+
+        <!-- Windows -->
+        <a id="dl-win"
+           href="https://github.com/YSBlueA/AstramChain/releases/latest"
+           target="_blank"
+           style="
+             display:flex;align-items:center;justify-content:space-between;
+             gap:.8rem;
+             background:linear-gradient(135deg,var(--accent),var(--accent2));
+             color:#fff;padding:12px 20px;border-radius:10px;
+             font-size:14px;font-weight:700;
+             box-shadow:0 4px 20px rgba(59,130,246,.35);
+             transition:transform .15s,box-shadow .15s;
+             text-decoration:none;
+           "
+           onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 28px rgba(59,130,246,.5)'"
+           onmouseout="this.style.transform='';this.style.boxShadow='0 4px 20px rgba(59,130,246,.35)'"
+        >
+          <span style="display:flex;align-items:center;gap:.6rem;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="8" height="8"/><rect x="13" y="3" width="8" height="8"/>
+              <rect x="3" y="13" width="8" height="8"/><rect x="13" y="13" width="8" height="8"/>
+            </svg>
+            Windows x64
+          </span>
+          <span id="dl-win-size" style="font-size:11px;opacity:.8;"></span>
+        </a>
+
+        <!-- Linux -->
+        <a id="dl-linux"
+           href="https://github.com/YSBlueA/AstramChain/releases/latest"
+           target="_blank"
+           style="
+             display:flex;align-items:center;justify-content:space-between;
+             gap:.8rem;
+             background:var(--surface);
+             border:1px solid rgba(59,130,246,.35);
+             color:var(--text);padding:11px 20px;border-radius:10px;
+             font-size:14px;font-weight:600;
+             transition:border-color .2s,transform .15s;
+             text-decoration:none;
+           "
+           onmouseover="this.style.borderColor='var(--accent)';this.style.transform='translateY(-2px)'"
+           onmouseout="this.style.borderColor='rgba(59,130,246,.35)';this.style.transform=''"
+        >
+          <span style="display:flex;align-items:center;gap:.6rem;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="2" y1="12" x2="22" y2="12"/>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
+            Linux x64
+          </span>
+          <span id="dl-linux-size" style="font-size:11px;color:var(--muted);"></span>
+        </a>
+
+        <!-- View all releases -->
+        <a href="https://github.com/YSBlueA/AstramChain/releases" target="_blank"
+           style="text-align:center;font-size:12px;color:var(--muted);text-decoration:none;">
+          All releases on GitHub →
+        </a>
+      </div>
+    </div>
+
+    <!-- ── After download steps ─────────────────────────────────────────────── -->
+    <div style="
+      margin-top:1.5rem;
+      background:var(--surface);border:1px solid var(--border);
+      border-radius:var(--radius);padding:1.3rem 1.8rem;
+      display:flex;align-items:center;gap:2rem;flex-wrap:wrap;
+    ">
+      <div style="display:flex;align-items:center;gap:1.5rem;flex:1;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:.5rem;font-size:13px;color:var(--muted);">
+          <span style="color:var(--accent);font-weight:700;font-size:15px;">1</span> Extract ZIP / tar.gz
+        </div>
+        <span style="color:var(--border);font-size:18px;">→</span>
+        <div style="display:flex;align-items:center;gap:.5rem;font-size:13px;color:var(--muted);">
+          <span style="color:var(--accent);font-weight:700;font-size:15px;">2</span>
+          Windows: run <code style="color:var(--green);background:rgba(16,185,129,.08);padding:1px 6px;border-radius:4px;font-size:11px;">start-mining-pool.bat</code>
+          &nbsp;·&nbsp; Linux: <code style="color:var(--green);background:rgba(16,185,129,.08);padding:1px 6px;border-radius:4px;font-size:11px;">./start-mining-pool.sh</code>
+        </div>
+        <span style="color:var(--border);font-size:18px;">→</span>
+        <div style="display:flex;align-items:center;gap:.5rem;font-size:13px;color:var(--muted);">
+          <span style="color:var(--accent);font-weight:700;font-size:15px;">3</span> Mining starts automatically
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Pool stratum config snippet ──────────────────────────────────────── -->
+    <h3 style="margin-top:2.5rem;margin-bottom:.5rem;font-size:1rem;">Manual Connection Settings</h3>
+    <p style="color:var(--muted);font-size:.875rem;margin-bottom:1rem;">The launch scripts configure these automatically. Manual reference only:</p>
+    <div class="config-box">
+      <div><span class="comment"># Stratum endpoint</span></div>
+      <div><span class="key">POOL_URL</span>  = <span class="val">stratum+tcp://pool.Astramchin.com:3333</span></div>
+      <div style="margin-top:.5rem;"><span class="comment"># Worker  (your wallet address . rig name)</span></div>
+      <div><span class="key">WORKER</span>    = <span class="val">YOUR_ASRM_ADDRESS</span>.<span class="val">rig1</span></div>
+      <div style="margin-top:.5rem;"><span class="comment"># Password — any value</span></div>
+      <div><span class="key">PASSWORD</span>  = <span class="val">x</span></div>
+      <div style="margin-top:1rem;"><span class="comment"># Command line equivalent</span></div>
+      <div><span class="cmd">Astram-node</span> <span class="key">--pool</span> <span class="val">pool.Astramchin.com:3333</span> <span class="key">--wallet</span> <span class="val">YOUR_ADDRESS</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- PAYOUT MODEL -->
+<section id="payout">
+  <div class="container">
+    <span class="section-tag">Rewards</span>
+    <h2>PPLNS — How you earn ASRM</h2>
+    <p class="section-sub">Pay Per Last N Shares. Every share you submit counts toward the next block reward. No luck-based volatility.</p>
+
+    <div class="pplns-flow">
+      <div class="pplns-step">
+        <div class="pplns-icon">⛏️</div>
+        <h4>You Submit Shares</h4>
+        <p>Your GPU sends valid proof-of-work hashes to the pool every ~15 seconds.</p>
+      </div>
+      <div class="pplns-arrow">→</div>
+      <div class="pplns-step">
+        <div class="pplns-icon">📊</div>
+        <h4>Pool Tracks Window</h4>
+        <p>Pool keeps the last 10,000 shares. Your proportion determines your cut.</p>
+      </div>
+      <div class="pplns-arrow">→</div>
+      <div class="pplns-step">
+        <div class="pplns-icon">🎯</div>
+        <h4>Block Found</h4>
+        <p>When the pool finds a valid block, the 8 ASRM reward is split by share weight.</p>
+      </div>
+      <div class="pplns-arrow">→</div>
+      <div class="pplns-step">
+        <div class="pplns-icon">💰</div>
+        <h4>You Get Paid</h4>
+        <p>Your balance updates immediately. 1% pool fee deducted. Withdrawals anytime.</p>
+      </div>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">⚡</div>
+        <div>
+          <h4>Instant Balance Update</h4>
+          <p>Credits applied the moment a block is confirmed.</p>
+        </div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🔒</div>
+        <div>
+          <h4>Non-Custodial</h4>
+          <p>Balances are tracked on-chain. You control your wallet keys.</p>
+        </div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📉</div>
+        <div>
+          <h4>1% Fee Only</h4>
+          <p>One of the lowest fees in the ecosystem.</p>
+        </div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🖥️</div>
+        <div>
+          <h4>GPU-Optimized DAG</h4>
+          <p>Blake3 + 4 GB memory-hard DAG resists ASIC dominance.</p>
+        </div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🌐</div>
+        <div>
+          <h4>Open Source</h4>
+          <p>Fully auditable Rust code on GitHub.</p>
+        </div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📈</div>
+        <div>
+          <h4>VarDiff</h4>
+          <p>Pool auto-adjusts your difficulty to keep shares flowing smoothly.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section id="faq" style="background:var(--bg2);border-top:1px solid var(--border);">
+  <div class="container">
+    <span class="section-tag">FAQ</span>
+    <h2>Frequently Asked Questions</h2>
+
+    <div class="faq">
+      <details>
+        <summary>What GPU do I need?</summary>
+        <p>Any NVIDIA GPU with at least 4 GB VRAM is supported. The algorithm uses a 4 GB memory-hard DAG, so AMD GPUs and CPUs are not currently supported. GTX 1650 Super, RTX 2060, and newer cards work well.</p>
+      </details>
+      <details>
+        <summary>How is the block reward distributed?</summary>
+        <p>The pool uses PPLNS (Pay Per Last N Shares) with a window of 10,000 shares. When a block is found, the 8 ASRM block reward (minus 1% pool fee) is distributed proportionally to everyone who contributed shares in the window. Miners with more shares in the window earn more.</p>
+      </details>
+      <details>
+        <summary>What is the minimum payout?</summary>
+        <p>Balances accumulate in your account until you request a withdrawal. There is no automatic minimum threshold — you decide when to withdraw via the wallet-cli tool.</p>
+      </details>
+      <details>
+        <summary>How do I check my balance?</summary>
+        <p>Visit the <a href="/dashboard">Pool Dashboard</a> and search for your address in the Miners table. You can also check via the API: <code style="color:var(--accent);">GET http://pool.Astramchin.com:8080/payments</code>.</p>
+      </details>
+      <details>
+        <summary>What is the block time?</summary>
+        <p>Astram targets a 2-minute (120-second) block time. Difficulty adjusts every block using the DWG3 algorithm, so the block time stays stable regardless of network hashrate changes.</p>
+      </details>
+      <details>
+        <summary>Is there a stratum port for high-difficulty miners?</summary>
+        <p>Currently all miners connect to port 3333. The pool uses VarDiff, automatically adjusting your work difficulty based on your GPU's hash rate. No manual configuration needed.</p>
+      </details>
+      <details>
+        <summary>Where is the source code?</summary>
+        <p>The full node, miner, pool server, and wallet are all open source at <a href="https://github.com/YSBlueA/AstramChain" target="_blank">github.com/YSBlueA/AstramChain</a>.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <div class="nav-logo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </svg>
+        Astram<span style="color:var(--accent);">Pool</span>
+      </div>
+      <p>GPU mining pool for the Astram blockchain. Blake3-DAG algorithm. PPLNS payouts. 1% fee.</p>
+    </div>
+    <div class="footer-col">
+      <h4>Pool</h4>
+      <ul>
+        <li><a href="#start">Get Started</a></li>
+        <li><a href="#download">Downloads</a></li>
+        <li><a href="#payout">Payout Info</a></li>
+        <li><a href="/dashboard">Live Stats</a></li>
+      </ul>
+    </div>
+    <div class="footer-col">
+      <h4>Links</h4>
+      <ul>
+        <li><a href="https://github.com/YSBlueA/AstramChain" target="_blank">GitHub</a></li>
+        <li><a href="#faq">FAQ</a></li>
+        <li><a href="mailto:support@Astramchin.com">Support</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>© 2025 Astram Mining Pool · pool.Astramchin.com</span>
+    <span>Stratum: <code style="color:var(--accent);">pool.Astramchin.com:3333</code></span>
+  </div>
+</footer>
+
+<script>
+  const API = 'http://pool.Astramchin.com:8080'; // Pool stats API
+
+  async function loadLiveStats() {
+    try {
+      const [stats, miners] = await Promise.all([
+        fetch(API + '/stats').then(r => r.json()),
+        fetch(API + '/miners').then(r => r.json()),
+      ]);
+      document.getElementById('s-blocks').textContent = stats.blocks_found.toLocaleString();
+      document.getElementById('s-shares').textContent = stats.total_shares_accepted.toLocaleString();
+      const active = (miners || []).filter(m => m.shares_in_window > 0).length;
+      document.getElementById('s-miners').textContent = active;
+    } catch { /* pool might not be reachable from CDN */ }
+
+    try {
+      const s = await fetch(API + '/stats').then(r => r.json());
+      // rough height estimate from blocks found (real height from node status would be better)
+      document.getElementById('h-height').textContent =
+        s.blocks_found > 0 ? '#' + s.blocks_found : 'live';
+    } catch {}
+  }
+
+  loadLiveStats();
+  setInterval(loadLiveStats, 30_000);
+
+  // ── GitHub latest release info ────────────────────────────────────────────
+  const GH_REPO = 'YSBlueA/AstramChain';
+  const GH_API  = `https://api.github.com/repos/${GH_REPO}/releases/latest`;
+  const GH_BASE = `https://github.com/${GH_REPO}/releases/latest`;
+
+  function fmtBytes(b) {
+    if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+    return (b / 1024).toFixed(0) + ' KB';
+  }
+
+  // Detect visitor OS and highlight matching button
+  function detectOS() {
+    const ua = navigator.userAgent || '';
+    if (/Win/i.test(ua)) return 'windows';
+    if (/Linux/i.test(ua) && !/Android/i.test(ua)) return 'linux';
+    return null;
+  }
+
+  function applyOSHint() {
+    const os = detectOS();
+    const hint = document.getElementById('os-hint');
+    const winBtn = document.getElementById('dl-win');
+    const lnxBtn = document.getElementById('dl-linux');
+    if (os === 'windows') {
+      if (hint) hint.textContent = 'Detected: Windows';
+      // make windows button pulse briefly
+      winBtn.style.animation = 'pulse 1.5s ease 2';
+    } else if (os === 'linux') {
+      if (hint) hint.textContent = 'Detected: Linux';
+      // elevate linux button to primary style
+      lnxBtn.style.background = 'linear-gradient(135deg,var(--accent),var(--accent2))';
+      lnxBtn.style.color = '#fff';
+      lnxBtn.style.boxShadow = '0 4px 20px rgba(59,130,246,.35)';
+      lnxBtn.style.border = 'none';
+      winBtn.style.background = 'var(--surface)';
+      winBtn.style.color = 'var(--text)';
+      winBtn.style.border = '1px solid rgba(59,130,246,.35)';
+      winBtn.style.boxShadow = 'none';
+    }
+  }
+
+  async function loadRelease() {
+    try {
+      const rel = await fetch(GH_API, {
+        headers: { Accept: 'application/vnd.github+json' }
+      }).then(r => r.json());
+
+      if (!rel || !rel.tag_name) return;
+
+      // Tag + date
+      document.getElementById('release-tag').textContent = rel.tag_name;
+      const d = rel.published_at
+        ? new Date(rel.published_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+        : '';
+      if (d) document.getElementById('release-date').textContent = 'Released ' + d;
+
+      // Find platform-specific assets
+      const assets = rel.assets || [];
+      const win = assets.find(a => /windows|win/i.test(a.name) && /zip|exe/i.test(a.name));
+      const lnx = assets.find(a => /linux/i.test(a.name) && /tar|gz|zip/i.test(a.name));
+
+      // Windows button
+      const dlWin = document.getElementById('dl-win');
+      const dlWinSize = document.getElementById('dl-win-size');
+      if (win) {
+        dlWin.href = win.browser_download_url;
+        if (dlWinSize) dlWinSize.textContent = fmtBytes(win.size);
+      }
+
+      // Linux button
+      const dlLinux = document.getElementById('dl-linux');
+      const dlLinuxSize = document.getElementById('dl-linux-size');
+      if (lnx) {
+        dlLinux.href = lnx.browser_download_url;
+        if (dlLinuxSize) dlLinuxSize.textContent = fmtBytes(lnx.size);
+      }
+    } catch { /* GitHub API unreachable — fallback hrefs stay */ }
+  }
+
+  applyOSHint();
+  loadRelease();
+</script>
+</body>
+</html>

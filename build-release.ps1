@@ -101,6 +101,17 @@ foreach ($exe in $Executables) {
     }
 }
 
+# Copy pool mining scripts
+Write-Info "Copying pool mining scripts..."
+$PoolScriptsDir = "astram-stratum/scripts/windows"
+if (Test-Path "$PoolScriptsDir/pool-mining.ps1") {
+    Copy-Item "$PoolScriptsDir/pool-mining.ps1"      "$ReleaseDir/pool-mining.ps1"
+    Copy-Item "$PoolScriptsDir/start-mining-pool.bat" "$ReleaseDir/start-mining-pool.bat"
+    Write-Success "Copied pool mining scripts"
+} else {
+    Write-Host "WARN  Pool scripts not found at $PoolScriptsDir (skipping)" -ForegroundColor Yellow
+}
+
 # Create launcher script
 Write-Info "Creating launcher script..."
 $LauncherContent = @'
@@ -268,7 +279,18 @@ Write-Info "Creating README..."
 $ReadmeContent = @'
 # Astram for Windows
 
-## Quick Start
+## Option A — Join the Mining Pool (Recommended)
+
+Double-click `start-mining-pool.bat` (or right-click > Run with PowerShell on `pool-mining.ps1`).
+
+The script will:
+1. Detect your NVIDIA GPU
+2. Create a wallet automatically if you don't have one
+3. Connect to the pool at `pool.Astramchin.com:3333`
+
+Pool dashboard: https://pool.Astramchin.com
+
+## Option B — Run Your Own Node
 
 1. Extract this archive to a folder
 2. Open PowerShell in this directory
@@ -290,6 +312,8 @@ $ReadmeContent = @'
 
 ## Components
 
+- **start-mining-pool.bat** - One-click pool mining launcher
+- **pool-mining.ps1** - PowerShell pool mining script
 - **Astram-node.exe** - Main blockchain node (HTTP: 19533, P2P: 8335)
 - **Astram-dns.exe** - DNS discovery server (Port: 8053)
 - **Astram-explorer.exe** - Web-based blockchain explorer (Port: 3000)
@@ -310,7 +334,7 @@ $ReadmeContent = @'
 
 ## Data Directory
 
-Astram stores blockchain data in: `%USERPROFILE%\.Astram`
+Astram stores blockchain data in: `%APPDATA%\Astram`
 
 To reset the blockchain, delete this directory while no nodes are running.
 
@@ -325,7 +349,8 @@ Edit `config/nodeSettings.conf` to choose a network:
 
 ## Support
 
-For issues and documentation, visit: https://github.com/yourorg/Astram
+- GitHub: https://github.com/YSBlueA/AstramChain
+- Pool: https://pool.Astramchin.com
 '@
 
 Set-Content -Path "$ReleaseDir/README.md" -Value $ReadmeContent

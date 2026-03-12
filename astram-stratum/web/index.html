@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Astram Mining Pool</title>
+  <style>
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --border:    #30363d;
+      --accent:    #58a6ff;
+      --green:     #3fb950;
+      --yellow:    #d29922;
+      --red:       #f85149;
+      --text:      #c9d1d9;
+      --muted:     #8b949e;
+      --radius:    8px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 56px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .logo svg { width: 28px; height: 28px; }
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+    .refresh-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 4px 12px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 12px;
+      transition: border-color .2s, color .2s;
+    }
+    .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Layout ── */
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem 1rem;
+    }
+    section { margin-bottom: 2.5rem; }
+    h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 1rem;
+    }
+
+    /* ── Stat cards ── */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.2rem 1.4rem;
+    }
+    .card-label { font-size: 12px; color: var(--muted); margin-bottom: .4rem; }
+    .card-value { font-size: 26px; font-weight: 700; color: var(--text); }
+    .card-sub   { font-size: 11px; color: var(--muted); margin-top: .3rem; }
+    .card-value.green { color: var(--green); }
+    .card-value.accent { color: var(--accent); }
+    .card-value.yellow { color: var(--yellow); }
+
+    /* ── Stratum connect banner ── */
+    .connect-banner {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.4rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .connect-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .connect-url {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-family: monospace;
+      color: var(--accent);
+      font-size: 13px;
+      user-select: all;
+    }
+    .copy-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 3px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: all .2s;
+    }
+    .copy-btn:hover { border-color: var(--green); color: var(--green); }
+
+    /* ── Tables ── */
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow-x: auto;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      text-align: left;
+      padding: .6rem 1rem;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      border-bottom: 1px solid var(--border);
+    }
+    tbody tr {
+      border-bottom: 1px solid #21262d;
+      transition: background .15s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(255,255,255,.03); }
+    td {
+      padding: .55rem 1rem;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    td.mono { font-family: monospace; font-size: 12px; }
+    td.green { color: var(--green); }
+    td.yellow { color: var(--yellow); }
+    td.accent { color: var(--accent); }
+    td.muted  { color: var(--muted); font-size: 12px; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge-green  { background: rgba(63,185,80,.15);  color: var(--green); }
+    .badge-yellow { background: rgba(210,153,34,.15); color: var(--yellow); }
+    .badge-red    { background: rgba(248,81,73,.15);  color: var(--red); }
+
+    /* ── Empty state ── */
+    .empty {
+      padding: 2.5rem;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    /* ── Tabs ── */
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 1rem;
+    }
+    .tab {
+      padding: .5rem 1.2rem;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 13px;
+      border-bottom: 2px solid transparent;
+      transition: all .2s;
+    }
+    .tab.active { color: var(--accent); border-color: var(--accent); }
+    .tab:hover:not(.active) { color: var(--text); }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 1.2rem 2rem;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <a class="logo" href="#">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+    </svg>
+    Astram Pool
+  </a>
+  <div style="display:flex;align-items:center;gap:1rem;">
+    <div class="status-pill">
+      <div class="dot" id="online-dot"></div>
+      <span id="status-text">Connecting...</span>
+    </div>
+    <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- Connect -->
+  <section>
+    <h2>Connect Your Miner</h2>
+    <div class="connect-banner">
+      <span class="connect-label">Stratum URL</span>
+      <span class="connect-url" id="stratum-url">stratum+tcp://loading...</span>
+      <button class="copy-btn" onclick="copyUrl()">Copy</button>
+      <span class="connect-label" style="margin-left:.5rem;">Worker</span>
+      <span class="connect-url">YOUR_ADDRESS.rig1</span>
+      <span class="connect-label" style="margin-left:.5rem;">Password</span>
+      <span class="connect-url">x</span>
+    </div>
+  </section>
+
+  <!-- Stats -->
+  <section>
+    <h2>Pool Statistics</h2>
+    <div class="cards">
+      <div class="card">
+        <div class="card-label">Blocks Found</div>
+        <div class="card-value green" id="stat-blocks">—</div>
+        <div class="card-sub">lifetime</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Accepted Shares</div>
+        <div class="card-value accent" id="stat-accepted">—</div>
+        <div class="card-sub">lifetime</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Rejected Shares</div>
+        <div class="card-value" id="stat-rejected">—</div>
+        <div class="card-sub" id="stat-reject-pct"></div>
+      </div>
+      <div class="card">
+        <div class="card-label">PPLNS Window</div>
+        <div class="card-value yellow" id="stat-window">—</div>
+        <div class="card-sub">recent shares</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Active Miners</div>
+        <div class="card-value" id="stat-miners">—</div>
+        <div class="card-sub">with shares in window</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tabs: Miners / Blocks / Payments -->
+  <section>
+    <div class="tabs">
+      <div class="tab active" onclick="showTab('miners', this)">Miners</div>
+      <div class="tab" onclick="showTab('blocks', this)">Found Blocks</div>
+      <div class="tab" onclick="showTab('payments', this)">Pending Payments</div>
+    </div>
+
+    <!-- Miners tab -->
+    <div id="tab-miners">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Miner Address</th>
+              <th>Shares (accepted)</th>
+              <th>Shares (rejected)</th>
+              <th>In Window</th>
+              <th>Pending Balance</th>
+              <th>Last Share</th>
+            </tr>
+          </thead>
+          <tbody id="miners-body">
+            <tr><td colspan="6" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Blocks tab -->
+    <div id="tab-blocks" style="display:none;">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Height</th>
+              <th>Block Hash</th>
+              <th>Reward</th>
+              <th>Finder</th>
+              <th>Shares in Window</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="blocks-body">
+            <tr><td colspan="6" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Payments tab -->
+    <div id="tab-payments" style="display:none;">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Miner Address</th>
+              <th>Pending Balance (ASRM)</th>
+              <th>Balance (wei)</th>
+            </tr>
+          </thead>
+          <tbody id="payments-body">
+            <tr><td colspan="3" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  Astram Mining Pool &nbsp;·&nbsp; Auto-refreshes every 30s &nbsp;·&nbsp;
+  <span id="last-update">—</span>
+</footer>
+
+<script>
+  // ── Config ──────────────────────────────────────────────────────────────────
+  const API = '';   // same origin — stats server serves this page
+  const STRATUM_PORT = 3333;
+
+  // ── State ───────────────────────────────────────────────────────────────────
+  let online = false;
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+  function fmt(n)   { return Number(n).toLocaleString(); }
+  function pct(a,b) { return b > 0 ? ((a/b)*100).toFixed(1)+'%' : '0%'; }
+  function shortHash(h) {
+    return h && h.length > 12 ? h.slice(0,8)+'…'+h.slice(-6) : (h||'—');
+  }
+  function weiToAsrm(hexWei) {
+    try {
+      const wei = BigInt(hexWei);
+      const divisor = 10n ** 18n;
+      const whole = wei / divisor;
+      const frac  = (wei % divisor) * 10000n / divisor;
+      return whole.toString() + '.' + frac.toString().padStart(4,'0');
+    } catch { return '—'; }
+  }
+  function timeAgo(ts) {
+    if (!ts) return '—';
+    const d = Math.floor(Date.now()/1000) - ts;
+    if (d < 60)   return d + 's ago';
+    if (d < 3600) return Math.floor(d/60) + 'm ago';
+    if (d < 86400)return Math.floor(d/3600) + 'h ago';
+    return Math.floor(d/86400) + 'd ago';
+  }
+  function setOnline(v) {
+    online = v;
+    document.getElementById('online-dot').style.background = v ? 'var(--green)' : 'var(--red)';
+    document.getElementById('status-text').textContent = v ? 'Online' : 'Unreachable';
+  }
+
+  // ── Stratum URL ─────────────────────────────────────────────────────────────
+  (function() {
+    const host = location.hostname || '127.0.0.1';
+    document.getElementById('stratum-url').textContent =
+      `stratum+tcp://${host}:${STRATUM_PORT}`;
+  })();
+
+  function copyUrl() {
+    const txt = document.getElementById('stratum-url').textContent;
+    navigator.clipboard.writeText(txt).then(() => {
+      const b = document.querySelector('.copy-btn');
+      b.textContent = '✓ Copied';
+      setTimeout(() => b.textContent = 'Copy', 1500);
+    });
+  }
+
+  // ── Tab switching ───────────────────────────────────────────────────────────
+  function showTab(name, el) {
+    ['miners','blocks','payments'].forEach(t => {
+      document.getElementById('tab-'+t).style.display = t === name ? '' : 'none';
+    });
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+  }
+
+  // ── Fetch helpers ────────────────────────────────────────────────────────────
+  async function fetchJSON(path) {
+    const r = await fetch(API + path);
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  }
+
+  // ── Load stats ───────────────────────────────────────────────────────────────
+  async function loadStats() {
+    const d = await fetchJSON('/stats');
+    document.getElementById('stat-blocks').textContent   = fmt(d.blocks_found);
+    document.getElementById('stat-accepted').textContent = fmt(d.total_shares_accepted);
+    document.getElementById('stat-window').textContent   = fmt(d.pplns_window_shares);
+    const rej = d.total_shares_rejected;
+    const tot = d.total_shares_accepted + rej;
+    document.getElementById('stat-rejected').textContent  = fmt(rej);
+    document.getElementById('stat-reject-pct').textContent = pct(rej,tot) + ' reject rate';
+  }
+
+  // ── Load miners ──────────────────────────────────────────────────────────────
+  async function loadMiners() {
+    const miners = await fetchJSON('/miners');
+    document.getElementById('stat-miners').textContent =
+      miners.filter(m => m.shares_in_window > 0).length;
+
+    const body = document.getElementById('miners-body');
+    if (!miners.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty">No miners yet.</td></tr>';
+      return;
+    }
+    miners.sort((a,b) => b.shares_in_window - a.shares_in_window);
+    body.innerHTML = miners.map(m => {
+      const asrm = weiToAsrm(m.balance);
+      const bal  = parseFloat(asrm) > 0 ? asrm : '<span class="muted">0.0000</span>';
+      const inWin = m.shares_in_window > 0
+        ? `<span class="badge badge-green">${fmt(m.shares_in_window)}</span>`
+        : `<span class="muted">0</span>`;
+      return `<tr>
+        <td class="mono accent">${m.address}</td>
+        <td class="green">${fmt(m.shares_accepted)}</td>
+        <td>${fmt(m.shares_rejected)}</td>
+        <td>${inWin}</td>
+        <td class="mono">${bal}</td>
+        <td class="muted">${timeAgo(m.last_share_at)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ── Load blocks ──────────────────────────────────────────────────────────────
+  async function loadBlocks() {
+    const blocks = await fetchJSON('/blocks');
+    const body = document.getElementById('blocks-body');
+    if (!blocks.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty">No blocks found yet. Keep mining!</td></tr>';
+      return;
+    }
+    body.innerHTML = blocks.map(b => {
+      const asrm = weiToAsrm(b.reward);
+      return `<tr>
+        <td class="accent">#${fmt(b.height)}</td>
+        <td class="mono muted">${shortHash(b.hash)}</td>
+        <td class="yellow">${asrm} ASRM</td>
+        <td class="mono muted">${shortHash(b.finder)}</td>
+        <td><span class="badge badge-yellow">${fmt(b.shares_in_window)}</span></td>
+        <td class="muted">${timeAgo(b.timestamp)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ── Load payments ─────────────────────────────────────────────────────────────
+  async function loadPayments() {
+    const payments = await fetchJSON('/payments');
+    const entries  = Object.entries(payments);
+    const body = document.getElementById('payments-body');
+    if (!entries.length) {
+      body.innerHTML = '<tr><td colspan="3" class="empty">No pending payments.</td></tr>';
+      return;
+    }
+    entries.sort((a,b) => {
+      try { return Number(BigInt(b[1]) - BigInt(a[1])); } catch { return 0; }
+    });
+    body.innerHTML = entries.map(([addr, wei]) => {
+      const asrm = weiToAsrm(wei);
+      const positive = parseFloat(asrm) > 0;
+      return `<tr>
+        <td class="mono accent">${addr}</td>
+        <td class="${positive ? 'yellow' : 'muted'}">${asrm} ASRM</td>
+        <td class="mono muted">${wei}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ── Load all ──────────────────────────────────────────────────────────────────
+  async function loadAll() {
+    try {
+      await Promise.all([loadStats(), loadMiners(), loadBlocks(), loadPayments()]);
+      setOnline(true);
+      document.getElementById('last-update').textContent =
+        'Updated ' + new Date().toLocaleTimeString();
+    } catch(e) {
+      setOnline(false);
+      console.warn('Pool API unreachable:', e);
+    }
+  }
+
+  // ── Auto-refresh every 30s ────────────────────────────────────────────────────
+  loadAll();
+  setInterval(loadAll, 30_000);
+</script>
+</body>
+</html>

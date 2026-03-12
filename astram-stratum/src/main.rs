@@ -1,13 +1,22 @@
+mod session;
+mod share_validator;
+mod shares;
+mod vardiff;
+
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use futures::{SinkExt, StreamExt};
 use astram_config::config::Config;
-use Astram_core::block::{Block, BlockHeader, compute_header_hash, compute_merkle_root};
+use Astram_core::block::{Block, BlockHeader, compute_merkle_root};
 use Astram_core::config::initial_block_reward;
 use Astram_core::transaction::{BINCODE_CONFIG, Transaction};
 use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use session::MinerSession;
+use share_validator::{ShareResult, initial_pool_difficulty, pool_diff_to_target, validate_share};
+use shares::{FoundBlock, Share, ShareTracker};
+use vardiff::{VarDiffConfig, check_vardiff};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
@@ -15,6 +24,68 @@ use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 use tokio_util::codec::{Framed, LinesCodec};
 use warp::Filter;
+
+// ─── Pool configuration ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct PoolConfig {
+    node_rpc_url: String,
+    stratum_bind: String,
+    gbt_bind: String,
+    stats_bind: String,
+    pool_address: String,
+    pool_fee_percent: f64,
+    pplns_window: usize,
+    vardiff: VarDiffConfig,
+}
+
+impl PoolConfig {
+    fn from_env(cfg: &Config) -> Result<Self> {
+        let node_rpc_url =
+            std::env::var("NODE_RPC_URL").unwrap_or_else(|_| cfg.node_rpc_url.clone());
+
+        let pool_address = std::env::var("POOL_ADDRESS")
+            .ok()
+            .or_else(|| load_pool_address(cfg).ok())
+            .ok_or_else(|| anyhow!("POOL_ADDRESS not set and wallet missing"))?;
+
+        Ok(Self {
+            node_rpc_url,
+            stratum_bind: std::env::var("STRATUM_BIND")
+                .unwrap_or_else(|_| "0.0.0.0:3333".to_string()),
+            gbt_bind: std::env::var("GBT_BIND")
+                .unwrap_or_else(|_| "0.0.0.0:8332".to_string()),
+            stats_bind: std::env::var("STATS_BIND")
+                .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+            pool_address,
+            pool_fee_percent: std::env::var("POOL_FEE_PERCENT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0),
+            pplns_window: std::env::var("PPLNS_WINDOW")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10_000),
+            vardiff: VarDiffConfig {
+                min_diff: std::env::var("VARDIFF_MIN")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1),
+                max_diff: std::env::var("VARDIFF_MAX")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(32),
+                target_share_time: std::env::var("VARDIFF_TARGET_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(15.0),
+                ..VarDiffConfig::default()
+            },
+        })
+    }
+}
+
+// ─── Node RPC client ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct NodeClient {
@@ -35,18 +106,6 @@ struct ChainStatus {
     tip_hash: String,
 }
 
-#[derive(Debug, Clone)]
-struct MiningTemplate {
-    job_id: String,
-    height: u64,
-    prev_hash: String,
-    difficulty: u32,
-    timestamp: i64,
-    merkle_root: String,
-    transactions: Vec<Transaction>,
-    coinbase_value: U256,
-}
-
 #[derive(Deserialize)]
 struct MempoolResponse {
     transactions_b64: String,
@@ -59,50 +118,6 @@ struct SubmitBlockResponse {
     #[serde(rename = "hash")]
     _hash: Option<String>,
     message: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct JsonRpcRequest {
-    id: Value,
-    method: String,
-    params: Option<Value>,
-}
-
-#[derive(Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
-    id: Value,
-    result: Option<Value>,
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-}
-
-impl JsonRpcResponse {
-    fn success(id: Value, result: Value) -> Self {
-        Self {
-            jsonrpc: "1.0".to_string(),
-            id,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    fn error(id: Value, code: i32, message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: "1.0".to_string(),
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message: message.into(),
-            }),
-        }
-    }
 }
 
 impl NodeClient {
@@ -137,11 +152,7 @@ impl NodeClient {
             .unwrap_or("none")
             .to_string();
 
-        Ok(ChainStatus {
-            height,
-            difficulty,
-            tip_hash,
-        })
+        Ok(ChainStatus { height, difficulty, tip_hash })
     }
 
     async fn fetch_mempool(&self) -> Result<MempoolSnapshot> {
@@ -155,7 +166,6 @@ impl NodeClient {
             .map_err(|e| anyhow!("invalid mempool bincode: {}", e))?;
 
         let total_fees = parse_u256(&resp.total_fees).unwrap_or_else(U256::zero);
-
         Ok(MempoolSnapshot { txs, total_fees })
     }
 
@@ -177,11 +187,24 @@ impl NodeClient {
         if resp.status == "ok" {
             Ok(())
         } else {
-            Err(anyhow!(
-                resp.message.unwrap_or_else(|| "submit failed".to_string())
-            ))
+            Err(anyhow!(resp.message.unwrap_or_else(|| "submit failed".to_string())))
         }
     }
+}
+
+// ─── Mining template ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct MiningTemplate {
+    job_id: String,
+    height: u64,
+    prev_hash: String,
+    difficulty: u32,   // compact bits – network difficulty
+    pool_diff: u32,    // leading zeros – pool share difficulty
+    timestamp: i64,
+    merkle_root: String,
+    transactions: Vec<Transaction>,
+    coinbase_value: U256,
 }
 
 fn parse_u256(value: &str) -> Option<U256> {
@@ -189,25 +212,6 @@ fn parse_u256(value: &str) -> Option<U256> {
         return U256::from_str_radix(hex, 16).ok();
     }
     U256::from_dec_str(value).ok()
-}
-
-fn target_from_difficulty(difficulty: u32) -> String {
-    let zeros = difficulty.min(64) as usize;
-    let rest = 64usize.saturating_sub(zeros);
-    format!("{}{}", "0".repeat(zeros), "f".repeat(rest))
-}
-
-fn load_pool_address(cfg: &Config) -> Result<String> {
-    let wallet_path = cfg.wallet_path_resolved();
-    let wallet_file = std::fs::read_to_string(wallet_path)
-        .map_err(|e| anyhow!("failed to read wallet file: {}", e))?;
-    let wallet: Value = serde_json::from_str(&wallet_file)
-        .map_err(|e| anyhow!("failed to parse wallet JSON: {}", e))?;
-    wallet
-        .get("address")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("wallet address missing"))
 }
 
 async fn build_template(
@@ -218,7 +222,7 @@ async fn build_template(
     let status = client.fetch_status().await?;
     let mempool = client.fetch_mempool().await?;
 
-    let height = status.height as u64;
+    let height = status.height + 1;
     let prev_hash = if status.tip_hash == "none" {
         "0".repeat(64)
     } else {
@@ -227,19 +231,22 @@ async fn build_template(
 
     let base_reward = initial_block_reward();
     let coinbase_value = base_reward + mempool.total_fees;
-
     let coinbase = Transaction::coinbase(pool_address, coinbase_value).with_hashes();
+
     let mut all_txs = vec![coinbase];
     all_txs.extend(mempool.txs);
 
     let txids: Vec<String> = all_txs.iter().map(|t| t.txid.clone()).collect();
     let merkle_root = compute_merkle_root(&txids);
 
+    let pool_diff = initial_pool_difficulty(status.difficulty);
+
     Ok(MiningTemplate {
         job_id,
         height,
         prev_hash,
         difficulty: status.difficulty,
+        pool_diff,
         timestamp: chrono::Utc::now().timestamp(),
         merkle_root,
         transactions: all_txs,
@@ -247,37 +254,56 @@ async fn build_template(
     })
 }
 
-fn build_block_from_template(template: &MiningTemplate, nonce: u64) -> Result<Block> {
-    let header = BlockHeader {
+fn build_header_for_nonce(template: &MiningTemplate, nonce: u64) -> BlockHeader {
+    BlockHeader {
         index: template.height,
         previous_hash: template.prev_hash.clone(),
         merkle_root: template.merkle_root.clone(),
         timestamp: template.timestamp,
         nonce,
         difficulty: template.difficulty,
-    };
-
-    let hash = compute_header_hash(&header)?;
-    if !hash.starts_with(&"0".repeat(template.difficulty as usize)) {
-        return Err(anyhow!("nonce does not meet difficulty"));
     }
-
-    Ok(Block {
-        header,
-        transactions: template.transactions.clone(),
-        hash,
-    })
 }
+
+fn parse_nonce(nonce_str: &str) -> Result<u64> {
+    if let Some(hex) = nonce_str.strip_prefix("0x") {
+        return u64::from_str_radix(hex, 16).map_err(|e| anyhow!("invalid nonce: {}", e));
+    }
+    if nonce_str.chars().all(|c| c.is_ascii_digit()) {
+        return nonce_str.parse::<u64>().map_err(|e| anyhow!("invalid nonce: {}", e));
+    }
+    u64::from_str_radix(nonce_str, 16).map_err(|e| anyhow!("invalid nonce: {}", e))
+}
+
+fn decode_block_payload(input: &str) -> Result<Block> {
+    let bytes = if input.chars().all(|c| c.is_ascii_hexdigit()) && input.len() % 2 == 0 {
+        hex::decode(input)?
+    } else {
+        general_purpose::STANDARD
+            .decode(input.as_bytes())
+            .map_err(|e| anyhow!("invalid base64: {}", e))?
+    };
+    let (block, _) = bincode::decode_from_slice::<Block, _>(&bytes, *BINCODE_CONFIG)?;
+    Ok(block)
+}
+
+// ─── Shared pool state ────────────────────────────────────────────────────────
+
+type SharedTracker = Arc<Mutex<ShareTracker>>;
+type TemplateStore = Arc<Mutex<HashMap<String, MiningTemplate>>>;
+
+// ─── Stratum connection handler ───────────────────────────────────────────────
 
 async fn handle_stratum_connection(
     stream: TcpStream,
-    template_store: Arc<Mutex<HashMap<String, MiningTemplate>>>,
+    template_store: TemplateStore,
     mut job_rx: broadcast::Receiver<MiningTemplate>,
-    pool_address: String,
+    pool_cfg: Arc<PoolConfig>,
     client: NodeClient,
+    tracker: SharedTracker,
 ) -> Result<()> {
     let mut framed = Framed::new(stream, LinesCodec::new());
-    let mut subscribed = false;
+    let mut session: Option<MinerSession> = None;
 
     loop {
         tokio::select! {
@@ -298,10 +324,40 @@ async fn handle_stratum_connection(
                 let params = req.get("params");
 
                 match method {
+                    // ── mining.subscribe ──────────────────────────────────
                     "mining.subscribe" => {
-                        subscribed = true;
                         let extranonce1 = hex::encode(rand::random::<u32>().to_be_bytes());
-                        let extranonce2_size = 4;
+                        let extranonce2_size = 4u32;
+
+                        // Build initial template to get block difficulty for VarDiff
+                        let job_id = format!("{}", chrono::Utc::now().timestamp_millis());
+                        let init_diff = match build_template(&client, &pool_cfg.pool_address, job_id.clone()).await {
+                            Ok(t) => {
+                                template_store.lock().unwrap().insert(job_id.clone(), t.clone());
+                                let pool_diff = t.pool_diff.max(pool_cfg.vardiff.min_diff);
+                                // send initial difficulty
+                                let diff_msg = serde_json::json!({
+                                    "id": null,
+                                    "method": "mining.set_difficulty",
+                                    "params": [pool_diff]
+                                });
+                                framed.send(diff_msg.to_string()).await?;
+                                // send first job
+                                let notify = build_notify(&t);
+                                framed.send(notify.to_string()).await?;
+                                pool_diff
+                            }
+                            Err(e) => {
+                                log::warn!("subscribe: failed to build template: {}", e);
+                                pool_cfg.vardiff.min_diff
+                            }
+                        };
+
+                        let mut s = MinerSession::new(extranonce1.clone(), init_diff);
+                        // clamp initial difficulty to configured range
+                        s.difficulty = s.difficulty.clamp(pool_cfg.vardiff.min_diff, pool_cfg.vardiff.max_diff);
+                        session = Some(s);
+
                         let result = serde_json::json!([
                             [["mining.set_difficulty", "1"], ["mining.notify", "1"]],
                             extranonce1,
@@ -309,160 +365,357 @@ async fn handle_stratum_connection(
                         ]);
                         let resp = serde_json::json!({"id": id, "result": result, "error": null});
                         framed.send(resp.to_string()).await?;
-
-                        let new_job_id = format!("{}", chrono::Utc::now().timestamp_millis());
-                        let template = build_template(&client, &pool_address, new_job_id.clone()).await?;
-                        template_store.lock().unwrap().insert(new_job_id.clone(), template.clone());
-                        let notify = serde_json::json!({
-                            "id": null,
-                            "method": "mining.notify",
-                            "params": [
-                                template.job_id,
-                                template.prev_hash,
-                                template.merkle_root,
-                                template.timestamp,
-                                template.difficulty,
-                                target_from_difficulty(template.difficulty)
-                            ]
-                        });
-                        framed.send(notify.to_string()).await?;
                     }
+
+                    // ── mining.authorize ─────────────────────────────────
                     "mining.authorize" => {
+                        let login = params
+                            .and_then(|v| v.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+
+                        if let Some(ref mut s) = session {
+                            s.authorize(login);
+                            log::info!(
+                                "[AUTH] worker={}.{} diff={}",
+                                s.miner_address,
+                                s.worker_name,
+                                s.difficulty
+                            );
+                        }
+
                         let resp = serde_json::json!({"id": id, "result": true, "error": null});
                         framed.send(resp.to_string()).await?;
                     }
-                    "mining.submit" => {
-                        let params = params.and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                        let job_id = params.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let nonce_str = params.get(2).and_then(|v| v.as_str()).unwrap_or("");
 
-                        let nonce = parse_nonce(nonce_str)?;
-                        let template = {
-                            let guard = template_store.lock().unwrap();
-                            guard.get(&job_id).cloned()
+                    // ── mining.submit ─────────────────────────────────────
+                    "mining.submit" => {
+                        let p = params.and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                        let job_id = p.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let nonce_str = p.get(2).and_then(|v| v.as_str()).unwrap_or("");
+
+                        let s = match session.as_mut() {
+                            Some(s) if s.is_authorized() => s,
+                            _ => {
+                                let resp = serde_json::json!({"id": id, "result": false, "error": "not authorized"});
+                                framed.send(resp.to_string()).await?;
+                                continue;
+                            }
                         };
 
-                        if let Some(template) = template {
-                            let block = build_block_from_template(&template, nonce)?;
-                            match client.submit_block(&block).await {
-                                Ok(_) => {
-                                    let resp = serde_json::json!({"id": id, "result": true, "error": null});
-                                    framed.send(resp.to_string()).await?;
-                                }
-                                Err(e) => {
-                                    let resp = serde_json::json!({"id": id, "result": false, "error": e.to_string()});
-                                    framed.send(resp.to_string()).await?;
+                        let nonce = match parse_nonce(nonce_str) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                s.record_rejected_share();
+                                tracker.lock().unwrap().add_rejected(&s.miner_address);
+                                let resp = serde_json::json!({"id": id, "result": false, "error": e.to_string()});
+                                framed.send(resp.to_string()).await?;
+                                continue;
+                            }
+                        };
+
+                        let template = template_store.lock().unwrap().get(&job_id).cloned();
+                        match template {
+                            None => {
+                                s.record_rejected_share();
+                                tracker.lock().unwrap().add_rejected(&s.miner_address);
+                                let resp = serde_json::json!({"id": id, "result": false, "error": "unknown job"});
+                                framed.send(resp.to_string()).await?;
+                            }
+                            Some(tmpl) => {
+                                let header = build_header_for_nonce(&tmpl, nonce);
+                                match validate_share(&header, s.difficulty, tmpl.difficulty) {
+                                    Ok(ShareResult::Rejected { reason }) => {
+                                        s.record_rejected_share();
+                                        tracker.lock().unwrap().add_rejected(&s.miner_address);
+                                        log::debug!("[REJECT] {}.{}: {}", s.miner_address, s.worker_name, reason);
+                                        let resp = serde_json::json!({"id": id, "result": false, "error": reason});
+                                        framed.send(resp.to_string()).await?;
+                                    }
+                                    Ok(ShareResult::AcceptedShare { hash }) => {
+                                        s.record_accepted_share();
+                                        {
+                                            let mut t = tracker.lock().unwrap();
+                                            t.add_share(Share {
+                                                miner_address: s.miner_address.clone(),
+                                                worker_name: s.worker_name.clone(),
+                                                difficulty: s.difficulty,
+                                                timestamp: chrono::Utc::now().timestamp(),
+                                                job_id: job_id.clone(),
+                                            });
+                                        }
+                                        log::debug!("[SHARE] {}.{} hash={}", s.miner_address, s.worker_name, &hash[..8]);
+
+                                        // VarDiff check
+                                        if let Some(new_diff) = check_vardiff(s, &pool_cfg.vardiff) {
+                                            s.difficulty = new_diff;
+                                            let diff_msg = serde_json::json!({
+                                                "id": null,
+                                                "method": "mining.set_difficulty",
+                                                "params": [new_diff]
+                                            });
+                                            framed.send(diff_msg.to_string()).await?;
+                                        }
+
+                                        let resp = serde_json::json!({"id": id, "result": true, "error": null});
+                                        framed.send(resp.to_string()).await?;
+                                    }
+                                    Ok(ShareResult::FoundBlock { hash: _ }) => {
+                                        // Build and submit the full block
+                                        let block = Block {
+                                            header,
+                                            transactions: tmpl.transactions.clone(),
+                                            hash: compute_header_hash_str(&tmpl, nonce),
+                                        };
+                                        match client.submit_block(&block).await {
+                                            Ok(_) => {
+                                                log::info!(
+                                                    "🎉 [BLOCK] height={} finder={}.{}",
+                                                    tmpl.height,
+                                                    s.miner_address,
+                                                    s.worker_name
+                                                );
+                                                // PPLNS distribution
+                                                let reward = tmpl.coinbase_value;
+                                                let finder = s.miner_address.clone();
+                                                let fee_fraction = pool_cfg.pool_fee_percent / 100.0;
+                                                let credits = {
+                                                    let mut t = tracker.lock().unwrap();
+                                                    t.add_share(Share {
+                                                        miner_address: s.miner_address.clone(),
+                                                        worker_name: s.worker_name.clone(),
+                                                        difficulty: s.difficulty,
+                                                        timestamp: chrono::Utc::now().timestamp(),
+                                                        job_id: job_id.clone(),
+                                                    });
+                                                    t.distribute_pplns(
+                                                        reward,
+                                                        fee_fraction,
+                                                        &finder,
+                                                        tmpl.height,
+                                                        block.hash.clone(),
+                                                        chrono::Utc::now().timestamp(),
+                                                    )
+                                                };
+                                                for (addr, amount) in &credits {
+                                                    log::info!(
+                                                        "  💰 {} credited 0x{:x} wei",
+                                                        addr, amount
+                                                    );
+                                                }
+                                                s.record_accepted_share();
+                                                let resp = serde_json::json!({"id": id, "result": true, "error": null});
+                                                framed.send(resp.to_string()).await?;
+                                            }
+                                            Err(e) => {
+                                                log::warn!("[BLOCK] submit failed: {}", e);
+                                                s.record_rejected_share();
+                                                tracker.lock().unwrap().add_rejected(&s.miner_address);
+                                                let resp = serde_json::json!({"id": id, "result": false, "error": e.to_string()});
+                                                framed.send(resp.to_string()).await?;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        s.record_rejected_share();
+                                        tracker.lock().unwrap().add_rejected(&s.miner_address);
+                                        let resp = serde_json::json!({"id": id, "result": false, "error": e.to_string()});
+                                        framed.send(resp.to_string()).await?;
+                                    }
                                 }
                             }
-                        } else {
-                            let resp = serde_json::json!({"id": id, "result": false, "error": "unknown job"});
-                            framed.send(resp.to_string()).await?;
                         }
                     }
+
                     _ => {
                         let resp = serde_json::json!({"id": id, "result": null, "error": "unsupported method"});
                         framed.send(resp.to_string()).await?;
                     }
                 }
             }
-            Ok(template) = job_rx.recv() => {
-                if subscribed {
-                    template_store.lock().unwrap().insert(template.job_id.clone(), template.clone());
-                    let notify = serde_json::json!({
-                        "id": null,
-                        "method": "mining.set_difficulty",
-                        "params": [template.difficulty]
-                    });
-                    framed.send(notify.to_string()).await?;
 
-                    let notify = serde_json::json!({
-                        "id": null,
-                        "method": "mining.notify",
-                        "params": [
-                            template.job_id,
-                            template.prev_hash,
-                            template.merkle_root,
-                            template.timestamp,
-                            template.difficulty,
-                            target_from_difficulty(template.difficulty)
-                        ]
-                    });
-                    framed.send(notify.to_string()).await?;
+            // ── New job pushed from template loop ─────────────────────────
+            Ok(template) = job_rx.recv() => {
+                if let Some(ref s) = session {
+                    if s.is_authorized() || session.is_some() {
+                        template_store.lock().unwrap().insert(template.job_id.clone(), template.clone());
+
+                        let diff_msg = serde_json::json!({
+                            "id": null,
+                            "method": "mining.set_difficulty",
+                            "params": [s.difficulty]
+                        });
+                        framed.send(diff_msg.to_string()).await?;
+
+                        let notify = build_notify(&template);
+                        framed.send(notify.to_string()).await?;
+                    }
                 }
             }
         }
     }
 }
 
-fn parse_nonce(nonce_str: &str) -> Result<u64> {
-    if let Some(hex) = nonce_str.strip_prefix("0x") {
-        return u64::from_str_radix(hex, 16).map_err(|e| anyhow!("invalid nonce: {}", e));
-    }
-
-    if nonce_str.chars().all(|c| c.is_ascii_digit()) {
-        return nonce_str
-            .parse::<u64>()
-            .map_err(|e| anyhow!("invalid nonce: {}", e));
-    }
-
-    u64::from_str_radix(nonce_str, 16).map_err(|e| anyhow!("invalid nonce: {}", e))
+/// Compute the header hash string (for the found-block case)
+fn compute_header_hash_str(template: &MiningTemplate, nonce: u64) -> String {
+    let header = build_header_for_nonce(template, nonce);
+    Astram_core::block::compute_header_hash(&header).unwrap_or_default()
 }
 
-async fn run_stratum_server(
-    bind_addr: &str,
+fn build_notify(t: &MiningTemplate) -> Value {
+    serde_json::json!({
+        "id": null,
+        "method": "mining.notify",
+        "params": [
+            t.job_id,
+            t.prev_hash,
+            t.merkle_root,
+            t.timestamp,
+            t.difficulty,
+            pool_diff_to_target(t.pool_diff)
+        ]
+    })
+}
+
+// ─── Template polling loop (detects new blocks immediately) ──────────────────
+
+async fn run_template_loop(
     client: NodeClient,
     pool_address: String,
-) -> Result<()> {
-    let listener = TcpListener::bind(bind_addr).await?;
-    let templates: Arc<Mutex<HashMap<String, MiningTemplate>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let (job_tx, _) = broadcast::channel(16);
+    templates: TemplateStore,
+    job_tx: broadcast::Sender<MiningTemplate>,
+) {
+    let mut last_tip = String::new();
+    let mut last_job_time = 0i64;
 
-    let client_for_jobs = client.clone();
-    let pool_for_jobs = pool_address.clone();
-    let templates_for_jobs = templates.clone();
-    let job_tx_for_task = job_tx.clone();
-    tokio::spawn(async move {
-        loop {
+    loop {
+        let now = chrono::Utc::now().timestamp();
+        let status = client.fetch_status().await;
+
+        let should_rebuild = match &status {
+            Ok(s) => {
+                // Rebuild immediately on new block OR every 15s for fresh mempool
+                s.tip_hash != last_tip || (now - last_job_time) >= 15
+            }
+            Err(_) => false,
+        };
+
+        if should_rebuild {
             let job_id = format!("{}", chrono::Utc::now().timestamp_millis());
-            match build_template(&client_for_jobs, &pool_for_jobs, job_id.clone()).await {
+            match build_template(&client, &pool_address, job_id.clone()).await {
                 Ok(template) => {
-                    templates_for_jobs
-                        .lock()
-                        .unwrap()
-                        .insert(job_id, template.clone());
-                    let _ = job_tx_for_task.send(template);
+                    let new_tip = template.prev_hash.clone();
+                    let is_new_block = new_tip != last_tip;
+                    last_tip = new_tip;
+                    last_job_time = now;
+
+                    templates.lock().unwrap().insert(job_id, template.clone());
+                    let _ = job_tx.send(template);
+
+                    if is_new_block {
+                        log::info!("📦 New block detected – job refreshed immediately");
+                    }
                 }
                 Err(e) => {
                     log::warn!("failed to build template: {}", e);
                 }
             }
-            sleep(Duration::from_secs(15)).await;
         }
-    });
+
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+// ─── Stratum server ───────────────────────────────────────────────────────────
+
+async fn run_stratum_server(
+    pool_cfg: Arc<PoolConfig>,
+    client: NodeClient,
+    tracker: SharedTracker,
+) -> Result<()> {
+    let listener = TcpListener::bind(&pool_cfg.stratum_bind).await?;
+    let templates: TemplateStore = Arc::new(Mutex::new(HashMap::new()));
+    let (job_tx, _) = broadcast::channel::<MiningTemplate>(32);
+
+    // Spawn template polling loop
+    tokio::spawn(run_template_loop(
+        client.clone(),
+        pool_cfg.pool_address.clone(),
+        templates.clone(),
+        job_tx.clone(),
+    ));
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer_addr) = listener.accept().await?;
+        log::info!("[STRATUM] Connection from {}", peer_addr);
+
         let job_rx = job_tx.subscribe();
         let templates = templates.clone();
         let client = client.clone();
-        let pool_address = pool_address.clone();
+        let pool_cfg = pool_cfg.clone();
+        let tracker = tracker.clone();
+
         tokio::spawn(async move {
             if let Err(e) =
-                handle_stratum_connection(stream, templates, job_rx, pool_address, client).await
+                handle_stratum_connection(stream, templates, job_rx, pool_cfg, client, tracker)
+                    .await
             {
-                log::warn!("stratum connection closed: {}", e);
+                log::debug!("[STRATUM] {} disconnected: {}", peer_addr, e);
             }
         });
     }
 }
 
-async fn run_gbt_server(bind_addr: &str, client: NodeClient, pool_address: String) -> Result<()> {
+// ─── GBT server ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct JsonRpcRequest {
+    id: Value,
+    method: String,
+    params: Option<Value>,
+}
+
+#[derive(Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: String,
+    id: Value,
+    result: Option<Value>,
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Serialize)]
+struct JsonRpcError {
+    code: i32,
+    message: String,
+}
+
+impl JsonRpcResponse {
+    fn success(id: Value, result: Value) -> Self {
+        Self { jsonrpc: "1.0".to_string(), id, result: Some(result), error: None }
+    }
+    fn error(id: Value, code: i32, message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "1.0".to_string(),
+            id,
+            result: None,
+            error: Some(JsonRpcError { code, message: message.into() }),
+        }
+    }
+}
+
+async fn run_gbt_server(
+    bind_addr: String,
+    client: NodeClient,
+    pool_address: String,
+    tracker: SharedTracker,
+) -> Result<()> {
     let route = warp::post()
         .and(warp::body::json())
         .and_then(move |request: JsonRpcRequest| {
             let client = client.clone();
             let pool_address = pool_address.clone();
+            let tracker = tracker.clone();
             async move {
                 let id = request.id.clone();
                 match request.method.as_str() {
@@ -475,8 +728,8 @@ async fn run_gbt_server(bind_addr: &str, client: NodeClient, pool_address: Strin
                                     .iter()
                                     .skip(1)
                                     .map(|tx| {
-                                        let bytes = bincode::encode_to_vec(tx, *BINCODE_CONFIG)
-                                            .unwrap_or_default();
+                                        let bytes =
+                                            bincode::encode_to_vec(tx, *BINCODE_CONFIG).unwrap_or_default();
                                         serde_json::json!({
                                             "data": hex::encode(bytes),
                                             "txid": tx.txid,
@@ -490,7 +743,7 @@ async fn run_gbt_server(bind_addr: &str, client: NodeClient, pool_address: Strin
                                     "previousblockhash": template.prev_hash,
                                     "transactions": txs,
                                     "coinbasevalue": template.coinbase_value.to_string(),
-                                    "target": target_from_difficulty(template.difficulty),
+                                    "target": pool_diff_to_target(template.pool_diff),
                                     "mintime": template.timestamp,
                                     "curtime": template.timestamp,
                                     "height": template.height,
@@ -499,42 +752,52 @@ async fn run_gbt_server(bind_addr: &str, client: NodeClient, pool_address: Strin
                                     "capabilities": ["proposal"],
                                     "longpollid": format!("{}:{}", template.height, template.merkle_root)
                                 });
-
-                                Ok::<_, warp::Rejection>(warp::reply::json(&JsonRpcResponse::success(id, result)))
+                                Ok::<_, warp::Rejection>(warp::reply::json(
+                                    &JsonRpcResponse::success(id, result),
+                                ))
                             }
-                            Err(e) => Ok::<_, warp::Rejection>(warp::reply::json(&JsonRpcResponse::error(
-                                id,
-                                -32000,
-                                format!("template error: {}", e),
-                            ))),
+                            Err(e) => Ok::<_, warp::Rejection>(warp::reply::json(
+                                &JsonRpcResponse::error(id, -32000, format!("template error: {}", e)),
+                            )),
                         }
                     }
                     "submitblock" => {
-                        let params = request.params.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+                        let params = request
+                            .params
+                            .and_then(|v| v.as_array().cloned())
+                            .unwrap_or_default();
                         let data = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
                         match decode_block_payload(data) {
-                            Ok(block) => {
-                                match client.submit_block(&block).await {
-                                    Ok(_) => Ok::<_, warp::Rejection>(warp::reply::json(&JsonRpcResponse::success(id, Value::Null))),
-                                    Err(e) => Ok::<_, warp::Rejection>(warp::reply::json(&JsonRpcResponse::error(
-                                        id,
-                                        -32001,
-                                        format!("submit failed: {}", e),
-                                    ))),
+                            Ok(block) => match client.submit_block(&block).await {
+                                Ok(_) => {
+                                    // GBT miner found a block – credit the pool address
+                                    let _credits = {
+                                        let mut t = tracker.lock().unwrap();
+                                        t.distribute_pplns(
+                                            U256::zero(), // reward unknown here
+                                            0.0,
+                                            &pool_address,
+                                            block.header.index,
+                                            block.hash.clone(),
+                                            chrono::Utc::now().timestamp(),
+                                        )
+                                    };
+                                    Ok::<_, warp::Rejection>(warp::reply::json(
+                                        &JsonRpcResponse::success(id, Value::Null),
+                                    ))
                                 }
-                            }
-                            Err(e) => Ok::<_, warp::Rejection>(warp::reply::json(&JsonRpcResponse::error(
-                                id,
-                                -32602,
-                                format!("invalid block: {}", e),
-                            ))),
+                                Err(e) => Ok::<_, warp::Rejection>(warp::reply::json(
+                                    &JsonRpcResponse::error(id, -32001, format!("submit failed: {}", e)),
+                                )),
+                            },
+                            Err(e) => Ok::<_, warp::Rejection>(warp::reply::json(
+                                &JsonRpcResponse::error(id, -32602, format!("invalid block: {}", e)),
+                            )),
                         }
                     }
-                    _ => Ok::<_, warp::Rejection>(warp::reply::json(&JsonRpcResponse::error(
-                        id,
-                        -32601,
-                        "method not found",
-                    ))),
+                    _ => Ok::<_, warp::Rejection>(warp::reply::json(
+                        &JsonRpcResponse::error(id, -32601, "method not found"),
+                    )),
                 }
             }
         })
@@ -545,18 +808,75 @@ async fn run_gbt_server(bind_addr: &str, client: NodeClient, pool_address: Strin
     Ok(())
 }
 
-fn decode_block_payload(input: &str) -> Result<Block> {
-    let bytes = if input.chars().all(|c| c.is_ascii_hexdigit()) && input.len() % 2 == 0 {
-        hex::decode(input)?
-    } else {
-        general_purpose::STANDARD
-            .decode(input.as_bytes())
-            .map_err(|e| anyhow!("invalid base64: {}", e))?
-    };
+// ─── Stats HTTP API ───────────────────────────────────────────────────────────
 
-    let (block, _) = bincode::decode_from_slice::<Block, _>(&bytes, *BINCODE_CONFIG)?;
-    Ok(block)
+/// HTML dashboard embedded at compile time from web/index.html
+static DASHBOARD_HTML: &str = include_str!("../web/index.html");
+
+async fn run_stats_server(bind_addr: String, tracker: SharedTracker) -> Result<()> {
+    // Serve the dashboard at /
+    let index = warp::path::end()
+        .and(warp::get())
+        .map(|| warp::reply::html(DASHBOARD_HTML.to_string()));
+
+    let t1 = tracker.clone();
+    let stats = warp::path!("stats").and(warp::get()).map(move || {
+        let t = t1.lock().unwrap();
+        warp::reply::json(&serde_json::json!({
+            "total_shares_accepted": t.total_shares_accepted,
+            "total_shares_rejected": t.total_shares_rejected,
+            "blocks_found": t.found_blocks.len(),
+            "pplns_window_shares": t.recent_shares.len(),
+        }))
+    });
+
+    let t2 = tracker.clone();
+    let miners = warp::path!("miners").and(warp::get()).map(move || {
+        let t = t2.lock().unwrap();
+        warp::reply::json(&t.miner_stats())
+    });
+
+    let t3 = tracker.clone();
+    let blocks = warp::path!("blocks").and(warp::get()).map(move || {
+        let t = t3.lock().unwrap();
+        let recent: Vec<FoundBlock> = t.found_blocks.iter().rev().take(50).cloned().collect();
+        warp::reply::json(&recent)
+    });
+
+    let t4 = tracker.clone();
+    let payments = warp::path!("payments").and(warp::get()).map(move || {
+        let t = t4.lock().unwrap();
+        let balances: HashMap<String, String> = t
+            .balances
+            .iter()
+            .map(|(k, v)| (k.clone(), format!("0x{:x}", v)))
+            .collect();
+        warp::reply::json(&balances)
+    });
+
+    let routes = index.or(stats).or(miners).or(blocks).or(payments);
+    let addr: std::net::SocketAddr = bind_addr.parse()?;
+    log::info!("Stats API listening on http://{}", addr);
+    warp::serve(routes).run(addr).await;
+    Ok(())
 }
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn load_pool_address(cfg: &Config) -> Result<String> {
+    let wallet_path = cfg.wallet_path_resolved();
+    let wallet_file = std::fs::read_to_string(wallet_path)
+        .map_err(|e| anyhow!("failed to read wallet file: {}", e))?;
+    let wallet: Value = serde_json::from_str(&wallet_file)
+        .map_err(|e| anyhow!("failed to parse wallet JSON: {}", e))?;
+    wallet
+        .get("address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("wallet address missing"))
+}
+
+// ─── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -565,31 +885,49 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = Config::load();
-    let node_url = std::env::var("NODE_RPC_URL").unwrap_or(cfg.node_rpc_url.clone());
+    let pool_cfg = Arc::new(PoolConfig::from_env(&cfg)?);
+    let client = NodeClient::new(pool_cfg.node_rpc_url.clone());
+    let tracker: SharedTracker = Arc::new(Mutex::new(ShareTracker::new(pool_cfg.pplns_window)));
 
-    let pool_address = std::env::var("POOL_ADDRESS")
-        .ok()
-        .or_else(|| load_pool_address(&cfg).ok())
-        .ok_or_else(|| anyhow!("POOL_ADDRESS not set and wallet missing"))?;
+    log::info!("🏊 Astram Mining Pool starting...");
+    log::info!("  Stratum   : {}", pool_cfg.stratum_bind);
+    log::info!("  GBT       : {}", pool_cfg.gbt_bind);
+    log::info!("  Stats API : {}", pool_cfg.stats_bind);
+    log::info!("  Node RPC  : {}", pool_cfg.node_rpc_url);
+    log::info!("  Pool addr : {}", pool_cfg.pool_address);
+    log::info!("  Pool fee  : {}%", pool_cfg.pool_fee_percent);
+    log::info!("  PPLNS win : {} shares", pool_cfg.pplns_window);
+    log::info!(
+        "  VarDiff   : {}–{} leading zeros, target {}s/share",
+        pool_cfg.vardiff.min_diff,
+        pool_cfg.vardiff.max_diff,
+        pool_cfg.vardiff.target_share_time
+    );
 
-    let stratum_bind = std::env::var("STRATUM_BIND").unwrap_or_else(|_| "0.0.0.0:3333".to_string());
-    let gbt_bind = std::env::var("GBT_BIND").unwrap_or_else(|_| "0.0.0.0:8332".to_string());
+    // Spawn GBT server
+    {
+        let gbt_client = client.clone();
+        let gbt_pool = pool_cfg.pool_address.clone();
+        let gbt_bind = pool_cfg.gbt_bind.clone();
+        let gbt_tracker = tracker.clone();
+        tokio::spawn(async move {
+            if let Err(e) = run_gbt_server(gbt_bind, gbt_client, gbt_pool, gbt_tracker).await {
+                log::error!("GBT server failed: {}", e);
+            }
+        });
+    }
 
-    let client = NodeClient::new(node_url.clone());
+    // Spawn stats API server
+    {
+        let stats_bind = pool_cfg.stats_bind.clone();
+        let stats_tracker = tracker.clone();
+        tokio::spawn(async move {
+            if let Err(e) = run_stats_server(stats_bind, stats_tracker).await {
+                log::error!("Stats server failed: {}", e);
+            }
+        });
+    }
 
-    let gbt_client = client.clone();
-    let gbt_pool = pool_address.clone();
-    let gbt_bind_for_task = gbt_bind.clone();
-    tokio::spawn(async move {
-        if let Err(e) = run_gbt_server(&gbt_bind_for_task, gbt_client, gbt_pool).await {
-            log::error!("GBT server failed: {}", e);
-        }
-    });
-
-    log::info!("Stratum server listening on {}", stratum_bind);
-    log::info!("GBT server listening on {}", gbt_bind);
-    log::info!("Using node RPC at {}", node_url);
-
-    run_stratum_server(&stratum_bind, client, pool_address).await
+    // Run stratum server (blocking)
+    run_stratum_server(pool_cfg, client, tracker).await
 }
-

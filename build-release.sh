@@ -95,6 +95,17 @@ for exe in "${EXECUTABLES[@]}"; do
     fi
 done
 
+# Copy pool mining scripts
+echo -e "${INFO}INFO  Copying pool mining scripts...${NC}"
+POOL_SCRIPTS_DIR="astram-stratum/scripts/linux"
+if [ -f "$POOL_SCRIPTS_DIR/start-mining-pool.sh" ]; then
+    cp "$POOL_SCRIPTS_DIR/start-mining-pool.sh" "$RELEASE_DIR/start-mining-pool.sh"
+    chmod +x "$RELEASE_DIR/start-mining-pool.sh"
+    echo -e "${SUCCESS}OK    Copied start-mining-pool.sh${NC}"
+else
+    echo -e "\033[0;33mWARN  Pool script not found at $POOL_SCRIPTS_DIR (skipping)\033[0m"
+fi
+
 # Create launcher script
 echo -e "${INFO}INFO  Creating launcher script...${NC}"
 cat > "$RELEASE_DIR/Astram.sh" << 'LAUNCHER_EOF'
@@ -270,7 +281,23 @@ echo -e "${INFO}INFO  Creating README...${NC}"
 cat > "$RELEASE_DIR/README.md" << README_EOF
 # Astram for $PLATFORM
 
-## Quick Start
+## Option A — Join the Mining Pool (Recommended)
+
+Run the pool mining script:
+
+\`\`\`bash
+chmod +x start-mining-pool.sh
+./start-mining-pool.sh
+\`\`\`
+
+The script will:
+1. Detect your NVIDIA GPU
+2. Create a wallet automatically if you don't have one
+3. Connect to the pool at \`pool.Astramchin.com:3333\`
+
+Pool dashboard: https://pool.Astramchin.com
+
+## Option B — Run Your Own Node
 
 1. Extract this archive to a folder
 2. Open a terminal in this directory
@@ -292,6 +319,7 @@ cat > "$RELEASE_DIR/README.md" << README_EOF
 
 ## Components
 
+- **start-mining-pool.sh** - One-click pool mining launcher
 - **Astram-node** - Main blockchain node (HTTP: 19533, P2P: 8335)
 - **Astram-dns** - DNS discovery server (Port: 8053)
 - **Astram-explorer** - Web-based blockchain explorer (Port: 3000)
@@ -303,12 +331,12 @@ cat > "$RELEASE_DIR/README.md" << README_EOF
 - 4GB RAM minimum
 - 10GB free disk space
 - NVIDIA GPU (4GB+ VRAM recommended)
-- NVIDIA driver + CUDA Toolkit installed (`nvcc` available)
+- NVIDIA driver + CUDA Toolkit installed (\`nvcc\` available)
 
 ## Mining Backend
 
 - This release is **GPU-only**.
-- Node mining backend is fixed to CUDA (`MINER_BACKEND=cuda`).
+- Node mining backend is fixed to CUDA (\`MINER_BACKEND=cuda\`).
 
 ## Data Directory
 
@@ -318,7 +346,8 @@ To reset the blockchain, delete this directory while no nodes are running.
 
 ## Support
 
-For issues and documentation, visit: https://github.com/YSBlueA/AstramChain
+- GitHub: https://github.com/YSBlueA/AstramChain
+- Pool: https://pool.Astramchin.com
 README_EOF
 
 # Create version info
