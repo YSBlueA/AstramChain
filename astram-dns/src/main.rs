@@ -18,6 +18,7 @@ use std::{
 use tokio::net::TcpStream;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
+use axum::http::HeaderMap;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -207,12 +208,21 @@ fn is_public_ip(ip: IpAddr) -> bool {
 
 // Register a node
 async fn register_node(
+    headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     // Resolve and validate inputs before touching the lock
-    let client_ip = addr.ip().to_string();
+    //let client_ip = addr.ip().to_string();
+        let forwarded_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string());
+
+    let client_ip = forwarded_ip.unwrap_or(addr.ip().to_string());
+
     let node_address = req.address.unwrap_or(client_ip);
 
     let node_ip: IpAddr = match node_address.parse() {
