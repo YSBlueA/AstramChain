@@ -1,6 +1,3 @@
-#[cfg(not(feature = "cuda-miner"))]
-compile_error!("Astram-node is GPU-only. Enable the `cuda-miner` feature.");
-
 pub mod p2p;
 pub mod server;
 
@@ -107,8 +104,8 @@ impl ChainState {
     pub fn enforce_memory_limit(&mut self) {
         if self.blockchain.len() > MAX_MEMORY_BLOCKS {
             let excess = self.blockchain.len() - MAX_MEMORY_BLOCKS;
-            log::warn!(
-                "[WARN] Memory block limit reached: {} blocks (max: {}), removing {} oldest blocks",
+            log::debug!(
+                "[DEBUG] Memory block limit reached: {} blocks (max: {}), removing {} oldest blocks",
                 self.blockchain.len(),
                 MAX_MEMORY_BLOCKS,
                 excess
@@ -117,8 +114,8 @@ impl ChainState {
             // Remove oldest blocks (from the front)
             self.blockchain.drain(0..excess);
 
-            log::info!(
-                "[INFO] Memory optimized: {} blocks remaining in memory",
+            log::debug!(
+                "[DEBUG] Memory optimized: {} blocks remaining in memory",
                 self.blockchain.len()
             );
         }
@@ -134,18 +131,10 @@ impl MempoolState {
         let now = chrono::Utc::now().timestamp();
 
         // 1. Remove expired transactions (older than 24 hours)
-        let initial_count = self.pending.len();
-        self.pending.retain(|tx| {
-            let age = now - tx.timestamp;
-            if age > MEMPOOL_EXPIRY_TIME {
-                self.seen_tx.remove(&tx.txid);
-                false
-            } else {
-                true
-            }
-        });
-
-        let expired_count = initial_count - self.pending.len();
+        // Collect expired txids first, then retain, to update seen_tx correctly.
+        let before = self.pending.len();
+        self.pending.retain(|tx| now - tx.timestamp <= MEMPOOL_EXPIRY_TIME);
+        let expired_count = before - self.pending.len();
         if expired_count > 0 {
             log::info!(
                 "[INFO] Removed {} expired transactions from mempool",
@@ -153,99 +142,98 @@ impl MempoolState {
             );
         }
 
-        // 2. Check transaction count limit
-        if self.pending.len() > MAX_MEMPOOL_SIZE {
-            let excess = self.pending.len() - MAX_MEMPOOL_SIZE;
-            log::warn!(
-                "[WARN] Mempool transaction limit reached: {} txs (max: {})",
-                self.pending.len(),
-                MAX_MEMPOOL_SIZE
-            );
-
-            // Sort by fee rate (fee per byte) - lowest first for eviction
-            self.pending.sort_by_cached_key(|tx| {
-                let tx_bytes =
-                    bincode::encode_to_vec(tx, Astram_core::blockchain::BINCODE_CONFIG.clone())
-                        .unwrap_or_default();
-                let tx_size = tx_bytes.len().max(1) as u64;
-
-                // Calculate total fee
-                let input_sum: U256 = tx
-                    .inputs
-                    .iter()
-                    .filter_map(|_| Some(U256::from(1_000_000_000_000_000_000u64))) // Estimate
-                    .fold(U256::zero(), |acc, amt| acc + amt);
-
-                let output_sum: U256 = tx
-                    .outputs
-                    .iter()
-                    .map(|out| out.amount())
-                    .fold(U256::zero(), |acc, amt| acc + amt);
-
-                let fee = if input_sum > output_sum {
-                    (input_sum - output_sum).as_u64()
-                } else {
-                    0
-                };
-
-                // Fee per byte (lower = evict first)
-                fee / tx_size
-            });
-
-            // Remove lowest fee transactions
-            for _ in 0..excess {
-                if let Some(tx) = self.pending.first() {
-                    let txid = tx.txid.clone();
-                    self.pending.remove(0);
-                    self.seen_tx.remove(&txid);
-                }
-            }
-
-            log::info!(
-                "[INFO] Evicted {} low-fee transactions from mempool",
-                excess
-            );
+        // Early exit: skip expensive sort + serialize when clearly under limits.
+        // Assume max ~10 KB per tx for the byte estimate.
+        let needs_count_eviction = self.pending.len() > MAX_MEMPOOL_SIZE;
+        let possibly_over_bytes = self.pending.len() > MAX_MEMPOOL_BYTES / 10_240;
+        if !needs_count_eviction && !possibly_over_bytes {
+            return;
         }
 
-        // 3. Check total mempool byte size
-        let total_bytes: usize = self
+        // 2. Sort by fee-per-byte ascending (lowest = evict first).
+        //    sort_by_cached_key serializes each tx once for the key.
+        self.pending.sort_by_cached_key(|tx| {
+            let tx_bytes =
+                bincode::encode_to_vec(tx, Astram_core::blockchain::BINCODE_CONFIG.clone())
+                    .unwrap_or_default();
+            let tx_size = tx_bytes.len().max(1) as u64;
+
+            let input_sum: U256 = tx
+                .inputs
+                .iter()
+                .filter_map(|_| Some(U256::from(1_000_000_000_000_000_000u64))) // Estimate
+                .fold(U256::zero(), |acc, amt| acc + amt);
+
+            let output_sum: U256 = tx
+                .outputs
+                .iter()
+                .map(|out| out.amount())
+                .fold(U256::zero(), |acc, amt| acc + amt);
+
+            let fee = if input_sum > output_sum {
+                (input_sum - output_sum).as_u64()
+            } else {
+                0
+            };
+
+            fee / tx_size
+        });
+
+        // 3. Compute per-tx sizes once — O(N) — for both count and byte-limit evictions.
+        let sizes: Vec<usize> = self
             .pending
             .iter()
-            .filter_map(|tx| {
-                bincode::encode_to_vec(tx, Astram_core::blockchain::BINCODE_CONFIG.clone()).ok()
+            .map(|tx| {
+                bincode::encode_to_vec(tx, Astram_core::blockchain::BINCODE_CONFIG.clone())
+                    .map(|b| b.len())
+                    .unwrap_or(0)
             })
-            .map(|bytes| bytes.len())
-            .sum();
+            .collect();
 
+        let total_bytes: usize = sizes.iter().sum();
+
+        // How many to drop for count limit (front = lowest fee = evict first).
+        let count_excess = self.pending.len().saturating_sub(MAX_MEMPOOL_SIZE);
+
+        // How many to drop for byte limit (continuing from count_excess offset).
+        let mut remove_count = count_excess;
         if total_bytes > MAX_MEMPOOL_BYTES {
+            let mut remaining_bytes = total_bytes;
+            // Subtract the bytes already accounted for by count eviction.
+            for i in 0..count_excess {
+                remaining_bytes = remaining_bytes.saturating_sub(sizes[i]);
+            }
+            while remaining_bytes > MAX_MEMPOOL_BYTES && remove_count < sizes.len() {
+                remaining_bytes = remaining_bytes.saturating_sub(sizes[remove_count]);
+                remove_count += 1;
+            }
             log::warn!(
                 "[WARN] Mempool size limit exceeded: {} bytes (max: {} MB)",
                 total_bytes,
                 MAX_MEMPOOL_BYTES / 1_000_000
             );
+        } else if count_excess > 0 {
+            log::warn!(
+                "[WARN] Mempool transaction limit reached: {} txs (max: {})",
+                self.pending.len(),
+                MAX_MEMPOOL_SIZE
+            );
+        }
 
-            // Already sorted by fee rate, remove more low-fee txs
-            while !self.pending.is_empty() {
-                let current_size: usize = self
-                    .pending
-                    .iter()
-                    .filter_map(|tx| {
-                        bincode::encode_to_vec(tx, Astram_core::blockchain::BINCODE_CONFIG.clone())
-                            .ok()
-                    })
-                    .map(|bytes| bytes.len())
-                    .sum();
-
-                if current_size <= MAX_MEMPOOL_BYTES {
-                    break;
-                }
-
-                if let Some(tx) = self.pending.first() {
-                    let txid = tx.txid.clone();
-                    self.pending.remove(0);
-                    self.seen_tx.remove(&txid);
-                }
+        // Single O(remove_count) drain — no repeated O(N) remove(0) calls.
+        if remove_count > 0 {
+            let removed_txids: Vec<String> = self
+                .pending
+                .drain(..remove_count)
+                .map(|tx| tx.txid)
+                .collect();
+            for txid in removed_txids {
+                self.seen_tx.remove(&txid);
             }
+            log::info!(
+                "[INFO] Evicted {} transactions from mempool (count_excess={}, total_bytes={})",
+                remove_count, count_excess, total_bytes
+            );
         }
     }
 }

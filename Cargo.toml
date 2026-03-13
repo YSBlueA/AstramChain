@@ -7,5 +7,6 @@ members = [
     "explorer",
     "astram-dns",
     "astram-stratum",
+    "miner",
 ]
 resolver = "3"

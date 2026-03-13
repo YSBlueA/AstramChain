@@ -123,59 +123,25 @@ impl AppState {
 
         info!("Starting health check for {} nodes...", total_nodes);
 
+        // Spawn all connectivity checks concurrently
+        let mut set = tokio::task::JoinSet::new();
+        for (node_id, address, port) in node_addresses {
+            set.spawn(async move {
+                let socket_addr = format!("{}:{}", address, port);
+                let reachable = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    TcpStream::connect(&socket_addr),
+                )
+                .await
+                .map_or(false, |r| r.is_ok());
+                (node_id, reachable)
+            });
+        }
+
         let mut to_remove = Vec::new();
-
-        // Process in batches to avoid overload
-        const BATCH_SIZE: usize = 20;
-        const MAX_CONCURRENT: usize = 5;
-
-        for batch in node_addresses.chunks(BATCH_SIZE) {
-            let mut tasks = Vec::new();
-
-            for (node_id, address, port) in batch {
-                let node_id = node_id.clone();
-                let address = address.clone();
-                let port = *port;
-
-                let task = tokio::spawn(async move {
-                    let socket_addr = format!("{}:{}", address, port);
-                    match tokio::time::timeout(
-                        Duration::from_secs(3),
-                        TcpStream::connect(&socket_addr),
-                    )
-                    .await
-                    {
-                        Ok(Ok(_stream)) => (node_id, true),
-                        _ => (node_id, false),
-                    }
-                });
-
-                tasks.push(task);
-
-                // Limit concurrent requests
-                if tasks.len() >= MAX_CONCURRENT {
-                    for task in tasks.drain(..) {
-                        if let Ok((node_id, is_reachable)) = task.await {
-                            if !is_reachable {
-                                to_remove.push(node_id);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Process remaining tasks in batch
-            for task in tasks {
-                if let Ok((node_id, is_reachable)) = task.await {
-                    if !is_reachable {
-                        to_remove.push(node_id);
-                    }
-                }
-            }
-
-            // Small delay between batches
-            if batch.len() == BATCH_SIZE {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        while let Some(result) = set.join_next().await {
+            if let Ok((node_id, false)) = result {
+                to_remove.push(node_id);
             }
         }
 
@@ -245,20 +211,19 @@ async fn register_node(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    // Use the client's IP address from the connection, or use the provided address if given
+    // Resolve and validate inputs before touching the lock
     let client_ip = addr.ip().to_string();
     let node_address = req.address.unwrap_or(client_ip);
 
     let node_ip: IpAddr = match node_address.parse() {
         Ok(ip) => ip,
         Err(_) => {
-            let node_count = state.nodes.read().len();
             return (
                 StatusCode::BAD_REQUEST,
                 Json(RegisterResponse {
                     success: false,
                     message: "Invalid node IP address".to_string(),
-                    node_count,
+                    node_count: state.nodes.read().len(),
                     registered_address: node_address,
                     registered_port: req.port,
                 }),
@@ -267,13 +232,12 @@ async fn register_node(
     };
 
     if req.port == 0 {
-        let node_count = state.nodes.read().len();
         return (
             StatusCode::BAD_REQUEST,
             Json(RegisterResponse {
                 success: false,
                 message: "Invalid node port".to_string(),
-                node_count,
+                node_count: state.nodes.read().len(),
                 registered_address: node_address,
                 registered_port: req.port,
             }),
@@ -281,54 +245,52 @@ async fn register_node(
     }
 
     if !is_public_ip(node_ip) {
-        let node_count = state.nodes.read().len();
         return (
             StatusCode::BAD_REQUEST,
             Json(RegisterResponse {
                 success: false,
                 message: "Node IP is not publicly reachable".to_string(),
-                node_count,
+                node_count: state.nodes.read().len(),
                 registered_address: node_address,
                 registered_port: req.port,
             }),
         );
     }
 
-    // Note: Removed port reachability check that was blocking re-registration
-    // DNS server will accept any public IP:port combination now
-    // Health checks will verify connectivity periodically
-
     let node_id = format!("{}:{}", node_address, req.port);
     let now = Utc::now().timestamp();
 
-    // Check if node already exists to preserve first_seen
-    let (first_seen, uptime_hours) = {
-        let nodes = state.nodes.read();
-        if let Some(existing) = nodes.get(&node_id) {
+    // Single write lock: check existing first_seen, insert, and read count atomically
+    let (node_count, uptime_hours) = {
+        let mut nodes = state.nodes.write();
+
+        let (first_seen, uptime_hours) = if let Some(existing) = nodes.get(&node_id) {
             let hours = (now - existing.first_seen) as f64 / 3600.0;
             (existing.first_seen, hours)
         } else {
             (now, 0.0)
-        }
+        };
+
+        nodes.insert(
+            node_id.clone(),
+            NodeInfo {
+                address: node_address.clone(),
+                port: req.port,
+                version: req.version.clone(),
+                height: req.height,
+                last_seen: now,
+                first_seen,
+                uptime_hours,
+            },
+        );
+
+        (nodes.len(), uptime_hours)
     };
 
-    let node_info = NodeInfo {
-        address: node_address.clone(),
-        port: req.port,
-        version: req.version.clone(),
-        height: req.height,
-        last_seen: now,
-        first_seen,
-        uptime_hours,
-    };
-
-    state.nodes.write().insert(node_id.clone(), node_info);
     info!(
         "Registered node: {} (height: {}, uptime: {:.1}h)",
         node_id, req.height, uptime_hours
     );
-
-    let node_count = state.nodes.read().len();
 
     (
         StatusCode::OK,
@@ -336,7 +298,7 @@ async fn register_node(
             success: true,
             message: format!("Node {} registered successfully and is reachable", node_id),
             node_count,
-            registered_address: node_address.clone(),
+            registered_address: node_address,
             registered_port: req.port,
         }),
     )
@@ -347,47 +309,37 @@ async fn get_nodes(
     State(state): State<AppState>,
     Query(query): Query<GetNodesQuery>,
 ) -> impl IntoResponse {
-    state.cleanup_stale_nodes();
-
-    let nodes = state.nodes.read();
-    let mut node_list: Vec<NodeInfo> = nodes.values().cloned().collect();
+    // Snapshot nodes under read lock — release lock before sorting
+    let mut node_list: Vec<NodeInfo> = state.nodes.read().values().cloned().collect();
 
     // Filter by minimum height if specified
     if let Some(min_height) = query.min_height {
         node_list.retain(|n| n.height >= min_height);
     }
 
-    // Calculate values needed for scoring before sorting
+    // Sort/compute outside the lock
     let max_height = node_list.iter().map(|n| n.height).max().unwrap_or(1) as f64;
     let now = Utc::now().timestamp();
 
-    // Sort by composite score:
-    // - 40% weight: blockchain height
-    // - 30% weight: uptime (capped at 168 hours = 1 week)
-    // - 30% weight: recent activity (last_seen)
+    // Composite score: 40% height + 30% uptime + 30% recency
     node_list.sort_by(|a, b| {
-        // Height score (normalized, higher is better)
         let height_score_a = (a.height as f64 / max_height.max(1.0)) * 0.4;
         let height_score_b = (b.height as f64 / max_height.max(1.0)) * 0.4;
 
-        // Uptime score (capped at 168 hours, normalized)
         let uptime_score_a = (a.uptime_hours.min(168.0) / 168.0) * 0.3;
         let uptime_score_b = (b.uptime_hours.min(168.0) / 168.0) * 0.3;
 
-        // Recency score (last seen within 5 minutes = 1.0, older = lower)
         let recency_a = ((300.0 - (now - a.last_seen) as f64).max(0.0) / 300.0) * 0.3;
         let recency_b = ((300.0 - (now - b.last_seen) as f64).max(0.0) / 300.0) * 0.3;
 
         let total_score_a = height_score_a + uptime_score_a + recency_a;
         let total_score_b = height_score_b + uptime_score_b + recency_b;
 
-        // Sort descending by total score
         total_score_b
             .partial_cmp(&total_score_a)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Apply limit if specified
     if let Some(limit) = query.limit {
         node_list.truncate(limit);
     }
@@ -413,20 +365,22 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
 
 // Get statistics
 async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
-    state.cleanup_stale_nodes();
+    // Snapshot under read lock, then compute outside
+    let (node_count, versions, max_height, total_height) = {
+        let nodes = state.nodes.read();
+        let node_count = nodes.len();
+        let mut versions: HashMap<String, usize> = HashMap::new();
+        let mut max_height = 0u64;
+        let mut total_height = 0u64;
 
-    let nodes = state.nodes.read();
-    let node_count = nodes.len();
+        for node in nodes.values() {
+            *versions.entry(node.version.clone()).or_insert(0) += 1;
+            max_height = max_height.max(node.height);
+            total_height += node.height;
+        }
 
-    let mut versions: HashMap<String, usize> = HashMap::new();
-    let mut max_height = 0u64;
-    let mut total_height = 0u64;
-
-    for node in nodes.values() {
-        *versions.entry(node.version.clone()).or_insert(0) += 1;
-        max_height = max_height.max(node.height);
-        total_height += node.height;
-    }
+        (node_count, versions, max_height, total_height)
+    };
 
     let avg_height = if node_count > 0 {
         total_height / node_count as u64

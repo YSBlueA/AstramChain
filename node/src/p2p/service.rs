@@ -242,11 +242,37 @@ impl P2PService {
                     }
                 }
 
-                // Cancel ongoing mining when receiving a new block
-                state
-                    .mining
-                    .cancel_flag
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                // Cancel ongoing mining only if the incoming block is at or beyond the current tip
+                // (blocks below current tip cannot affect the active mining task)
+                if state.mining.active.load(std::sync::atomic::Ordering::SeqCst) {
+                    let current_tip_height = {
+                        if let Ok(bc) = state.bc.try_lock() {
+                            if let Some(tip_hash) = &bc.chain_tip {
+                                bc.load_header(tip_hash).ok().flatten().map(|h| h.index)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    let should_cancel = match current_tip_height {
+                        Some(tip_h) => block.header.index >= tip_h,
+                        None => true, // can't determine, cancel to be safe
+                    };
+                    if should_cancel {
+                        state
+                            .mining
+                            .cancel_flag
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    } else {
+                        debug!(
+                            "[P2P] Block #{} below current tip #{}, skipping mining cancel",
+                            block.header.index,
+                            current_tip_height.unwrap_or(0)
+                        );
+                    }
+                }
 
                 // Try to insert the block
                 let lock_start = std::time::Instant::now();
@@ -255,12 +281,20 @@ impl P2PService {
                 debug!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() after {:?}", block.header.index, lock_start.elapsed());
                 
                 let validation_start = std::time::Instant::now();
+                let syncing = p2p_block.get_syncing();
                 match bc.validate_and_insert_block(&block) {
                     Ok(_) => {
-                        info!(
-                            "[OK] Block #{} added (validation: {:?})",
-                            block.header.index, validation_start.elapsed()
-                        );
+                        if syncing {
+                            debug!(
+                                "[OK] Block #{} added (validation: {:?})",
+                                block.header.index, validation_start.elapsed()
+                            );
+                        } else {
+                            info!(
+                                "[OK] Block #{} added (validation: {:?})",
+                                block.header.index, validation_start.elapsed()
+                            );
+                        }
                         
                         // Release bc lock before taking chain lock
                         let lock_drop_time = std::time::Instant::now();
@@ -327,8 +361,14 @@ impl P2PService {
                             );
                         }
 
-                        info!("[P2P] ✅ Block handler COMPLETED for block #{} (total time {:?})", block.header.index, handler_start.elapsed());
-                        info!("[INFO] Mining cancelled, restarting with updated chain...");
+                        if syncing {
+                            debug!("[P2P] Block #{} synced (total time {:?})", block.header.index, handler_start.elapsed());
+                        } else {
+                            info!("[P2P] ✅ Block handler COMPLETED for block #{} (total time {:?})", block.header.index, handler_start.elapsed());
+                        }
+                        if state.mining.active.load(std::sync::atomic::Ordering::SeqCst) {
+                            info!("[INFO] Mining cancelled, restarting with updated chain...");
+                        }
                     }
                     Err(e) => {
                         // Block validation failed - check if it's an orphan or fork
@@ -502,6 +542,24 @@ impl P2PService {
             warn!("[P2P] Sequential block processor task ended");
         });
 
+        // Periodic seen_tx cleanup — every 10 min, evict entries older than 1 hour.
+        // Moved out of per-TX hot path to avoid O(N) retain on every transaction.
+        let nh_cleanup = node_handle.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(600));
+            loop {
+                interval.tick().await;
+                let now = chrono::Utc::now().timestamp();
+                let mut mempool = nh_cleanup.mempool.lock().unwrap();
+                let before = mempool.seen_tx.len();
+                mempool.seen_tx.retain(|_, &mut ts| now - ts < 3600);
+                let removed = before - mempool.seen_tx.len();
+                if removed > 0 {
+                    log::debug!("[INFO] Cleaned up {} stale seen_tx entries", removed);
+                }
+            }
+        });
+
         // Block handler - just enqueue blocks for sequential processing
         p2p.set_on_block(move |block: block::Block| {
             if let Err(e) = block_tx.send(block) {
@@ -526,21 +584,12 @@ impl P2PService {
                     {
                         info!("[P2P] 🔒 TX handler: acquiring mempool lock for seen_tx check...");
                         let lock_start = std::time::Instant::now();
-                        let mut mempool = state.mempool.lock().unwrap();
+                        let mempool = state.mempool.lock().unwrap();
                         info!("[P2P] ✅ TX handler: mempool lock acquired (took {:?})", lock_start.elapsed());
 
-                        // Check if we've already seen this transaction (prevents loops)
+                        // O(1) dedup via seen_tx — no need to scan pending Vec
                         if mempool.seen_tx.contains_key(&tx.txid) {
                             info!("[INFO] Transaction {} already seen, skipping", tx.txid);
-                            return;
-                        }
-
-                        // Check if transaction already exists in pending pool
-                        if mempool.pending.iter().any(|t| t.txid == tx.txid) {
-                            info!("Transaction {} already in mempool, skipping", tx.txid);
-                            // Mark as seen even if already in mempool
-                            let now = chrono::Utc::now().timestamp();
-                            mempool.seen_tx.insert(tx.txid.clone(), now);
                             return;
                         }
                     }
@@ -566,9 +615,7 @@ impl P2PService {
                             let mut mempool = state.mempool.lock().unwrap();
                             info!("[P2P] ✅ TX handler: mempool lock reacquired (took {:?})", lock_start.elapsed());
 
-                            if mempool.seen_tx.contains_key(&tx.txid)
-                                || mempool.pending.iter().any(|t| t.txid == tx.txid)
-                            {
+                            if mempool.seen_tx.contains_key(&tx.txid) {
                                 info!("[INFO] Transaction {} already recorded, skipping", tx.txid);
                                 return;
                             }
@@ -597,9 +644,6 @@ impl P2PService {
                             } else {
                                 // Mark transaction as seen with timestamp
                                 mempool.seen_tx.insert(tx.txid.clone(), now);
-
-                                // Clean up old seen_tx entries (older than 1 hour)
-                                mempool.seen_tx.retain(|_, &mut timestamp| now - timestamp < 3600);
 
                                 // Add to mempool
                                 mempool.pending.push(tx.clone());
@@ -828,80 +872,162 @@ impl P2PService {
     fn start_block_sync(&self, node_handle: NodeHandle) {
         let p2p = self.manager.clone();
         tokio::spawn(async move {
-            let mut last_syncing_state = false;  // 이전 동기화 상태 추적
-            let mut last_height_refresh = std::time::Instant::now();
+            // How long a stalled peer stays banned (10 minutes).
+            const BAN_DURATION: std::time::Duration = std::time::Duration::from_secs(600);
+            // If the current sync peer delivers no new block within this window → ban it.
+            const PEER_STALL_SECS: u64 = 10;
+            // Log every N blocks to avoid spamming.
+            const SYNC_LOG_INTERVAL: u64 = 100;
+            // How often to refresh peer heights when already synced.
             const HEIGHT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+            let mut last_syncing_state = false;
+            let mut last_height_refresh = std::time::Instant::now();
+            let mut last_logged_height: u64 = 0;
+
+            // Targeted sync state
+            let mut sync_peer: Option<String> = None;       // peer we are currently syncing from
+            let mut last_progress_height: u64 = 0;
+            let mut last_progress_time = std::time::Instant::now();
+
             loop {
-                // 1. 내 현재 블록 높이 확인
+                // Purge expired bans to keep the map small.
+                p2p.cleanup_sync_bans(BAN_DURATION);
+
+                // ── 1. current height ────────────────────────────────────────────
                 let my_height = {
                     let bc = node_handle.bc.lock().unwrap();
-                    if let Some(tip_hash) = &bc.chain_tip {
-                        if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                            header.index + 1
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
-                    }
+                    bc.chain_tip
+                        .as_ref()
+                        .and_then(|h| bc.load_header(h).ok().flatten())
+                        .map(|h| h.index + 1)
+                        .unwrap_or(0)
                 };
 
-                // 2. 피어들의 블록 높이 확인
-                let peer_heights = p2p.get_peer_heights();
-                let max_peer_height = peer_heights.values().max().copied().unwrap_or(0);
+                // ── 2. best available peer (non-banned, connected, highest height) ──
+                let best = p2p.get_best_sync_peer(BAN_DURATION);
+                let max_available_height = best.as_ref().map(|(_, h)| *h).unwrap_or(0);
 
-                // 3. 동기화 상태 설정 및 다음 블록 요청 (my_height)
-                let should_sync = my_height < max_peer_height;
-                
+                let should_sync = my_height < max_available_height;
+
                 if should_sync {
-                    // 동기화 중: 상태 변화가 있을 때만 호출
                     if !last_syncing_state {
                         p2p.set_syncing(true);
                         last_syncing_state = true;
                     }
-                    
-                    info!("[SYNC] Requesting next block #{} (peer max: {})", my_height, max_peer_height);
-                    
-                    // GetHeaders 대신 직접 블록 요청
-                    // 다음 블록의 인덱스를 기준으로 요청
-                    let mut locator = Vec::new();
-                    {
-                        let bc = node_handle.bc.lock().unwrap();
-                        if let Some(tip_hash) = &bc.chain_tip {
-                            if let Ok(bytes) = hex::decode(tip_hash) {
-                                locator.push(bytes);
+
+                    // ── 3. pick / validate current sync peer ─────────────────────
+                    let target_peer = match &sync_peer {
+                        Some(id) => {
+                            // Keep this peer only if it's still connected, not banned,
+                            // and its height is still ahead of ours.
+                            let peer_height = p2p.get_peer_heights()
+                                .get(id).copied().unwrap_or(0);
+                            let still_valid =
+                                !p2p.is_sync_banned(id, BAN_DURATION)
+                                && peer_height > my_height;
+                            if still_valid {
+                                Some(id.clone())
+                            } else {
+                                // Current peer no longer useful — pick fresh best.
+                                None
                             }
                         }
-                    }
-                    
-                    // 헤더를 요청하면 블록이 자동으로 따라옴
-                    p2p.request_headers_from_peers(locator, None);
-                } else {
-                    // 동기화 완료: 상태 변화가 있을 때만 호출
-                    if last_syncing_state {
-                        p2p.set_syncing(false);
-                        last_syncing_state = false;
-                    }
+                        None => None,
+                    };
 
-                    // 동기화 완료 후에도 60초마다 피어 높이 갱신 (GetHeaders 전송)
-                    if last_height_refresh.elapsed() >= HEIGHT_REFRESH_INTERVAL {
-                        last_height_refresh = std::time::Instant::now();
-                        let mut locator = Vec::new();
-                        {
-                            let bc = node_handle.bc.lock().unwrap();
-                            if let Some(tip_hash) = &bc.chain_tip {
-                                if let Ok(bytes) = hex::decode(tip_hash) {
-                                    locator.push(bytes);
+                    let target_peer = match target_peer {
+                        Some(id) => id,
+                        None => {
+                            match best {
+                                Some((id, h)) => {
+                                    info!(
+                                        "[SYNC] 🎯 Targeting peer {} (height: {}, our height: {})",
+                                        id, h, my_height
+                                    );
+                                    // Reset stall tracker when we switch peers.
+                                    last_progress_height = my_height;
+                                    last_progress_time = std::time::Instant::now();
+                                    sync_peer = Some(id.clone());
+                                    id
+                                }
+                                None => {
+                                    // All peers are banned or gone. Wait for reconnect.
+                                    debug!("[SYNC] No eligible sync peer (all banned or disconnected). Waiting…");
+                                    sleep(Duration::from_secs(2)).await;
+                                    continue;
                                 }
                             }
                         }
-                        debug!("[P2P] Periodic height refresh: requesting headers from peers");
+                    };
+
+                    // ── 4. stall detection for the current target peer ────────────
+                    if my_height > last_progress_height {
+                        last_progress_height = my_height;
+                        last_progress_time = std::time::Instant::now();
+                    } else if last_progress_time.elapsed().as_secs() >= PEER_STALL_SECS {
+                        warn!(
+                            "[SYNC] ⚠️  Peer {} stalled for {}s at block #{} (target: {}). Blacklisting for {}s.",
+                            target_peer,
+                            last_progress_time.elapsed().as_secs(),
+                            my_height,
+                            max_available_height,
+                            BAN_DURATION.as_secs()
+                        );
+                        p2p.ban_sync_peer(&target_peer, BAN_DURATION);
+                        sync_peer = None;
+                        last_progress_time = std::time::Instant::now();
+                        // Immediately retry with next best peer on the next loop tick.
+                        sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+
+                    // ── 5. send GetHeaders to the targeted peer ───────────────────
+                    if my_height == 0 || my_height.saturating_sub(last_logged_height) >= SYNC_LOG_INTERVAL {
+                        info!(
+                            "[SYNC] Progress: {}/{} ({:.1}%) via peer {}",
+                            my_height, max_available_height,
+                            my_height as f64 / max_available_height.max(1) as f64 * 100.0,
+                            &target_peer
+                        );
+                        last_logged_height = my_height;
+                    }
+
+                    let locator = {
+                        let bc = node_handle.bc.lock().unwrap();
+                        bc.chain_tip
+                            .as_ref()
+                            .and_then(|h| hex::decode(h).ok())
+                            .map(|b| vec![b])
+                            .unwrap_or_default()
+                    };
+                    p2p.request_headers_from_peer(&target_peer, locator, None);
+
+                } else {
+                    // ── synced ────────────────────────────────────────────────────
+                    if last_syncing_state {
+                        p2p.set_syncing(false);
+                        last_syncing_state = false;
+                        sync_peer = None;
+                        info!("[SYNC] ✅ Fully synced at height {}", my_height);
+                    }
+
+                    // Periodic height refresh (broadcast to all peers).
+                    if last_height_refresh.elapsed() >= HEIGHT_REFRESH_INTERVAL {
+                        last_height_refresh = std::time::Instant::now();
+                        let locator = {
+                            let bc = node_handle.bc.lock().unwrap();
+                            bc.chain_tip
+                                .as_ref()
+                                .and_then(|h| hex::decode(h).ok())
+                                .map(|b| vec![b])
+                                .unwrap_or_default()
+                        };
+                        debug!("[P2P] Periodic height refresh");
                         p2p.request_headers_from_peers(locator, None);
                     }
                 }
 
-                // 빠른 동기화를 위해 1초 대기 (15초 -> 1초)
                 sleep(Duration::from_secs(1)).await;
             }
         });

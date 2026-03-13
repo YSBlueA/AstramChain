@@ -569,6 +569,7 @@ fn build_notify(t: &MiningTemplate) -> Value {
         "method": "mining.notify",
         "params": [
             t.job_id,
+            t.height,
             t.prev_hash,
             t.merkle_root,
             t.timestamp,

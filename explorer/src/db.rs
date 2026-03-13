@@ -44,7 +44,7 @@ impl ExplorerDB {
         info!("✅ Explorer database opened at {}", path);
 
         let explorer_db = ExplorerDB { db: Arc::new(db) };
-        
+
         // 메타데이터 초기화 (첫 실행 시 기존 데이터 스캔)
         explorer_db.initialize_metadata()?;
 
@@ -106,7 +106,48 @@ impl ExplorerDB {
             }
         }
 
+        // One-time migration: build ti: time-index and meta:total_volume from existing t: records
+        if self.db.get(b"meta:ti_migrated")?.is_none() {
+            info!("🔧 Migrating existing transactions to time-index...");
+            let mut batch = WriteBatch::default();
+            let mut total_volume = U256::zero();
+            let mut migrated = 0u64;
+
+            let mut iter = self.db.raw_iterator();
+            iter.seek(b"t:");
+            while iter.valid() {
+                if let Some(key) = iter.key() {
+                    if !key.starts_with(b"t:") {
+                        break;
+                    }
+                    if let Some(value) = iter.value() {
+                        if let Ok(tx) = serde_json::from_slice::<TransactionInfo>(value) {
+                            let ti_key = Self::make_ti_key(&tx);
+                            batch.put(ti_key.as_bytes(), tx.hash.as_bytes());
+                            total_volume += tx.amount;
+                            migrated += 1;
+                        }
+                    }
+                }
+                iter.next();
+            }
+
+            batch.put(b"meta:total_volume", total_volume.to_string().as_bytes());
+            batch.put(b"meta:ti_migrated", b"1");
+            self.db.write(batch)?;
+            info!("🔧 Migration complete: {} transactions indexed, total_volume={}", migrated, total_volume);
+        }
+
         Ok(())
+    }
+
+    /// Build the time-sorted index key for a transaction.
+    /// Inverted timestamp ensures lexicographic order = newest-first.
+    fn make_ti_key(tx: &TransactionInfo) -> String {
+        let ts = tx.timestamp.timestamp();
+        let ts_u64 = if ts < 0 { 0u64 } else { ts as u64 };
+        let inverted = u64::MAX - ts_u64;
+        format!("ti:{:020}:{}", inverted, tx.hash)
     }
 
     /// 블록 저장
@@ -201,16 +242,25 @@ impl ExplorerDB {
     }
 
     /// 트랜잭션 저장
-    /// Key: t:<hash> -> TransactionInfo
-    /// Key: ta:<address>:<timestamp>:<hash> -> "" (주소별 트랜잭션 인덱스)
-    /// Key: tb:<height>:<index> -> hash (블록별 트랜잭션 인덱스)
+    /// Key: t:<hash>                        -> TransactionInfo (JSON)
+    /// Key: ti:<inverted_ts_padded>:<hash>  -> hash  (newest-first time index)
+    /// Key: ta:<address>:<timestamp>:<hash> -> ""    (주소별 트랜잭션 인덱스)
+    /// Key: tb:<height>:<hash>              -> hash  (블록별 트랜잭션 인덱스)
     pub fn save_transaction(&self, tx: &TransactionInfo) -> Result<()> {
+        let tx_key = format!("t:{}", tx.hash);
+
+        // Dedup: only count and accumulate volume for truly new transactions
+        let is_new = self.db.get(tx_key.as_bytes())?.is_none();
+
         let mut batch = WriteBatch::default();
 
         // t:<hash> -> TransactionInfo
-        let tx_key = format!("t:{}", tx.hash);
         let tx_json = serde_json::to_string(tx)?;
         batch.put(tx_key.as_bytes(), tx_json.as_bytes());
+
+        // ti:<inverted_ts>:<hash> -> hash  (O(1) paginated newest-first queries)
+        let ti_key = Self::make_ti_key(tx);
+        batch.put(ti_key.as_bytes(), tx.hash.as_bytes());
 
         // ta:<address>:<timestamp>:<hash> -> "" (from 주소)
         let from_key = format!("ta:{}:{}:{}", tx.from, tx.timestamp.timestamp(), tx.hash);
@@ -220,15 +270,22 @@ impl ExplorerDB {
         let to_key = format!("ta:{}:{}:{}", tx.to, tx.timestamp.timestamp(), tx.hash);
         batch.put(to_key.as_bytes(), b"");
 
-        // tb:<height>:<index> -> hash (블록별 인덱스)
+        // tb:<height>:<hash> -> hash (블록별 인덱스)
         if let Some(height) = tx.block_height {
             let block_tx_key = format!("tb:{}:{}", height, tx.hash);
             batch.put(block_tx_key.as_bytes(), tx.hash.as_bytes());
         }
 
-        // meta:tx_count 증가
-        let current_count = self.get_transaction_count().unwrap_or(0);
-        batch.put(b"meta:tx_count", (current_count + 1).to_string().as_bytes());
+        if is_new {
+            // meta:tx_count 증가
+            let current_count = self.get_transaction_count().unwrap_or(0);
+            batch.put(b"meta:tx_count", (current_count + 1).to_string().as_bytes());
+
+            // meta:total_volume 누적
+            let current_volume = self.get_total_volume().unwrap_or(U256::zero());
+            let new_volume = current_volume + tx.amount;
+            batch.put(b"meta:total_volume", new_volume.to_string().as_bytes());
+        }
 
         self.db.write(batch)?;
         Ok(())
@@ -238,11 +295,11 @@ impl ExplorerDB {
     pub fn get_transaction(&self, hash: &str) -> Result<Option<TransactionInfo>> {
         let candidates = Self::hash_lookup_candidates(hash);
         log::debug!("🔍 Looking up transaction with {} candidate(s): {:?}", candidates.len(), candidates);
-        
+
         for (i, candidate) in candidates.iter().enumerate() {
             let key = format!("t:{}", candidate);
-            log::debug!("   Attempt {}/{}: trying key '{}'", i+1, candidates.len(), key);
-            
+            log::debug!("   Attempt {}/{}: trying key '{}'", i + 1, candidates.len(), key);
+
             if let Some(data) = self.db.get(key.as_bytes())? {
                 log::debug!("✅ Transaction found using candidate: {}", candidate);
                 let mut tx: TransactionInfo = serde_json::from_slice(&data)?;
@@ -265,39 +322,39 @@ impl ExplorerDB {
         Ok(None)
     }
 
-    /// 모든 트랜잭션 조회 (페이징)
+    /// 모든 트랜잭션 조회 (페이징) — O(page * limit) via time-sorted index
     pub fn get_transactions(&self, page: u32, limit: u32) -> Result<Vec<TransactionInfo>> {
-        let start_key = "t:".as_bytes();
+        let prefix = b"ti:" as &[u8];
         let mut iter = self.db.raw_iterator();
-        iter.seek(start_key);
+        iter.seek(prefix);
 
-        let mut all_transactions = Vec::new();
+        let skip = ((page - 1) * limit) as usize;
+        let mut skipped = 0usize;
+        let mut results = Vec::with_capacity(limit as usize);
 
-        while iter.valid() {
+        while iter.valid() && results.len() < limit as usize {
             if let Some(key) = iter.key() {
-                if !key.starts_with(b"t:") {
+                if !key.starts_with(prefix) {
                     break;
                 }
 
-                if let Some(value) = iter.value() {
-                    if let Ok(tx) = serde_json::from_slice::<TransactionInfo>(value) {
-                        all_transactions.push(tx);
+                if skipped < skip {
+                    skipped += 1;
+                    iter.next();
+                    continue;
+                }
+
+                if let Some(hash_bytes) = iter.value() {
+                    let hash = String::from_utf8_lossy(hash_bytes);
+                    if let Some(tx) = self.get_transaction(&hash)? {
+                        results.push(tx);
                     }
                 }
             }
             iter.next();
         }
 
-        all_transactions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-
-        let skip = ((page - 1) * limit) as usize;
-        let paginated: Vec<TransactionInfo> = all_transactions
-            .into_iter()
-            .skip(skip)
-            .take(limit as usize)
-            .collect();
-
-        Ok(paginated)
+        Ok(results)
     }
 
     pub fn get_transactions_by_address(&self, address: &str) -> Result<Vec<TransactionInfo>> {
@@ -445,6 +502,17 @@ impl ExplorerDB {
         Ok(())
     }
 
+    /// 총 거래량 조회 (running counter)
+    pub fn get_total_volume(&self) -> Result<U256> {
+        match self.db.get(b"meta:total_volume")? {
+            Some(data) => {
+                let s = String::from_utf8(data.to_vec())?;
+                Ok(U256::from_dec_str(&s).unwrap_or(U256::zero()))
+            }
+            None => Ok(U256::zero()),
+        }
+    }
+
     /// 마지막 동기화된 블록 높이 조회
     pub fn get_last_synced_height(&self) -> Result<u64> {
         let key = "meta:last_synced";
@@ -464,18 +532,11 @@ impl ExplorerDB {
         Ok(())
     }
 
-    /// 데이터베이스 통계
+    /// 데이터베이스 통계 — O(1): reads metadata counters only
     pub fn get_stats(&self) -> Result<(u64, u64, U256)> {
         let block_count = self.get_block_count()?;
         let tx_count = self.get_transaction_count()?;
-
-        // 총 거래량 계산
-        let mut total_volume = U256::zero();
-        let transactions = self.get_transactions(1, 10000)?; // 최대 10000개
-        for tx in transactions {
-            total_volume += tx.amount;
-        }
-
+        let total_volume = self.get_total_volume()?;
         Ok((block_count, tx_count, total_volume))
     }
 

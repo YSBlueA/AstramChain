@@ -97,17 +97,23 @@ pub async fn run_server(
         .and_then(|params: std::collections::HashMap<String, String>, node: NodeHandle| async move {
             let from_height = params.get("from").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             let to_height = params.get("to").and_then(|s| s.parse::<u64>().ok());
-            
+
+            // get_blocks_range is an O(N) DB scan — run off tokio threads.
             let state = node.clone();
-            let bc = state.bc.lock().unwrap();
-            match bc.get_blocks_range(from_height, to_height) {
+            let result = tokio::task::spawn_blocking(move || {
+                state.bc.lock().unwrap().get_blocks_range(from_height, to_height)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+
+            match result {
                 Ok(blocks) => {
                     let bincode_bytes = bincode::encode_to_vec(&blocks, *BINCODE_CONFIG).unwrap();
                     let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
-                    
-                    log::info!("[INFO] Returning {} blocks from DB (height {} to {:?})", 
+
+                    log::info!("[INFO] Returning {} blocks from DB (height {} to {:?})",
                         blocks.len(), from_height, to_height);
-                    
+
                     Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
                         "blockchain": encoded,
                         "count": blocks.len(),
@@ -764,26 +770,22 @@ pub async fn run_server(
             };
 
             let state = node.clone();
-            // bc 락을 먼저 획득하고 validate 완료 후 즉시 해제
-            // (bc 락을 잡은 채로 chain_state 락을 잡으면 데드락 발생 가능)
+            // Acquire bc lock, validate, then release before taking chain_state lock.
             let validate_result = state.bc.lock().unwrap().validate_and_insert_block(&block);
             match validate_result {
                 Ok(_) => {
+                    let now = chrono::Utc::now().timestamp();
+                    // Single chain_state lock: push block + update recently_mined_blocks.
                     {
                         let mut chain = chain_state.lock().unwrap();
                         chain.blockchain.push(block.clone());
                         chain.enforce_memory_limit();
-                    }
-                    p2p.set_my_height(block.header.index);
-
-                    let now = chrono::Utc::now().timestamp();
-                    {
-                        let mut chain = chain_state.lock().unwrap();
                         chain.recently_mined_blocks.insert(block.hash.clone(), now);
                         chain
                             .recently_mined_blocks
                             .retain(|_, &mut timestamp| now - timestamp < 300);
                     }
+                    p2p.set_my_height(block.header.index);
 
                     let block_to_broadcast = block.clone();
                     tokio::spawn(async move {
@@ -834,7 +836,16 @@ pub async fn run_server(
         .and(warp::get())
         .and(node_filter.clone())
         .and_then(|address: String, node: NodeHandle| async move {
-            match node.bc.lock().unwrap().get_address_balance_from_db(&address) {
+            // UTXO scan is blocking — run off tokio threads.
+            let bc_arc = node.bc.clone();
+            let addr = address.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                bc_arc.lock().unwrap().get_address_balance_from_db(&addr)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+
+            match result {
                 Ok(bal) => {
                     log::debug!("[DEBUG] Balance lookup: {} -> {}", address, bal);
                     Ok::<_, warp::Rejection>(warp::reply::json(
@@ -854,7 +865,15 @@ pub async fn run_server(
         .and(warp::get())
         .and(node_filter.clone())
         .and_then(|address: String, node: NodeHandle| async move {
-            match node.bc.lock().unwrap().get_utxos(&address) {
+            let bc_arc = node.bc.clone();
+            let addr = address.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                bc_arc.lock().unwrap().get_utxos(&addr)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+
+            match result {
                 Ok(list) => Ok::<_, warp::Rejection>(warp::reply::json(&list)),
                 Err(e) => {
                     log::warn!("UTXO lookup failed {}: {:?}", address, e);
@@ -868,33 +887,28 @@ pub async fn run_server(
         .and(warp::get())
         .and(node_filter.clone())
         .and_then(|address: String, node: NodeHandle| async move {
-            // Normalize address to lowercase for consistent lookup
             let address = address.to_lowercase();
 
-            let bc = node.bc.lock().unwrap();
-            let balance = bc
-                .get_address_balance_from_db(&address)
-                .unwrap_or(U256::zero());
-            let received = bc
-                .get_address_received_from_db(&address)
-                .unwrap_or(U256::zero());
-            let sent = bc
-                .get_address_sent_from_db(&address)
-                .unwrap_or(U256::zero());
-            let tx_count = bc
-                .get_address_transaction_count_from_db(&address)
-                .unwrap_or(0);
+            // All four DB calls are blocking UTXO scans — batch them in one spawn_blocking.
+            let bc_arc = node.bc.clone();
+            let addr = address.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let bc = bc_arc.lock().unwrap();
+                let balance  = bc.get_address_balance_from_db(&addr).unwrap_or(U256::zero());
+                let received = bc.get_address_received_from_db(&addr).unwrap_or(U256::zero());
+                let sent     = bc.get_address_sent_from_db(&addr).unwrap_or(U256::zero());
+                let tx_count = bc.get_address_transaction_count_from_db(&addr).unwrap_or(0);
+                (balance, received, sent, tx_count)
+            })
+            .await
+            .expect("spawn_blocking panicked");
 
+            let (balance, received, sent, tx_count) = result;
             log::info!(
                 "Address info for {}: balance={}, received={}, sent={}, tx_count={}",
-                address,
-                balance,
-                received,
-                sent,
-                tx_count
+                address, balance, received, sent, tx_count
             );
 
-            // Convert U256 to hex strings for JSON (to avoid precision loss in JavaScript)
             Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
                 "address": address,
                 "balance": format!("0x{:x}", balance),
@@ -976,6 +990,402 @@ pub async fn run_server(
         .boxed();
 
     println!("HTTP server running at http://{}", bind_addr);
+    warp::serve(routes).run(bind_addr).await;
+}
+
+// -----------------------------------------------------------------------
+// Public RPC server — exposes only safe, read-only endpoints.
+// Internal endpoints (dashboard, /blockchain/memory|db, /debug/*, relay,
+// mempool, mining/submit) are intentionally omitted.
+// The /status response also strips the miner wallet address and balance.
+// -----------------------------------------------------------------------
+pub async fn run_public_server(
+    node: NodeHandle,
+    p2p: std::sync::Arc<PeerManager>,
+    chain_state: std::sync::Arc<std::sync::Mutex<ChainState>>,
+    node_meta: std::sync::Arc<NodeMeta>,
+    bind_addr: SocketAddr,
+) {
+    let node_filter = {
+        let node = node.clone();
+        warp::any().map(move || node.clone())
+    };
+    let p2p_filter = {
+        let p2p = p2p.clone();
+        warp::any().map(move || p2p.clone())
+    };
+    let chain_filter = {
+        let chain_state = chain_state.clone();
+        warp::any().map(move || chain_state.clone())
+    };
+    let meta_filter = {
+        let node_meta = node_meta.clone();
+        warp::any().map(move || node_meta.clone())
+    };
+
+    // GET /health
+    let health_check = warp::path!("health")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let bc = node.bc.lock().unwrap();
+            let height = if let Some(tip_hash) = &bc.chain_tip {
+                if let Ok(Some(header)) = bc.load_header(tip_hash) {
+                    header.index + 1
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "status": "ok",
+                "height": height,
+                "timestamp": chrono::Utc::now().timestamp()
+            })))
+        });
+
+    // GET /status — same as internal, but wallet section omitted
+    let get_status = warp::path("status")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and(chain_filter.clone())
+        .and(meta_filter.clone())
+        .and(p2p_filter.clone())
+        .and_then(|node: NodeHandle, chain_state: std::sync::Arc<std::sync::Mutex<ChainState>>, _node_meta: std::sync::Arc<NodeMeta>, p2p: std::sync::Arc<PeerManager>| async move {
+            let (peer_heights, _my_height, subnet_24_count, subnet_16_count) =
+                match p2p.try_get_status_snapshot() {
+                    Some(data) => data,
+                    None => (HashMap::new(), 0, 0, 0),
+                };
+
+            let (chain_tip, chain_height) = {
+                let bc = node.bc.lock().unwrap();
+                let tip = bc.chain_tip.as_ref().map(|h| hex::encode(h)).unwrap_or_else(|| "none".to_string());
+                let height = bc.chain_tip
+                    .as_ref()
+                    .and_then(|tip_hash| bc.load_header(tip_hash).ok().flatten())
+                    .map(|h| h.index)
+                    .unwrap_or(0);
+                (tip, height)
+            };
+            let memory_blocks = chain_state.lock().unwrap().blockchain.len();
+            let (pending_tx, seen_tx) = {
+                let mp = node.mempool.lock().unwrap();
+                (mp.pending.len(), mp.seen_tx.len())
+            };
+            let diff = *node.mining.current_difficulty.lock().unwrap();
+            let hashrate = *node.mining.current_hashrate.lock().unwrap();
+            let is_mining = node.mining.active.load(std::sync::atomic::Ordering::Relaxed);
+
+            let connected_peers = peer_heights.len();
+            let network_id = p2p.get_network_id().to_string();
+            let chain_id = p2p.get_chain_id();
+            let network_magic = format!("0x{:08x}", p2p.get_network_magic());
+
+            let validation_stats = Astram_core::security::VALIDATION_STATS.get_stats();
+            let total_failures: u64 = validation_stats.iter().map(|(_, count)| count).sum();
+
+            let response = serde_json::json!({
+                "node": {
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "blockchain": {
+                    "height": chain_height,
+                    "memory_blocks": memory_blocks,
+                    "chain_tip": chain_tip,
+                    "difficulty": diff,
+                },
+                "mempool": {
+                    "pending_transactions": pending_tx,
+                    "seen_transactions": seen_tx,
+                },
+                "network": {
+                    "network_id": network_id,
+                    "chain_id": chain_id,
+                    "network_magic": network_magic,
+                    "connected_peers": connected_peers,
+                    "peer_heights": peer_heights,
+                    "subnet_diversity": {
+                        "unique_24_subnets": subnet_24_count,
+                        "unique_16_subnets": subnet_16_count,
+                    }
+                },
+                "mining": {
+                    "active": is_mining,
+                    "hashrate": hashrate,
+                    "difficulty": diff,
+                },
+                "security": {
+                    "validation_failures_total": total_failures,
+                    "validation_failures": validation_stats.into_iter()
+                        .filter(|(_, count)| *count > 0)
+                        .collect::<Vec<_>>(),
+                },
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            });
+
+            Ok::<_, warp::Rejection>(warp::reply::json(&response))
+        });
+
+    // GET /counts
+    let get_counts = warp::path("counts")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|node: NodeHandle| async move {
+            let blocks = {
+                let bc = node.bc.lock().unwrap();
+                bc.chain_tip
+                    .as_ref()
+                    .and_then(|tip_hash| bc.load_header(tip_hash).ok().flatten())
+                    .map(|h| (h.index + 1) as usize)
+                    .unwrap_or(0)
+            };
+            let bc_arc = node.bc.clone();
+            let (transactions, volume) = tokio::task::spawn_blocking(move || {
+                let bc = bc_arc.lock().unwrap();
+                let txs = bc.count_transactions().unwrap_or(0);
+                let vol = bc.calculate_total_volume().unwrap_or(U256::zero());
+                (txs, vol)
+            })
+            .await
+            .unwrap_or((0, U256::zero()));
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "blocks": blocks,
+                "transactions": transactions,
+                "total_volume": format!("0x{:x}", volume)
+            })))
+        });
+
+    // GET /tx/{txid}
+    let get_tx = warp::path!("tx" / String)
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|txid: String, node: NodeHandle| async move {
+            match node.bc.lock().unwrap().get_transaction(&txid) {
+                Ok(Some((tx, height))) => {
+                    let bincode_bytes = bincode::encode_to_vec(&tx, *BINCODE_CONFIG).unwrap();
+                    let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
+                    Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "txid": txid,
+                            "block_height": height,
+                            "transaction": encoded,
+                            "encoding": "bincode+base64"
+                        })),
+                        StatusCode::OK,
+                    ))
+                }
+                Ok(None) => Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({"error": "tx not found"})),
+                    StatusCode::NOT_FOUND,
+                )),
+                Err(e) => Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({"error": format!("db error: {}", e)})),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )),
+            }
+        });
+
+    // GET /address/{address}/balance
+    let get_balance = warp::path!("address" / String / "balance")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|address: String, node: NodeHandle| async move {
+            let bc_arc = node.bc.clone();
+            let addr = address.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                bc_arc.lock().unwrap().get_address_balance_from_db(&addr)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+            match result {
+                Ok(bal) => Ok::<_, warp::Rejection>(warp::reply::json(
+                    &serde_json::json!({"address": address, "balance": bal}),
+                )),
+                Err(_) => Ok::<_, warp::Rejection>(warp::reply::json(
+                    &serde_json::json!({"address": address, "balance": 0}),
+                )),
+            }
+        });
+
+    // GET /address/{address}/utxos
+    let get_utxos = warp::path!("address" / String / "utxos")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|address: String, node: NodeHandle| async move {
+            let bc_arc = node.bc.clone();
+            let addr = address.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                bc_arc.lock().unwrap().get_utxos(&addr)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+            match result {
+                Ok(list) => Ok::<_, warp::Rejection>(warp::reply::json(&list)),
+                Err(_) => Ok::<_, warp::Rejection>(warp::reply::json(&Vec::<Utxo>::new())),
+            }
+        });
+
+    // GET /address/{address}/info
+    let get_address_info = warp::path!("address" / String / "info")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|address: String, node: NodeHandle| async move {
+            let address = address.to_lowercase();
+            let bc_arc = node.bc.clone();
+            let addr = address.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let bc = bc_arc.lock().unwrap();
+                let balance  = bc.get_address_balance_from_db(&addr).unwrap_or(U256::zero());
+                let received = bc.get_address_received_from_db(&addr).unwrap_or(U256::zero());
+                let sent     = bc.get_address_sent_from_db(&addr).unwrap_or(U256::zero());
+                let tx_count = bc.get_address_transaction_count_from_db(&addr).unwrap_or(0);
+                (balance, received, sent, tx_count)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+            let (balance, received, sent, tx_count) = result;
+            Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                "address": address,
+                "balance": format!("0x{:x}", balance),
+                "received": format!("0x{:x}", received),
+                "sent": format!("0x{:x}", sent),
+                "transaction_count": tx_count
+            })))
+        });
+
+    // GET /blockchain/range?from=0&to=10
+    let get_chain_range = warp::path!("blockchain" / "range")
+        .and(warp::get())
+        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .and(node_filter.clone())
+        .and_then(|params: std::collections::HashMap<String, String>, node: NodeHandle| async move {
+            let from_height = params.get("from").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let to_height   = params.get("to").and_then(|s| s.parse::<u64>().ok());
+            let state = node.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                state.bc.lock().unwrap().get_blocks_range(from_height, to_height)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+            match result {
+                Ok(blocks) => {
+                    let bincode_bytes = bincode::encode_to_vec(&blocks, *BINCODE_CONFIG).unwrap();
+                    let encoded = general_purpose::STANDARD.encode(&bincode_bytes);
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "blockchain": encoded,
+                        "count": blocks.len(),
+                        "from": from_height,
+                        "to": to_height,
+                        "source": "database"
+                    })))
+                }
+                Err(e) => Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                    "error": format!("Failed to fetch blockchain from DB: {}", e),
+                    "count": 0
+                }))),
+            }
+        });
+
+    // POST /tx — submit transaction from clients
+    let post_tx = warp::path("tx")
+        .and(warp::post())
+        .and(warp::body::bytes())
+        .and(node_filter.clone())
+        .and(p2p_filter.clone())
+        .and_then(|body: bytes::Bytes, node: NodeHandle, p2p: std::sync::Arc<PeerManager>| async move {
+            let tx: Transaction = match bincode::decode_from_slice::<Transaction, _>(&body, *BINCODE_CONFIG) {
+                Ok((decoded, _)) => decoded,
+                Err(_) => {
+                    return Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({"status":"error","message":"invalid bincode"})),
+                        StatusCode::BAD_REQUEST,
+                    ));
+                }
+            };
+
+            if !tx.verify_signatures().unwrap_or(false) {
+                return Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({"status":"error","message":"invalid signature"})),
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+
+            // Fee check
+            let mut input_sum = U256::zero();
+            {
+                let bc = node.bc.lock().unwrap();
+                for inp in &tx.inputs {
+                    let ukey = format!("u:{}:{}", inp.txid, inp.vout);
+                    if let Ok(Some(blob)) = bc.db.get(ukey.as_bytes()) {
+                        if let Ok((utxo, _)) = bincode::decode_from_slice::<Utxo, _>(&blob, *BINCODE_CONFIG) {
+                            input_sum = input_sum + utxo.amount();
+                        }
+                    }
+                }
+            }
+            let output_sum: U256 = tx.outputs.iter().map(|o| o.amount()).fold(U256::zero(), |a, b| a + b);
+            let fee = if input_sum >= output_sum { input_sum - output_sum } else { U256::zero() };
+            let tx_blob = bincode::encode_to_vec(&tx, *BINCODE_CONFIG).unwrap();
+            let min_fee = Astram_core::config::calculate_min_fee(tx_blob.len());
+            if fee < min_fee {
+                return Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "status":"error",
+                        "message": format!("fee too low: got {} ram, need {} ram", fee, min_fee)
+                    })),
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+
+            let mut mempool = node.mempool.lock().unwrap();
+            if mempool.seen_tx.contains_key(&tx.txid) {
+                return Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({"status":"duplicate"})),
+                    StatusCode::OK,
+                ));
+            }
+            // Double-spend check
+            let tx_utxos: std::collections::HashSet<String> = tx.inputs.iter()
+                .map(|inp| format!("{}:{}", inp.txid, inp.vout))
+                .collect();
+            for pending in &mempool.pending {
+                for inp in &pending.inputs {
+                    if tx_utxos.contains(&format!("{}:{}", inp.txid, inp.vout)) {
+                        return Ok::<_, warp::Rejection>(with_status(
+                            warp::reply::json(&serde_json::json!({"status":"error","message":"double-spend detected"})),
+                            StatusCode::BAD_REQUEST,
+                        ));
+                    }
+                }
+            }
+            let now = chrono::Utc::now().timestamp();
+            mempool.seen_tx.insert(tx.txid.clone(), now);
+            mempool.pending.push(tx.clone());
+            drop(mempool);
+
+            tokio::spawn(async move { p2p.broadcast_tx(&tx).await; });
+
+            Ok::<_, warp::Rejection>(with_status(
+                warp::reply::json(&serde_json::json!({"status":"ok","message":"tx queued"})),
+                StatusCode::OK,
+            ))
+        });
+
+    let routes = health_check
+        .or(get_status)
+        .or(get_counts)
+        .or(get_chain_range)
+        .or(get_balance)
+        .or(get_address_info)
+        .or(get_utxos)
+        .or(get_tx)
+        .or(post_tx)
+        .with(warp::log("Astram::public_rpc"))
+        .boxed();
+
+    println!("Public RPC server running at http://{}", bind_addr);
     warp::serve(routes).run(bind_addr).await;
 }
 

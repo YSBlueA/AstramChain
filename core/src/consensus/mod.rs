@@ -17,6 +17,9 @@ pub mod cuda;
 #[cfg(feature = "cuda-miner")]
 pub use cuda::mine_block_with_coinbase_cuda;
 
+#[cfg(feature = "cuda-miner")]
+pub use cuda::mine_header_cuda;
+
 /// Convert compact difficulty format (bits) to required leading zero count
 /// Compact format: [exponent (1 byte)][mantissa (3 bytes)]
 /// Relationship: difficulty increases by factor of 16 for each additional leading hex-zero

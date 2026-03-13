@@ -1,13 +1,5 @@
-#[cfg(not(feature = "cuda-miner"))]
-compile_error!("Astram-node is GPU-only. Build with CUDA support (`cuda-miner` feature enabled).");
-
 // Use library exports instead of declaring local modules to avoid duplicate crate types
 use Astram_core::Blockchain;
-use Astram_core::block::Block;
-use Astram_core::config::calculate_block_reward;
-use Astram_core::consensus;
-use Astram_core::transaction::BINCODE_CONFIG;
-use Astram_core::utxo::Utxo;
 use astram_config::config::Config;
 use astram_node::ChainState;
 use astram_node::MempoolState;
@@ -16,10 +8,8 @@ use astram_node::NodeHandle;
 use astram_node::NodeHandles;
 use astram_node::NodeMeta;
 use astram_node::p2p::service::P2PService;
-use astram_node::server::run_server;
-use hex;
-use log::{debug, info, warn};
-use primitive_types::U256;
+use astram_node::server::{run_server, run_public_server};
+use log::{info, warn};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -33,17 +23,6 @@ use std::sync::{Arc, Mutex};
 use tokio::signal;
 use tokio::time::{Duration, sleep};
 
-#[cfg(debug_assertions)]
-macro_rules! debug_println {
-    ($($arg:tt)*) => {
-        println!($($arg)*);
-    };
-}
-
-#[cfg(not(debug_assertions))]
-macro_rules! debug_println {
-    ($($arg:tt)*) => {};
-}
 
 #[derive(Debug, Clone, Deserialize)]
 struct DnsNodeInfo {
@@ -72,6 +51,9 @@ struct NodeSettings {
     p2p_port: u16,
     http_bind_addr: String,
     http_port: u16,
+    /// Public RPC port — exposes only safe read-only endpoints (no wallet/mining/relay).
+    /// Set to 0 to disable. Default: 18533.
+    public_rpc_port: u16,
     eth_rpc_bind_addr: String,
     eth_rpc_port: u16,
     dns_server_url: String,
@@ -86,6 +68,7 @@ impl Default for NodeSettings {
             p2p_port: 8335,
             http_bind_addr: "127.0.0.1".to_string(),
             http_port: 19533,
+            public_rpc_port: 18533,
             eth_rpc_bind_addr: "127.0.0.1".to_string(),
             eth_rpc_port: 8545,
             dns_server_url: "http://161.33.19.183:8053".to_string(),
@@ -170,6 +153,7 @@ fn load_node_settings() -> NodeSettings {
                     "P2P_PORT" => settings.p2p_port = value.parse().unwrap_or(settings.p2p_port),
                     "HTTP_BIND_ADDR" => settings.http_bind_addr = value.to_string(),
                     "HTTP_PORT" => settings.http_port = value.parse().unwrap_or(settings.http_port),
+                    "PUBLIC_RPC_PORT" => settings.public_rpc_port = value.parse().unwrap_or(settings.public_rpc_port),
                     "ETH_RPC_BIND_ADDR" => settings.eth_rpc_bind_addr = value.to_string(),
                     "ETH_RPC_PORT" => {
                         settings.eth_rpc_port = value.parse().unwrap_or(settings.eth_rpc_port)
@@ -415,7 +399,6 @@ async fn main() {
         p2p_handle.clone(),
         chain_state.clone(),
         node_meta.clone(),
-        miner_address,
         shutdown_flag.clone(),
         node_settings.clone(),
     )
@@ -873,132 +856,95 @@ async fn register_with_dns(
     }
 }
 
-/// Synchronize blockchain with peers
+/// Synchronize blockchain with peers.
+///
+/// Blocks until `my_height >= max available peer height`.
+/// No overall timeout — the background `start_block_sync` task drives actual block
+/// fetching and handles per-peer timeouts / blacklisting.  This function only monitors
+/// progress and exits once the chain is caught up.
 async fn sync_blockchain(
     node_handle: NodeHandle,
     p2p_handle: Arc<astram_node::p2p::manager::PeerManager>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!("[INFO] Starting blockchain synchronization...");
+    const BAN_DURATION: std::time::Duration = std::time::Duration::from_secs(600);
+    const POLL_INTERVAL: Duration = Duration::from_secs(2);
+    const LOG_INTERVAL: u64 = 100; // log every N blocks
 
-    let my_height = {
+    let initial_height = {
         let bc = node_handle.bc.lock().unwrap();
-        if let Some(tip_hash) = &bc.chain_tip {
-            if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                header.index
-            } else {
-                0
-            }
-        } else {
-            0
-        }
+        bc.chain_tip
+            .as_ref()
+            .and_then(|h| bc.load_header(h).ok().flatten())
+            .map(|h| h.index)
+            .unwrap_or(0)
     };
 
-    info!("[INFO] Local blockchain height: {}", my_height);
-
-    // Get peer heights
-    let peer_heights = p2p_handle.get_peer_heights();
-
-    if peer_heights.is_empty() {
-        info!("[WARN] No peers connected yet, skipping sync");
+    // If no peers are connected yet, skip startup sync (background task will handle it).
+    if p2p_handle.get_peer_heights().is_empty() {
+        info!("[SYNC] No peers connected yet — skipping startup sync");
         return Ok(());
     }
 
-    let max_peer_height = peer_heights.values().max().copied().unwrap_or(0);
-    info!("[INFO] Maximum peer height: {}", max_peer_height);
+    let target = p2p_handle
+        .get_best_sync_peer(BAN_DURATION)
+        .map(|(_, h)| h)
+        .unwrap_or(0);
 
-    if my_height >= max_peer_height {
-        info!(
-            "[INFO] Blockchain is already up to date (height: {})",
-            my_height
-        );
+    if initial_height >= target {
+        info!("[SYNC] Already up to date at height {}", initial_height);
         return Ok(());
     }
 
-    let blocks_behind = max_peer_height - my_height;
     info!(
-        "[INFO] Need to sync {} blocks (from {} to {})",
-        blocks_behind, my_height, max_peer_height
+        "[SYNC] Starting startup sync: {} → {} ({} blocks)",
+        initial_height,
+        target,
+        target - initial_height
     );
 
-    // Request next block we need (my_height + 1)
-    info!("[SYNC] Requesting block #{} from peers...", my_height + 1);
-    
-    // 방법: 블록 높이를 직접 요청하도록 피어들에게 알림
-    // P2P 매니저를 통해 다음 블록 요청
-    // (request_next_block 기능이 구현되어야 함)
-
-    // Wait for blocks to arrive (give peers time to respond)
-    // Increase timeout for larger syncs
-    let max_sync_duration = Duration::from_secs(600); // 10 minutes max
-    let idle_timeout = Duration::from_secs(30); // Stop if no progress for 30 seconds
-    let sync_start = std::time::Instant::now();
-    let mut last_height = my_height;
-    let mut last_progress_time = sync_start;
+    let mut last_logged = initial_height;
 
     loop {
-        sleep(Duration::from_secs(2)).await;
+        sleep(POLL_INTERVAL).await;
 
-        let current_height = {
+        let current = {
             let bc = node_handle.bc.lock().unwrap();
-            if let Some(tip_hash) = &bc.chain_tip {
-                if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                    header.index + 1
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
+            bc.chain_tip
+                .as_ref()
+                .and_then(|h| bc.load_header(h).ok().flatten())
+                .map(|h| h.index + 1)
+                .unwrap_or(0)
         };
 
-        // Check if we made progress
-        if current_height > last_height {
-            info!(
-                "[INFO] Sync progress: {} / {} blocks",
-                current_height, max_peer_height
-            );
-            last_height = current_height;
-            last_progress_time = std::time::Instant::now(); // Reset idle timer
+        // Refresh the target from best available (non-banned) peer each iteration
+        // so we always aim at the current achievable maximum.
+        let current_target = p2p_handle
+            .get_best_sync_peer(BAN_DURATION)
+            .map(|(_, h)| h)
+            .unwrap_or(target);
 
-            // Request more headers if we're still behind
-            if current_height < max_peer_height {
-                let mut locator_hashes = Vec::new();
-                {
-                    let bc = node_handle.bc.lock().unwrap();
-                    if let Some(tip_hash) = &bc.chain_tip {
-                        if let Ok(bytes) = hex::decode(tip_hash) {
-                            locator_hashes.push(bytes);
-                        }
-                    }
-                }
-                p2p_handle.request_headers_from_peers(locator_hashes, None);
-            }
-        }
-
-        if current_height >= max_peer_height {
-            info!("[OK] Blockchain synchronized to height {}", current_height);
+        if current >= current_target {
+            info!("[SYNC] ✅ Startup sync complete at height {}", current);
             break;
         }
 
-        // Check for idle (no progress for 30 seconds)
-        if last_progress_time.elapsed() > idle_timeout {
+        if current.saturating_sub(last_logged) >= LOG_INTERVAL || last_logged == initial_height {
             info!(
-                "[WARN] No sync progress for {} seconds. Current height: {} / {}",
-                idle_timeout.as_secs(),
-                current_height, max_peer_height
+                "[SYNC] Startup sync: {}/{} ({:.1}%)",
+                current,
+                current_target,
+                current as f64 / current_target.max(1) as f64 * 100.0
             );
-            info!("[INFO] Will continue syncing in background via periodic header requests");
-            break;
+            last_logged = current;
         }
 
-        // Check for overall timeout (10 minutes)
-        if sync_start.elapsed() > max_sync_duration {
-            info!(
-                "[WARN] Sync max duration reached ({} minutes). Current height: {} / {}",
-                max_sync_duration.as_secs() / 60,
-                current_height, max_peer_height
-            );
-            info!("[INFO] Proceeding with partial sync; background sync will continue");
+        // If all peers are banned or disconnected, exit and let the background task handle it.
+        if p2p_handle.get_connected_peer_count() == 0 {
+            info!("[SYNC] No peers connected — handing off to background sync");
+            break;
+        }
+        if p2p_handle.get_best_sync_peer(BAN_DURATION).is_none() {
+            info!("[SYNC] All current peers are banned — handing off to background sync");
             break;
         }
     }
@@ -1006,140 +952,18 @@ async fn sync_blockchain(
     Ok(())
 }
 
-/// Wait until blockchain is completely synchronized with peers
-/// This ensures mining only starts when we have all blocks
-async fn wait_for_complete_sync(
-    node_handle: NodeHandle,
-    p2p_handle: Arc<astram_node::p2p::manager::PeerManager>,
-) {
-    const MAX_WAIT_DURATION: Duration = Duration::from_secs(1800); // 30 minutes max
-    const CHECK_INTERVAL: Duration = Duration::from_secs(5);
-    const NO_PEER_GRACE_DURATION: Duration = Duration::from_secs(30);
-    
-    let wait_start = std::time::Instant::now();
-    let mut last_checked_height = 0u64;
-    let mut last_progress_time = wait_start;
-    let mut no_peer_since: Option<std::time::Instant> = None;
-    
-    loop {
-        sleep(CHECK_INTERVAL).await;
-        
-        // Get current blockchain height
-        let my_height = {
-            let bc = node_handle.bc.lock().unwrap();
-            if let Some(tip_hash) = &bc.chain_tip {
-                if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                    header.index
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
-        };
-        
-        // Get max peer height
-        let peer_heights = p2p_handle.get_peer_heights();
-        let max_peer_height = peer_heights.values().max().copied().unwrap_or(0);
-
-        // If there are no peers, don't block forever at startup.
-        if peer_heights.is_empty() {
-            if no_peer_since.is_none() {
-                no_peer_since = Some(std::time::Instant::now());
-                warn!(
-                    "[WARN] No peers connected yet (local height: {}). Waiting up to {}s before mining.",
-                    my_height,
-                    NO_PEER_GRACE_DURATION.as_secs()
-                );
-            }
-
-            if my_height > 0 {
-                if let Some(since) = no_peer_since {
-                    if since.elapsed() >= NO_PEER_GRACE_DURATION {
-                        warn!(
-                            "[WARN] Still no peers after {}s. Proceeding with local chain at height {}.",
-                            NO_PEER_GRACE_DURATION.as_secs(),
-                            my_height
-                        );
-                        return;
-                    }
-                }
-            }
-
-            if wait_start.elapsed() > MAX_WAIT_DURATION {
-                warn!(
-                    "[CRITICAL] Sync wait timeout after {} minutes with no peers. Local height: {}",
-                    MAX_WAIT_DURATION.as_secs() / 60,
-                    my_height
-                );
-                warn!("[WARN] Proceeding without peer sync confirmation.");
-                return;
-            }
-
-            continue;
-        }
-
-        no_peer_since = None;
-        
-        // Check if we've caught up
-        if my_height >= max_peer_height && max_peer_height > 0 {
-            info!(
-                "[OK] Blockchain fully synchronized! Height: {} (peers: {})",
-                my_height, max_peer_height
-            );
-            return;
-        }
-        
-        // Track progress
-        if my_height > last_checked_height {
-            info!(
-                "[SYNC] Progress: {} / {} blocks",
-                my_height, max_peer_height
-            );
-            last_checked_height = my_height;
-            last_progress_time = std::time::Instant::now();
-        }
-        
-        // Check if we've been idle for too long
-        if last_progress_time.elapsed() > Duration::from_secs(120) {
-            info!(
-                "[WARN] No progress for 2 minutes. Current: {} / {} blocks",
-                my_height, max_peer_height
-            );
-            if my_height > 0 {
-                info!("[INFO] Proceeding with current sync state ({}% complete)",
-                    if max_peer_height > 0 { my_height * 100 / max_peer_height } else { 0 }
-                );
-                return;
-            }
-        }
-        
-        // Check overall timeout
-        if wait_start.elapsed() > MAX_WAIT_DURATION {
-            warn!(
-                "[CRITICAL] Sync timeout after {} minutes. Current: {} / {} blocks",
-                MAX_WAIT_DURATION.as_secs() / 60,
-                my_height, max_peer_height
-            );
-            warn!("[WARN] Proceeding with incomplete sync - mining may produce orphan blocks!");
-            return;
-        }
-    }
-}
 
 async fn start_services(
     node_handle: NodeHandle,
     p2p_handle: Arc<astram_node::p2p::manager::PeerManager>,
     chain_state: Arc<Mutex<ChainState>>,
     node_meta: Arc<NodeMeta>,
-    miner_address: String,
     shutdown_flag: Arc<AtomicBool>,
     settings: Arc<NodeSettings>,
 ) -> (
     Vec<tokio::task::JoinHandle<()>>,
     tokio::task::JoinHandle<()>,
 ) {
-    println!("[INFO] my address {}", miner_address);
 
     let mut task_handles = Vec::new();
 
@@ -1494,421 +1318,22 @@ async fn start_services(
         run_server(nh, server_p2p, server_chain, server_meta, http_addr).await;
     });
 
-    // Step 5.5: Wait for complete blockchain synchronization before mining
-    println!("[INFO] Step 5.5: Waiting for complete blockchain synchronization...");
-    wait_for_complete_sync(node_handle.clone(), p2p_handle.clone()).await;
-
-    // Step 6: Start mining
-    println!("[INFO] Step 6: Starting mining...");
-
-    // Mining loop - run in main task, not spawned
-    mining_loop(
-        node_handle.clone(),
-        p2p_handle.clone(),
-        chain_state.clone(),
-        miner_address,
-        shutdown_flag.clone(),
-    )
-    .await;
+    // Start public RPC server (restricted read-only endpoints, no wallet/mining/relay)
+    if settings.public_rpc_port != 0 {
+        let pub_addr = to_socket_addr(
+            "0.0.0.0",
+            settings.public_rpc_port,
+            SocketAddr::from(([0, 0, 0, 0], 18533)),
+        );
+        let pub_nh    = node_handle.clone();
+        let pub_p2p   = p2p_handle.clone();
+        let pub_chain = chain_state.clone();
+        let pub_meta  = node_meta.clone();
+        task_handles.push(tokio::spawn(async move {
+            run_public_server(pub_nh, pub_p2p, pub_chain, pub_meta, pub_addr).await;
+        }));
+    }
 
     // Return background tasks, but not server (we'll abort it)
     (task_handles, server_handle)
-}
-
-async fn mining_loop(
-    node_handle: NodeHandle,
-    p2p_handle: Arc<astram_node::p2p::manager::PeerManager>,
-    chain_state: Arc<Mutex<ChainState>>,
-    miner_address: String,
-    shutdown_flag: Arc<AtomicBool>,
-) {
-    let requested_backend = std::env::var("MINER_BACKEND")
-        .unwrap_or_else(|_| "cuda".to_string())
-        .to_lowercase();
-
-    if requested_backend != "cuda" {
-        println!("[ERROR] Only CUDA miner backend is supported");
-        std::process::exit(1);
-    }
-
-    if !cfg!(feature = "cuda-miner") {
-        println!("[ERROR] CUDA miner feature not enabled. Build with --features cuda-miner");
-        std::process::exit(1);
-    }
-
-    println!("[INFO] Using CUDA miner backend");
-
-    loop {
-        // Check shutdown flag
-        if shutdown_flag.load(OtherOrdering::SeqCst) {
-            info!("[WARN] Shutdown flag detected, stopping mining loop...");
-            // Ensure cancel flag is set
-            node_handle
-                .mining
-                .cancel_flag
-                .store(true, OtherOrdering::SeqCst);
-            break;
-        }
-
-        // During synchronization, check if we're catching up with peers
-        // If yes, skip mining to allow blocks to be processed without lock contention
-        let peer_heights = p2p_handle.get_peer_heights();
-        let my_height = {
-            if let Ok(bc) = node_handle.bc.try_lock() {
-                if let Some(tip_hash) = &bc.chain_tip {
-                    if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                        Some(header.index)
-                    } else {
-                        None
-                    }
-                } else {
-                    Some(0)
-                }
-            } else {
-                None // Can't acquire lock, skip mining this round
-            }
-        };
-        
-        // Skip mining during sync if we're more than 5 blocks behind
-        if let (Some(my_h), Some(&peer_h)) = (my_height, peer_heights.values().max()) {
-            if peer_h > my_h + 5 {
-                info!("[MINING] Skipping mining during sync (local: {}, peer max: {})", my_h, peer_h);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        }
-
-        // Snapshot pending txs + mining params while holding the lock briefly
-        debug_println!("[DEBUG] Mining: Attempting to acquire WRITE lock...");
-        let (snapshot_txs, difficulty, prev_hash, index_snapshot, cancel_flag, hashrate_shared) = {
-            debug_println!("[DEBUG] Mining: WRITE lock acquired");
-            debug!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock()...");
-
-            // Mark mining as active
-            node_handle.mining.active.store(true, OtherOrdering::SeqCst);
-
-            // Reset cancel flag at the start of each mining round
-            node_handle
-                .mining
-                .cancel_flag
-                .store(false, OtherOrdering::SeqCst);
-
-            // Take pending transactions to work on them outside the lock
-            let txs_copy = {
-                let mut mempool = node_handle.mempool.lock().unwrap();
-                let txs = mempool.pending.clone();
-                mempool.pending.clear();
-                txs
-            };
-
-            let (prev_hash, next_index, diff) = {
-                let lock_start = std::time::Instant::now();
-                debug!("[LOCK-DEBUG] ⏳ Mining: attempting bc.lock() for header read...");
-                let mut bc = node_handle.bc.lock().unwrap();
-                debug!("[LOCK-DEBUG] ✅ Mining: acquired bc.lock() after {:?}", lock_start.elapsed());
-
-                // previous tip hash
-                let prev_hash = bc.chain_tip.clone().unwrap_or_else(|| "0".repeat(64));
-
-                // determine next index from tip header (so header.index is known before mining)
-                debug_println!("[DEBUG] Mining: Loading tip header to determine next index");
-                let next_index: u64 = if let Some(tip_hash) = bc.chain_tip.clone() {
-                    println!(
-                        "[DEBUG] Mining: Loading header for hash: {}",
-                        &tip_hash[..16]
-                    );
-                    if let Ok(Some(prev_header)) = bc.load_header(&tip_hash) {
-                        let next_index = prev_header.index + 1;
-                        debug_println!("[DEBUG] Mining: Got next_index = {}", next_index);
-                        next_index
-                    } else {
-                        debug_println!("[DEBUG] Mining: Failed to load header, using 0");
-                        0
-                    }
-                } else {
-                    debug_println!("[DEBUG] Mining: No chain_tip, using next_index = 0");
-                    0
-                };
-
-                // Calculate difficulty for the next block (dynamic adjustment every 30 blocks)
-                let diff = bc
-                    .calculate_adjusted_difficulty(next_index)
-                    .unwrap_or(bc.difficulty);
-
-                if diff != bc.difficulty {
-                    println!(
-                        "[INFO] Difficulty adjusted: {} -> {} (block #{})",
-                        bc.difficulty, diff, next_index
-                    );
-                    // Update blockchain difficulty before mining
-                    bc.difficulty = diff;
-                }
-
-                let lock_release_time = std::time::Instant::now();
-                debug!("[LOCK-DEBUG] ⏳ Mining: releasing bc.lock()...");
-                // bc goes out of scope here - lock released
-                
-                debug!("[LOCK-DEBUG] ✅ Mining: released bc.lock() after {:?}", lock_release_time.elapsed());
-
-                (prev_hash, next_index, diff)
-            };
-
-            // Update current difficulty in state
-            *node_handle.mining.current_difficulty.lock().unwrap() = diff;
-
-            (
-                txs_copy,
-                diff,
-                prev_hash,
-                next_index,
-                node_handle.mining.cancel_flag.clone(),
-                node_handle.mining.current_hashrate.clone(),
-            )
-        };
-        debug_println!("[DEBUG] Mining: WRITE lock released");
-        // Write lock released - calculate fees OUTSIDE the lock
-
-        // Calculate total fees from pending transactions (with separate read lock for DB)
-        debug_println!("[DEBUG] Mining: Attempting to acquire READ lock for fees...");
-        let total_fees = {
-            let state = node_handle.clone();
-            debug_println!("[DEBUG] Mining: READ lock acquired for fees");
-            let mut fee_sum = U256::zero();
-            let bc = state.bc.lock().unwrap();
-
-            for tx in &snapshot_txs {
-                // Calculate fee: input_sum - output_sum
-                let mut input_sum = U256::zero();
-                let mut output_sum = U256::zero();
-
-                // Sum inputs (from UTXO)
-                for inp in &tx.inputs {
-                    let ukey = format!("u:{}:{}", inp.txid, inp.vout);
-                    if let Ok(Some(blob)) = bc.db.get(ukey.as_bytes()) {
-                        if let Ok((utxo, _)) =
-                            bincode::decode_from_slice::<Utxo, _>(&blob, *BINCODE_CONFIG)
-                        {
-                            input_sum += utxo.amount();
-                        }
-                    }
-                }
-
-                // Sum outputs
-                for out in &tx.outputs {
-                    output_sum += out.amount();
-                }
-
-                // Fee is the difference
-                if input_sum >= output_sum {
-                    let fee = input_sum - output_sum;
-                    fee_sum += fee;
-                }
-            }
-
-            fee_sum
-        };
-        debug_println!("[DEBUG] Mining: READ lock released after fees");
-        // Read lock released
-
-        // prepare block transactions: coinbase + pending
-        // NOTE: we pass pending txs to consensus::mine_block_with_coinbase which will prepend coinbase
-        let block_txs_for_logging = snapshot_txs.len();
-        println!("[INFO] Mining {} pending tx(s)...", block_txs_for_logging);
-
-        // Coinbase reward = block reward + total fees
-        let base_reward = current_block_reward_snapshot(index_snapshot);
-        let coinbase_reward = base_reward + total_fees;
-
-        if total_fees > U256::zero() {
-            let fees_asrm = total_fees / U256::from(1_000_000_000_000_000_000u64);
-            println!(
-                "[INFO] Total fees in block: {} wei ({} ASRM)",
-                total_fees, fees_asrm
-            );
-        }
-        println!(
-            "[INFO] Coinbase reward: {} (base: {} + fees: {})",
-            coinbase_reward, base_reward, total_fees
-        );
-
-        // Record mining start time for hashrate calculation
-        let mining_start = std::time::Instant::now();
-
-        log::info!(
-            "[INFO] Starting mining task for block {} with difficulty {}...",
-            index_snapshot,
-            difficulty
-        );
-
-        // prepare parameters for blocking mining call
-        let prev_hash = prev_hash.clone();
-        let difficulty_local = difficulty;
-        let index_local = index_snapshot;
-        let miner_addr_cloned = miner_address.clone();
-        let txs_cloned = snapshot_txs.clone();
-        let cancel_for_thread = cancel_flag.clone();
-        let hashrate_for_thread = hashrate_shared.clone();
-
-        // Run mining in a blocking task so we don't block the tokio runtime
-        debug_println!("[DEBUG] ⏳ Spawning mining task on blocking thread pool...");
-        let mined_block_res: anyhow::Result<Block> = tokio::task::spawn_blocking(move || {
-            consensus::mine_block_with_coinbase_cuda(
-                index_local,
-                prev_hash,
-                difficulty_local,
-                txs_cloned,
-                &miner_addr_cloned,
-                coinbase_reward,
-                cancel_for_thread,
-                Some(hashrate_for_thread),
-            )
-        })
-        .await
-        .expect("mining task panicked");
-
-        debug_println!("[DEBUG] ✅ Mining task COMPLETED and returned to main thread!");
-
-        match mined_block_res {
-            Ok(block) => {
-                // Note: We do NOT modify the mined block's timestamp or hash
-                // because that would invalidate the PoW nonce that was just found.
-                // The block is already valid as-is from mining.
-
-                debug_println!("[DEBUG] Validating and inserting block into blockchain DB...");
-                debug!("[LOCK-DEBUG] 🔒 Mining: attempting bc.lock() for block insert...");
-                let insert_result = {
-                    let lock_acq_insert = std::time::Instant::now();
-                    let mut bc_insert = node_handle
-                        .bc
-                        .lock()
-                        .unwrap();
-                    debug!("[LOCK-DEBUG] ✅ Mining: acquired bc.lock() for insert after {:?}", lock_acq_insert.elapsed());
-                    bc_insert.validate_and_insert_block(&block)
-                    // bc_insert lock released here
-                };
-                debug!("[LOCK-DEBUG] ✅ Mining: released bc.lock() after insert");
-                
-                match insert_result
-                {
-                    Ok(_) => {
-                        println!(
-                            "[OK]✅ Block saved to DB - index={} hash={}",
-                            block.header.index, block.hash
-                        );
-
-                        // Update mining statistics
-                        node_handle
-                            .mining
-                            .blocks_mined
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-                        // Calculate hashrate (rough estimate)
-                        let mining_duration = mining_start.elapsed().as_secs_f64();
-                        if mining_duration > 0.0 {
-                            // difficulty_local is compact bits, not an exponent.
-                            // Approximate attempts by converted leading-zero hardness: 16^z = 2^(4z).
-                            let leading_zeros =
-                                consensus::compact_to_leading_zeros(difficulty_local);
-                            let estimated_hashes = 16_f64.powi(leading_zeros as i32);
-                            let hashrate = estimated_hashes / mining_duration;
-                            *node_handle.mining.current_hashrate.lock().unwrap() = hashrate;
-                        }
-
-                        let block_to_broadcast = block.clone();
-
-                        {
-                            let mut chain = chain_state.lock().unwrap();
-                            chain.blockchain.push(block.clone());
-                            chain.enforce_memory_limit(); // Security: Enforce memory limit
-                        }
-                        // pending already cleared earlier
-
-                        // Update P2P manager height
-                        p2p_handle.set_my_height(block.header.index);
-
-                        // Track this block as recently mined (to ignore when received from peers)
-                        let now = chrono::Utc::now().timestamp();
-                        {
-                            let mut chain = chain_state.lock().unwrap();
-                            chain.recently_mined_blocks.insert(block.hash.clone(), now);
-
-                            // Clean up old entries (older than 5 minutes)
-                            chain
-                                .recently_mined_blocks
-                                .retain(|_, &mut timestamp| now - timestamp < 300);
-                        }
-
-                        println!("[OK] Block mined! Broadcasting...");
-
-                        // -------------------------
-                        // Broadcast mined block
-                        // -------------------------
-                        // broadcast_block returns () (fire-and-forget), so just await it
-                        p2p_handle.broadcast_block(&block_to_broadcast).await;
-                    }
-                    Err(e) => {
-                        eprintln!("Block insertion failed: {}", e);
-                        // requeue non-coinbase txs back to pending
-                        {
-                            let mut mempool = node_handle.mempool.lock().unwrap();
-                            for tx in block.transactions.into_iter().skip(1) {
-                                mempool.pending.push(tx);
-                            }
-                            // Security: Enforce mempool limits
-                            mempool.enforce_mempool_limit();
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                let error_msg = format!("{}", e);
-
-                // Check if mining was cancelled (not an actual error)
-                let is_cancelled = error_msg.contains("cancelled") || error_msg.contains("Mining cancelled");
-                if is_cancelled {
-                    info!("[INFO] Mining cancelled (normal)");
-                } else {
-                    eprintln!("[ERROR] Mining error: {}", e);
-                    // Only reset hashrate on actual errors, not cancellations.
-                    // On cancellation we keep the last known hashrate so the dashboard
-                    // doesn't flicker to 0 H/s during the brief inter-round gap.
-                    *node_handle.mining.current_hashrate.lock().unwrap() = 0.0;
-                }
-
-                // Mark mining as inactive
-                node_handle
-                    .mining
-                    .active
-                    .store(false, OtherOrdering::SeqCst);
-
-                // Only requeue txs if it wasn't a cancellation
-                if !is_cancelled {
-                    let mut mempool = node_handle.mempool.lock().unwrap();
-                    for tx in snapshot_txs.into_iter() {
-                        mempool.pending.push(tx);
-                    }
-                    // Security: Enforce mempool limits
-                    mempool.enforce_mempool_limit();
-                }
-            }
-        }
-
-        // Wait before next cycle, but check shutdown flag frequently for quick response
-        println!("[INFO] ⏱️  Waiting 3 seconds before next mining cycle...");
-        for _ in 0..3 {
-            if shutdown_flag.load(OtherOrdering::SeqCst) {
-                info!("[WARN] Shutdown detected during sleep, exiting mining loop");
-                return;
-            }
-            sleep(Duration::from_secs(1)).await;
-        }
-        debug_println!("[DEBUG] Mining cycle: Sleep completed, starting next iteration...");
-    }
-}
-
-fn current_block_reward_snapshot(block_height:u64) -> U256 {
-    // For now, always return initial reward (genesis/early blocks)
-    // In production, this would take current blockchain height as parameter
-    //initial_block_reward()
-    calculate_block_reward(block_height)
 }

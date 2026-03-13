@@ -172,6 +172,10 @@ pub struct PeerManager {
     my_bind_addr: Arc<Mutex<String>>,
     my_public_ip: Arc<Mutex<Option<String>>>,
     is_syncing: Arc<Mutex<bool>>, // 블록 동기화 중 플래그 (Tx Inv 필터링용)
+    pending_header_requests: Shared<HashMap<PeerId, std::time::Instant>>, // 요청 시각 추적
+    /// Sync blacklist: peer_id → time when the ban was imposed.
+    /// Banned peers are excluded from sync for SYNC_BAN_DURATION_SECS.
+    sync_blacklist: Shared<HashMap<PeerId, std::time::Instant>>,
     /// callback when a new block is received
     on_block: Arc<Mutex<Option<Arc<dyn Fn(block::Block) + Send + Sync>>>>,
     /// callback when a new transaction is received
@@ -208,6 +212,8 @@ impl PeerManager {
             on_getdata: Arc::new(Mutex::new(None)),
             on_get_chain_locator: Arc::new(Mutex::new(None)),
             on_headers: Arc::new(Mutex::new(None)),
+            pending_header_requests: Arc::new(Mutex::new(HashMap::new())),
+            sync_blacklist: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -319,7 +325,7 @@ impl PeerManager {
         peer_socket.ip().is_loopback()
     }
 
-    fn disconnect_peer(&self, peer_id: &PeerId, reason: &str) {
+    pub fn disconnect_peer(&self, peer_id: &PeerId, reason: &str) {
         warn!("[P2P] Disconnecting {}: {}", peer_id, reason);
         self.peers.lock().remove(peer_id);
         self.peer_heights.lock().remove(peer_id);
@@ -1200,6 +1206,7 @@ impl PeerManager {
 
             Headers { headers } => {
                 info!("{} sent {} headers", peer_id, headers.len());
+                self.pending_header_requests.lock().remove(&peer_id);
                 if !headers.is_empty() {
                     let accepted = if let Some(cb) = &*self.on_headers.lock() {
                         (cb)(peer_id.clone(), headers.clone())
@@ -1506,10 +1513,102 @@ impl PeerManager {
         let peers = self.peers.lock().clone();
         debug!("[P2P] request_headers_from_peers: {} peers", peers.len());
 
-        for (_id, tx) in peers {
+        let now = std::time::Instant::now();
+        let mut pending = self.pending_header_requests.lock();
+        for (id, tx) in peers {
+            pending.entry(id.clone()).or_insert(now);
             let _ = tx.send(P2pMessage::GetHeaders {
                 locator_hashes: locator_hashes.clone(),
                 stop_hash: stop_hash.clone(),
+            });
+        }
+    }
+
+    /// Return peer IDs that have not responded to a GetHeaders request within `timeout`.
+    /// Clears them from the pending map.
+    pub fn take_timed_out_header_peers(&self, timeout: std::time::Duration) -> Vec<PeerId> {
+        let mut pending = self.pending_header_requests.lock();
+        let timed_out: Vec<PeerId> = pending
+            .iter()
+            .filter(|(_, t)| t.elapsed() >= timeout)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &timed_out {
+            pending.remove(id);
+        }
+        timed_out
+    }
+
+    // -----------------------------------------------------------------------
+    // Sync blacklist — peers that failed to deliver blocks within the timeout
+    // are banned for SYNC_BAN_DURATION_SECS (10 minutes) from sync requests.
+    // -----------------------------------------------------------------------
+
+    /// Ban a peer from sync requests for `duration`. Also disconnects it immediately.
+    pub fn ban_sync_peer(&self, peer_id: &PeerId, duration: std::time::Duration) {
+        warn!(
+            "[SYNC] 🚫 Banning peer {} for {:.0}s (sync timeout)",
+            peer_id,
+            duration.as_secs_f64()
+        );
+        self.disconnect_peer(peer_id, "sync timeout");
+        self.sync_blacklist.lock().insert(peer_id.clone(), std::time::Instant::now());
+        // Store ban start; expiry is checked against `duration` in is_sync_banned.
+        // We keep duration in the map via a tuple so callers can use different durations.
+        // Simple approach: store ban_time and compare with a fixed constant.
+        // (The duration is passed at call site; all callers use the same 600s constant.)
+    }
+
+    /// Returns true if the peer is currently banned from sync.
+    pub fn is_sync_banned(&self, peer_id: &PeerId, ban_duration: std::time::Duration) -> bool {
+        let bl = self.sync_blacklist.lock();
+        if let Some(t) = bl.get(peer_id) {
+            t.elapsed() < ban_duration
+        } else {
+            false
+        }
+    }
+
+    /// Remove expired sync bans (call periodically to free memory).
+    pub fn cleanup_sync_bans(&self, ban_duration: std::time::Duration) {
+        let mut bl = self.sync_blacklist.lock();
+        bl.retain(|_, t| t.elapsed() < ban_duration);
+    }
+
+    /// Return the connected, non-banned peer with the highest reported block height.
+    /// Returns None if no eligible peer exists.
+    pub fn get_best_sync_peer(
+        &self,
+        ban_duration: std::time::Duration,
+    ) -> Option<(PeerId, u64)> {
+        let peers = self.peers.lock();
+        let peer_heights = self.peer_heights.lock();
+        let bl = self.sync_blacklist.lock();
+
+        peer_heights
+            .iter()
+            .filter(|(peer_id, _)| {
+                peers.contains_key(*peer_id)
+                    && bl.get(*peer_id).map_or(true, |t| t.elapsed() >= ban_duration)
+            })
+            .max_by_key(|(_, h)| *h)
+            .map(|(id, h)| (id.clone(), *h))
+    }
+
+    /// Send GetHeaders to a single specific peer (targeted sync).
+    pub fn request_headers_from_peer(
+        &self,
+        peer_id: &PeerId,
+        locator_hashes: Vec<Vec<u8>>,
+        stop_hash: Option<Vec<u8>>,
+    ) {
+        let peers = self.peers.lock();
+        if let Some(tx) = peers.get(peer_id) {
+            let mut pending = self.pending_header_requests.lock();
+            pending.insert(peer_id.clone(), std::time::Instant::now());
+            let _ = tx.send(P2pMessage::GetHeaders {
+                locator_hashes,
+                stop_hash,
             });
         }
     }
@@ -1525,6 +1624,11 @@ impl PeerManager {
         for (_, tx) in peers {
             let _ = tx.send(P2pMessage::Ping(nonce));
         }
+    }
+
+    /// 블록 동기화 상태 반환
+    pub fn get_syncing(&self) -> bool {
+        *self.is_syncing.lock()
     }
 
     /// 블록 동기화 상태 설정 (동기화 중엔 모든 Inv 무시)

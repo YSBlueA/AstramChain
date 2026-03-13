@@ -349,6 +349,17 @@ impl Blockchain {
 
     /// validate and insert block (core of migration/consensus)
     pub fn validate_and_insert_block(&mut self, block: &Block) -> Result<()> {
+        // 0) Duplicate block check: skip if already stored
+        let block_key = format!("b:{}", block.hash);
+        if self.db.get(block_key.as_bytes())?.is_some() {
+            log::debug!(
+                "Block #{} ({}) already exists, skipping insertion",
+                block.header.index,
+                &block.hash[..16]
+            );
+            return Ok(());
+        }
+
         // 1) header hash match
         let computed = compute_header_hash(&block.header)?;
         if computed != block.hash {
@@ -1095,7 +1106,7 @@ impl Blockchain {
 
         // Safety: If tip height is suspiciously low compared to DB block count,
         // recover tip first to avoid accidental reorg to a shorter fork.
-        if current_header.index < 100 {
+        {
             let block_count = self.count_blocks() as u64;
             if block_count > 100 && current_header.index + 1 < block_count / 2 {
                 log::warn!(

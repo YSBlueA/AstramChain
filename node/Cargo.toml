@@ -1,6 +1,6 @@
 [package]
 name = "Astram-node"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2024"
 
 [lib]
@@ -46,5 +46,5 @@ dirs = "5.0"
 shellexpand = "3.1"
 
 [features]
-default = ["cuda-miner"]
+default = []
 cuda-miner = ["Astram-core/cuda-miner"]

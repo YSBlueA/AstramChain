@@ -155,22 +155,26 @@ async fn sync_blockchain(db: &ExplorerDB, rpc_client: &NodeRpcClient) -> anyhow:
         new_blocks += 1;
     }
 
+    // Collect unique addresses touched in this batch to avoid N+1 per-tx updates
+    let mut addresses_to_update = std::collections::HashSet::new();
+
     for tx in &transactions {
         db.save_transaction(tx)?;
         new_transactions += 1;
 
-        // Update address info for involved addresses
-        if let Err(e) = db.update_address_info(&tx.from) {
-            error!("Failed to update address info for {}: {}", tx.from, e);
-        }
-        if let Err(e) = db.update_address_info(&tx.to) {
-            error!("Failed to update address info for {}: {}", tx.to, e);
+        addresses_to_update.insert(tx.from.clone());
+        addresses_to_update.insert(tx.to.clone());
+    }
+
+    // Batch address update: one scan per unique address instead of two per transaction
+    for address in addresses_to_update {
+        if let Err(e) = db.update_address_info(&address) {
+            error!("Failed to update address info for {}: {}", address, e);
         }
     }
 
-    // Update metadata
-    db.set_block_count(latest_height)?;
-    db.set_transaction_count(latest_height)?; // Each block has 1 tx (coinbase)
+    // Update sync metadata (tx_count / total_volume are maintained by save_transaction)
+    db.set_block_count(latest_height + 1)?;
     db.set_last_synced_height(latest_height)?;
 
     if new_blocks > 0 || new_transactions > 0 {

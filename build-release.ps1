@@ -34,8 +34,9 @@ New-Item -ItemType Directory -Force -Path "$ReleaseDir/config" | Out-Null
 
 # Build all components in release mode
 Write-Info "Building all components in release mode..."
-cargo build --release --workspace --exclude Astram-node --exclude Astram-explorer
+cargo build --release --workspace --exclude Astram-node --exclude Astram-explorer --exclude Astram-miner
 cargo build --release -p Astram-node @NodeFeatureArgs
+cargo build --release -p Astram-miner --features cuda-miner
 cargo build --release -p Astram-explorer @ExplorerFeatureArgs
 
 if ($LASTEXITCODE -ne 0) {
@@ -86,6 +87,8 @@ Write-Success "Deployed explorer web to $ReleaseDir/explorer_web"
 Write-Info "Copying executables..."
 $Executables = @(
     "Astram-node.exe",
+    "Astram-miner.exe",
+    "Astram-stratum.exe",
     "Astram-dns.exe",
     "Astram-explorer.exe",
     "wallet-cli.exe"
