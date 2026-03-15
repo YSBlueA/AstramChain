@@ -83,6 +83,14 @@ New-Item -ItemType Directory -Force -Path "$ReleaseDir/explorer_web" | Out-Null
 Copy-Item -Recurse -Force "explorer/web/dist/*" "$ReleaseDir/explorer_web/"
 Write-Success "Deployed explorer web to $ReleaseDir/explorer_web"
 
+$ExplorerConfContent = @'
+window.ASTRAM_EXPLORER_CONF = {
+  apiBaseUrl: "https://explorer.astramchain.com/api"
+};
+'@
+Set-Content -Path "$ReleaseDir/explorer_web/explorer.conf.js" -Value $ExplorerConfContent
+Write-Success "Created explorer_web/explorer.conf.js"
+
 # Copy pool web
 Write-Info "Copying pool web..."
 $PoolWebDir = "astram-stratum/web"

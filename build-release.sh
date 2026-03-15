@@ -79,6 +79,13 @@ popd >/dev/null
 mkdir -p "$RELEASE_DIR/explorer_web"
 cp -r explorer/web/dist/* "$RELEASE_DIR/explorer_web/"
 
+cat > "$RELEASE_DIR/explorer_web/explorer.conf.js" <<'EOF'
+window.ASTRAM_EXPLORER_CONF = {
+  apiBaseUrl: "https://explorer.astramchain.com/api"
+};
+EOF
+echo -e "${SUCCESS}Created explorer_web/explorer.conf.js${NC}"
+
 # ---------------------------
 # Copy pool web
 # ---------------------------
@@ -189,6 +196,8 @@ load_conf_file() {
             value="${value%%#*}"
             value="${value# }"
             value="${value% }"
+            # Expand environment variables in the value (e.g. ${HOME})
+            value=$(eval "echo \"$value\"" 2>/dev/null || echo "$value")
             if [ -n "$key" ]; then
                 export "$key=$value"
             fi
