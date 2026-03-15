@@ -135,6 +135,11 @@ impl ShareTracker {
         block_hash: String,
         timestamp: i64,
     ) -> Vec<(String, U256)> {
+        // Deduplicate: if this block hash was already processed, skip entirely.
+        if self.found_blocks.iter().any(|b| b.hash == block_hash) {
+            return Vec::new();
+        }
+
         let window_len = self.recent_shares.len();
 
         // Count shares per miner in the window

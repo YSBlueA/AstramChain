@@ -560,11 +560,15 @@ async fn handle_stratum_inner(
                                                         chrono::Utc::now().timestamp(),
                                                     )
                                                 };
-                                                for (addr, amount) in &credits {
-                                                    log::info!(
-                                                        "  💰 {} credited 0x{:x} wei",
-                                                        addr, amount
-                                                    );
+                                                if credits.is_empty() {
+                                                    log::warn!("[BLOCK] duplicate block hash {} ignored", &block.hash[..8]);
+                                                } else {
+                                                    for (addr, amount) in &credits {
+                                                        log::info!(
+                                                            "  💰 {} credited 0x{:x} wei",
+                                                            addr, amount
+                                                        );
+                                                    }
                                                 }
                                                 s.record_accepted_share();
                                                 // Signal template loop to rebuild immediately
