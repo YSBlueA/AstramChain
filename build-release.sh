@@ -80,6 +80,29 @@ mkdir -p "$RELEASE_DIR/explorer_web"
 cp -r explorer/web/dist/* "$RELEASE_DIR/explorer_web/"
 
 # ---------------------------
+# Copy pool web
+# ---------------------------
+
+echo -e "${INFO}Copying pool web...${NC}"
+
+POOL_WEB_DIR="astram-stratum/web"
+
+if [ -d "$POOL_WEB_DIR/public" ]; then
+    mkdir -p "$RELEASE_DIR/pool_web"
+    cp -r "$POOL_WEB_DIR/public/." "$RELEASE_DIR/pool_web/"
+    if [ -f "$POOL_WEB_DIR/index.html" ]; then
+        cp "$POOL_WEB_DIR/index.html" "$RELEASE_DIR/pool_web/index.html"
+    fi
+    echo -e "${SUCCESS}Deployed pool web to $RELEASE_DIR/pool_web${NC}"
+elif [ -f "$POOL_WEB_DIR/index.html" ]; then
+    mkdir -p "$RELEASE_DIR/pool_web"
+    cp -r "$POOL_WEB_DIR/." "$RELEASE_DIR/pool_web/"
+    echo -e "${SUCCESS}Deployed pool web to $RELEASE_DIR/pool_web${NC}"
+else
+    echo -e "\033[0;33mWARN  Pool web not found at $POOL_WEB_DIR (skipping)\033[0m"
+fi
+
+# ---------------------------
 # Copy executables
 # ---------------------------
 

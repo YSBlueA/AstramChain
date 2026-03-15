@@ -83,6 +83,24 @@ New-Item -ItemType Directory -Force -Path "$ReleaseDir/explorer_web" | Out-Null
 Copy-Item -Recurse -Force "explorer/web/dist/*" "$ReleaseDir/explorer_web/"
 Write-Success "Deployed explorer web to $ReleaseDir/explorer_web"
 
+# Copy pool web
+Write-Info "Copying pool web..."
+$PoolWebDir = "astram-stratum/web"
+if (Test-Path "$PoolWebDir/public") {
+    New-Item -ItemType Directory -Force -Path "$ReleaseDir/pool_web" | Out-Null
+    Copy-Item -Recurse -Force "$PoolWebDir/public/*" "$ReleaseDir/pool_web/"
+    if (Test-Path "$PoolWebDir/index.html") {
+        Copy-Item -Force "$PoolWebDir/index.html" "$ReleaseDir/pool_web/index.html"
+    }
+    Write-Success "Deployed pool web to $ReleaseDir/pool_web"
+} elseif (Test-Path "$PoolWebDir/index.html") {
+    New-Item -ItemType Directory -Force -Path "$ReleaseDir/pool_web" | Out-Null
+    Copy-Item -Recurse -Force "$PoolWebDir/*" "$ReleaseDir/pool_web/"
+    Write-Success "Deployed pool web to $ReleaseDir/pool_web"
+} else {
+    Write-Host "WARN  Pool web not found at $PoolWebDir (skipping)" -ForegroundColor Yellow
+}
+
 # Copy executables
 Write-Info "Copying executables..."
 $Executables = @(
