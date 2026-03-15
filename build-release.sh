@@ -88,10 +88,13 @@ echo -e "${INFO}Copying pool web...${NC}"
 POOL_WEB_DIR="astram-stratum/web"
 
 if [ -d "$POOL_WEB_DIR/public" ]; then
+    # public/ → pool_web/  (landing page)
     mkdir -p "$RELEASE_DIR/pool_web"
     cp -r "$POOL_WEB_DIR/public/." "$RELEASE_DIR/pool_web/"
+    # root index.html → pool_web/dashboard/index.html  (stats dashboard)
     if [ -f "$POOL_WEB_DIR/index.html" ]; then
-        cp "$POOL_WEB_DIR/index.html" "$RELEASE_DIR/pool_web/index.html"
+        mkdir -p "$RELEASE_DIR/pool_web/dashboard"
+        cp "$POOL_WEB_DIR/index.html" "$RELEASE_DIR/pool_web/dashboard/index.html"
     fi
     echo -e "${SUCCESS}Deployed pool web to $RELEASE_DIR/pool_web${NC}"
 elif [ -f "$POOL_WEB_DIR/index.html" ]; then

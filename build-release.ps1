@@ -87,10 +87,13 @@ Write-Success "Deployed explorer web to $ReleaseDir/explorer_web"
 Write-Info "Copying pool web..."
 $PoolWebDir = "astram-stratum/web"
 if (Test-Path "$PoolWebDir/public") {
+    # public/ → pool_web/  (landing page)
     New-Item -ItemType Directory -Force -Path "$ReleaseDir/pool_web" | Out-Null
     Copy-Item -Recurse -Force "$PoolWebDir/public/*" "$ReleaseDir/pool_web/"
+    # root index.html → pool_web/dashboard/index.html  (stats dashboard)
     if (Test-Path "$PoolWebDir/index.html") {
-        Copy-Item -Force "$PoolWebDir/index.html" "$ReleaseDir/pool_web/index.html"
+        New-Item -ItemType Directory -Force -Path "$ReleaseDir/pool_web/dashboard" | Out-Null
+        Copy-Item -Force "$PoolWebDir/index.html" "$ReleaseDir/pool_web/dashboard/index.html"
     }
     Write-Success "Deployed pool web to $ReleaseDir/pool_web"
 } elseif (Test-Path "$PoolWebDir/index.html") {
