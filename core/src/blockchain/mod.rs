@@ -495,6 +495,11 @@ impl Blockchain {
         }
 
         let mut total_fees = U256::zero();
+        // Track UTXOs created by earlier transactions in this block so that
+        // chained transactions (tx B spends output of tx A in the same block)
+        // can be validated before the batch is committed to the DB.
+        let mut block_utxos: std::collections::HashMap<String, Utxo> =
+            std::collections::HashMap::new();
 
         for (i, tx) in block.transactions.iter().enumerate() {
             if !tx.verify_signatures()? {
@@ -509,6 +514,7 @@ impl Blockchain {
                     let utxo = Utxo::new(tx.txid.clone(), v as u32, out.to.to_lowercase(), out.amount());
                     let ublob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
                     batch.put(format!("u:{}:{}", tx.txid, v).as_bytes(), &ublob);
+                    block_utxos.insert(format!("u:{}:{}", tx.txid, v), utxo);
                 }
                 continue;
             }
@@ -523,26 +529,34 @@ impl Blockchain {
                     return Err(anyhow!("duplicate input in tx {}", tx.txid));
                 }
 
-                match self.db.get(ukey.as_bytes())? {
-                    Some(blob) => {
-                        let (u, _): (Utxo, usize) =
-                            bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
-
-                        let input_address =
-                            crate::crypto::address_from_pubkey_hex(&inp.pubkey)
-                                .map_err(|e| anyhow!("invalid pubkey address: {}", e))?;
-
-                        if input_address.to_lowercase() != u.to.to_lowercase() {
-                            return Err(anyhow!("UTXO ownership verification failed"));
+                // Check UTXOs created by earlier transactions in this block first,
+                // then fall back to committed DB (handles chained mempool transactions).
+                let u = if let Some(pending) = block_utxos.remove(&ukey) {
+                    // UTXO was created by a previous tx in this same block
+                    pending
+                } else {
+                    match self.db.get(ukey.as_bytes())? {
+                        Some(blob) => {
+                            let (u, _): (Utxo, usize) =
+                                bincode::decode_from_slice(&blob, *BINCODE_CONFIG)?;
+                            batch.delete(ukey.as_bytes());
+                            u
                         }
+                        None => {
+                            return Err(anyhow!("referenced utxo not found"));
+                        }
+                    }
+                };
 
-                        input_sum = input_sum + u.amount();
-                        batch.delete(ukey.as_bytes());
-                    }
-                    None => {
-                        return Err(anyhow!("referenced utxo not found"));
-                    }
+                let input_address =
+                    crate::crypto::address_from_pubkey_hex(&inp.pubkey)
+                        .map_err(|e| anyhow!("invalid pubkey address: {}", e))?;
+
+                if input_address.to_lowercase() != u.to.to_lowercase() {
+                    return Err(anyhow!("UTXO ownership verification failed"));
                 }
+
+                input_sum = input_sum + u.amount();
             }
 
             let mut output_sum = U256::zero();
@@ -568,6 +582,7 @@ impl Blockchain {
                 let utxo = Utxo::new(tx.txid.clone(), v as u32, out.to.to_lowercase(), out.amount());
                 let ublob = bincode::encode_to_vec(&utxo, *BINCODE_CONFIG)?;
                 batch.put(format!("u:{}:{}", tx.txid, v).as_bytes(), &ublob);
+                block_utxos.insert(format!("u:{}:{}", tx.txid, v), utxo);
             }
         }
 
