@@ -380,6 +380,31 @@ async fn handle_stratum_inner(
                 match method {
                     // ── mining.subscribe ──────────────────────────────────
                     "mining.subscribe" => {
+                        // Version check: params[0] = "Astram-miner/<version>"
+                        let miner_agent = params
+                            .and_then(|v| v.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let miner_version = miner_agent.split('/').nth(1).unwrap_or("");
+                        let pool_version = env!("CARGO_PKG_VERSION");
+                        if !miner_version.is_empty() && miner_version != pool_version {
+                            log::warn!(
+                                "[REJECT] version mismatch: miner={} pool={}  agent={}",
+                                miner_version, pool_version, miner_agent
+                            );
+                            let resp = serde_json::json!({
+                                "id": id,
+                                "result": null,
+                                "error": format!(
+                                    "version mismatch: miner {} is not compatible with pool {}",
+                                    miner_version, pool_version
+                                )
+                            });
+                            framed.send(resp.to_string()).await?;
+                            return Ok(());
+                        }
+
                         let extranonce1 = hex::encode(rand::random::<u32>().to_be_bytes());
                         let extranonce2_size = 4u32;
 
