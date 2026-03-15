@@ -596,18 +596,38 @@ async fn handle_stratum_inner(
                                                     }
                                                 }
                                                 s.record_accepted_share();
+                                                // Purge all stale templates for this height so
+                                                // subsequent submissions don't reuse transactions
+                                                // that were just included in this block.
+                                                {
+                                                    let mut store = template_store.lock().unwrap();
+                                                    let found_height = tmpl.height;
+                                                    store.retain(|_, t| t.height != found_height);
+                                                }
                                                 // Signal template loop to rebuild immediately
                                                 let _ = force_rebuild_tx.send(chrono::Utc::now().timestamp_millis() as u64);
                                                 let resp = serde_json::json!({"id": id, "result": true, "block_found": true, "error": null});
                                                 framed.send(resp.to_string()).await?;
                                             }
                                             Err(e) => {
-                                                log::warn!("[BLOCK] submit failed: {}", e);
-                                                s.record_rejected_share();
-                                                tracker.lock().unwrap().add_rejected(&s.miner_address);
+                                                let e_str = e.to_string();
+                                                // Stale-template errors (utxo already spent, block
+                                                // already at this height, etc.) are not the miner's
+                                                // fault — don't penalise the worker.
+                                                let is_stale = e_str.contains("utxo not found")
+                                                    || e_str.contains("already exists")
+                                                    || e_str.contains("stale")
+                                                    || e_str.contains("duplicate");
+                                                if is_stale {
+                                                    log::warn!("[BLOCK] stale template at height={}: {}", tmpl.height, e_str);
+                                                } else {
+                                                    log::warn!("[BLOCK] submit failed: {}", e_str);
+                                                    s.record_rejected_share();
+                                                    tracker.lock().unwrap().add_rejected(&s.miner_address);
+                                                }
                                                 // Signal template loop to rebuild immediately (stale tip / fork)
                                                 let _ = force_rebuild_tx.send(chrono::Utc::now().timestamp_millis() as u64);
-                                                let resp = serde_json::json!({"id": id, "result": false, "error": e.to_string()});
+                                                let resp = serde_json::json!({"id": id, "result": false, "error": e_str});
                                                 framed.send(resp.to_string()).await?;
                                             }
                                         }
@@ -632,9 +652,22 @@ async fn handle_stratum_inner(
 
             // ── New job pushed from template loop ─────────────────────────
             Ok(template) = job_rx.recv() => {
-                if let Some(ref s) = session {
-                    if s.is_authorized() || session.is_some() {
+                if let Some(ref mut s) = session {
+                    if s.is_authorized() {
                         template_store.lock().unwrap().insert(template.job_id.clone(), template.clone());
+
+                        // Time-based VarDiff: lower difficulty if no shares found recently
+                        if let Some(new_diff) = check_vardiff(s, &pool_cfg.vardiff) {
+                            s.difficulty = new_diff;
+                        }
+
+                        // Hard cap: pool diff must stay strictly below the network's
+                        // leading-zero count so that shares are NOT accidentally valid
+                        // blocks. template.pool_diff = initial_pool_difficulty(compact_bits)
+                        // which already subtracts 2 from the network leading zeros.
+                        if s.difficulty > template.pool_diff {
+                            s.difficulty = template.pool_diff;
+                        }
 
                         let diff_msg = serde_json::json!({
                             "id": null,

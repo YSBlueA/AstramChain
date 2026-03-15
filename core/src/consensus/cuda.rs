@@ -3,6 +3,7 @@ use crate::block::{
 };
 use crate::transaction::Transaction;
 use anyhow::{Result, anyhow};
+use log;
 use chrono::Utc;
 use cust::launch;
 use cust::prelude::*;
@@ -21,7 +22,7 @@ fn get_or_generate_dag(epoch: u64, block_index: u64) -> Result<Arc<Vec<u8>>> {
     let mut lock = mutex.lock().unwrap();
     if lock.0 == epoch {
         if let Some(ref arc) = lock.1 {
-            println!("[CUDA] Block {} (epoch {}), reusing cached DAG.", block_index, epoch);
+            log::debug!("[CUDA] Block {} (epoch {}), reusing cached DAG.", block_index, epoch);
             return Ok(arc.clone());
         }
     }
