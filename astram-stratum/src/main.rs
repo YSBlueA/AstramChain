@@ -9,7 +9,7 @@ use base64::{Engine as _, engine::general_purpose};
 use futures::{SinkExt, StreamExt};
 use astram_config::config::Config;
 use Astram_core::block::{Block, BlockHeader, compute_merkle_root};
-use Astram_core::config::initial_block_reward;
+use Astram_core::config::calculate_block_reward;
 use Astram_core::crypto::WalletKeypair;
 use Astram_core::transaction::{BINCODE_CONFIG, Transaction};
 use payout::{PayoutDb, run_balance_sync, run_payout_loop};
@@ -257,7 +257,7 @@ async fn build_template(
         status.tip_hash.clone()
     };
 
-    let base_reward = initial_block_reward();
+    let base_reward = calculate_block_reward(height);
     let coinbase_value = base_reward + mempool.total_fees;
     let coinbase = Transaction::coinbase(pool_address, coinbase_value).with_hashes();
 
