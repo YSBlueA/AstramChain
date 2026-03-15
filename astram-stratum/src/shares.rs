@@ -24,15 +24,27 @@ pub struct FoundBlock {
     pub shares_in_window: usize,
 }
 
+/// Currently-connected, authenticated worker (keyed by extranonce1 in ShareTracker).
+#[derive(Debug, Clone)]
+pub struct ConnectedWorker {
+    pub address: String,
+    pub worker_name: String,
+    pub difficulty: u32,
+    pub connected_at: i64,
+}
+
 /// Per-miner aggregated statistics (for the stats API).
 #[derive(Debug, Clone, Serialize)]
 pub struct MinerStats {
     pub address: String,
+    pub worker_name: String,
+    pub difficulty: u32,
     pub shares_accepted: u64,
     pub shares_rejected: u64,
     pub shares_in_window: u64,
     pub balance: String,   // hex U256 pending payout
     pub last_share_at: Option<i64>,
+    pub connected: bool,
 }
 
 /// Global share tracker shared across all stratum connections.
@@ -57,6 +69,8 @@ pub struct ShareTracker {
     pub miner_rejected: HashMap<String, u64>,
     /// Last accepted share timestamp per miner
     pub miner_last_share: HashMap<String, i64>,
+    /// Currently-connected authenticated workers (key = extranonce1)
+    pub connected_workers: HashMap<String, ConnectedWorker>,
 }
 
 impl ShareTracker {
@@ -65,6 +79,7 @@ impl ShareTracker {
             recent_shares: VecDeque::new(),
             window_size,
             found_blocks: Vec::new(),
+            connected_workers: HashMap::new(),
             balances: HashMap::new(),
             total_shares_accepted: 0,
             total_shares_rejected: 0,
@@ -72,6 +87,21 @@ impl ShareTracker {
             miner_rejected: HashMap::new(),
             miner_last_share: HashMap::new(),
         }
+    }
+
+    /// Register a newly-authenticated worker (called on mining.authorize).
+    pub fn register_worker(&mut self, extranonce1: String, address: String, worker_name: String, difficulty: u32) {
+        self.connected_workers.insert(extranonce1, ConnectedWorker {
+            address,
+            worker_name,
+            difficulty,
+            connected_at: chrono::Utc::now().timestamp(),
+        });
+    }
+
+    /// Remove a worker when its connection drops.
+    pub fn unregister_worker(&mut self, extranonce1: &str) {
+        self.connected_workers.remove(extranonce1);
     }
 
     /// Record an accepted share; trims the PPLNS window if needed.
@@ -162,23 +192,36 @@ impl ShareTracker {
             *window_counts.entry(share.miner_address.as_str()).or_default() += 1;
         }
 
-        // Union of all known addresses
+        // Build a map of address -> connected worker info (last connected worker per address)
+        let mut connected_info: HashMap<&str, &ConnectedWorker> = HashMap::new();
+        for w in self.connected_workers.values() {
+            connected_info.insert(w.address.as_str(), w);
+        }
+
+        // Union of all known addresses: share history + currently connected
         let mut addresses: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for addr in self.miner_accepted.keys() { addresses.insert(addr); }
         for addr in self.miner_rejected.keys() { addresses.insert(addr); }
+        for w in self.connected_workers.values() { addresses.insert(w.address.as_str()); }
 
         addresses
             .into_iter()
-            .map(|addr| MinerStats {
-                address: addr.to_string(),
-                shares_accepted: *self.miner_accepted.get(addr).unwrap_or(&0),
-                shares_rejected: *self.miner_rejected.get(addr).unwrap_or(&0),
-                shares_in_window: *window_counts.get(addr).unwrap_or(&0),
-                balance: format!(
-                    "0x{:x}",
-                    self.balances.get(addr).cloned().unwrap_or(U256::zero())
-                ),
-                last_share_at: self.miner_last_share.get(addr).cloned(),
+            .map(|addr| {
+                let conn = connected_info.get(addr);
+                MinerStats {
+                    address: addr.to_string(),
+                    worker_name: conn.map(|w| w.worker_name.clone()).unwrap_or_default(),
+                    difficulty: conn.map(|w| w.difficulty).unwrap_or(0),
+                    shares_accepted: *self.miner_accepted.get(addr).unwrap_or(&0),
+                    shares_rejected: *self.miner_rejected.get(addr).unwrap_or(&0),
+                    shares_in_window: *window_counts.get(addr).unwrap_or(&0),
+                    balance: format!(
+                        "0x{:x}",
+                        self.balances.get(addr).cloned().unwrap_or(U256::zero())
+                    ),
+                    last_share_at: self.miner_last_share.get(addr).cloned(),
+                    connected: conn.is_some(),
+                }
             })
             .collect()
     }

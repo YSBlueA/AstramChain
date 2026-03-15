@@ -223,6 +223,26 @@ async fn register_node(
 
     let client_ip = forwarded_ip.unwrap_or(addr.ip().to_string());
 
+    if let Some(ref provided) = req.address {
+        if *provided != client_ip {
+            warn!(
+                "Client provided IP {} does not match observed IP {}",
+                provided,
+                client_ip
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(RegisterResponse {
+                    success: false,
+                    message: "Provided IP does not match observed client IP".to_string(),
+                    node_count: state.nodes.read().len(),
+                    registered_address: provided.clone(),
+                    registered_port: req.port,
+                }),
+            );
+        }
+    }
+
     let node_address = req.address.unwrap_or(client_ip);
 
     let node_ip: IpAddr = match node_address.parse() {

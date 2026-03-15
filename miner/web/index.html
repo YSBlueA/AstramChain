@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Astram Miner</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0d0d0d; color: #e0e0e0; font-family: 'Segoe UI', monospace; min-height: 100vh; }
+    header { background: #141414; border-bottom: 1px solid #222; padding: 16px 32px; display: flex; align-items: center; gap: 16px; }
+    header h1 { font-size: 1.3rem; color: #fff; letter-spacing: 1px; }
+    .mode-badge { padding: 3px 12px; border-radius: 12px; font-size: 0.75rem; font-weight: 700; letter-spacing: 1px; }
+    .mode-solo { background: #1a3a2a; color: #4ade80; border: 1px solid #2d6a4a; }
+    .mode-pool { background: #1a2a3a; color: #60a5fa; border: 1px solid #2d4a6a; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+    .dot-on { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+    .dot-off { background: #666; }
+    .container { padding: 24px 32px; max-width: 1200px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .card { background: #141414; border: 1px solid #222; border-radius: 8px; padding: 20px; }
+    .card-label { font-size: 0.7rem; color: #666; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
+    .card-value { font-size: 1.8rem; font-weight: 700; color: #fff; }
+    .card-value.green { color: #4ade80; }
+    .card-value.blue { color: #60a5fa; }
+    .card-value.yellow { color: #facc15; }
+    .card-unit { font-size: 0.9rem; color: #888; margin-left: 4px; }
+    .info-table { background: #141414; border: 1px solid #222; border-radius: 8px; overflow: hidden; }
+    .info-table table { width: 100%; border-collapse: collapse; }
+    .info-table th { background: #1a1a1a; padding: 10px 16px; text-align: left; font-size: 0.7rem; color: #666; letter-spacing: 1px; text-transform: uppercase; border-bottom: 1px solid #222; }
+    .info-table td { padding: 10px 16px; border-bottom: 1px solid #1a1a1a; font-size: 0.85rem; }
+    .info-table tr:last-child td { border-bottom: none; }
+    .info-table td:first-child { color: #888; width: 160px; }
+    .info-table td:last-child { color: #e0e0e0; font-family: monospace; }
+    .footer { color: #444; font-size: 0.75rem; margin-top: 24px; }
+    .refresh-bar { height: 2px; background: #222; border-radius: 1px; overflow: hidden; margin-top: 4px; }
+    .refresh-progress { height: 100%; background: #374151; transition: width 3s linear; }
+    h2 { font-size: 0.85rem; color: #888; margin-bottom: 12px; letter-spacing: 1px; text-transform: uppercase; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⛏ Astram Miner</h1>
+    <span class="mode-badge" id="modeBadge">-</span>
+    <span style="margin-left:auto; font-size:0.75rem; color:#555" id="uptime">uptime: -</span>
+  </header>
+
+  <div class="container">
+    <div class="grid">
+      <div class="card">
+        <div class="card-label">Hashrate</div>
+        <div class="card-value green" id="hashrate">-<span class="card-unit">MH/s</span></div>
+      </div>
+      <div class="card">
+        <div class="card-label" id="found-label">Blocks Found</div>
+        <div class="card-value yellow" id="found">0</div>
+      </div>
+      <div class="card" id="shares-card">
+        <div class="card-label">Shares Accepted</div>
+        <div class="card-value blue" id="shares-accepted">0</div>
+      </div>
+      <div class="card" id="rejected-card">
+        <div class="card-label">Shares Rejected</div>
+        <div class="card-value" style="color:#f87171" id="shares-rejected">0</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Current Height</div>
+        <div class="card-value" id="height">-</div>
+      </div>
+      <div class="card" id="diff-card">
+        <div class="card-label">Pool Difficulty</div>
+        <div class="card-value" id="pool-diff">-</div>
+      </div>
+    </div>
+
+    <h2>Mining Info</h2>
+    <div class="info-table">
+      <table>
+        <tbody>
+          <tr><td>Mode</td><td id="info-mode">-</td></tr>
+          <tr><td>Miner Address</td><td id="info-addr">-</td></tr>
+          <tr><td>Worker</td><td id="info-worker">-</td></tr>
+          <tr id="pool-row"><td>Pool</td><td id="info-pool">-</td></tr>
+          <tr id="conn-row"><td>Connection</td><td id="info-conn">-</td></tr>
+          <tr><td>Started</td><td id="info-started">-</td></tr>
+          <tr><td>Last Update</td><td id="info-updated">-</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="footer" style="margin-top:16px">
+      Auto-refresh every 3s
+      <div class="refresh-bar"><div class="refresh-progress" id="progress"></div></div>
+    </div>
+  </div>
+
+  <script>
+    function fmt(n, d=2) { return Number(n).toFixed(d); }
+    function fmtTime(secs) {
+      const h = Math.floor(secs/3600), m = Math.floor((secs%3600)/60), s = secs%60;
+      return h > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+    function fmtDate(ts) {
+      return ts ? new Date(ts*1000).toLocaleString() : '-';
+    }
+    function set(id, v) { const e = document.getElementById(id); if(e) e.textContent = v; }
+
+    async function update() {
+      try {
+        const r = await fetch('/stats');
+        const s = await r.json();
+
+        const isPool = s.mode === 'pool';
+
+        // mode badge
+        const badge = document.getElementById('modeBadge');
+        badge.textContent = s.mode.toUpperCase();
+        badge.className = 'mode-badge ' + (isPool ? 'mode-pool' : 'mode-solo');
+
+        // uptime
+        document.getElementById('uptime').textContent = 'uptime: ' + fmtTime(s.uptime_secs);
+
+        // hashrate
+        document.getElementById('hashrate').innerHTML =
+          `${fmt(s.hashrate_mhs)}<span class="card-unit">MH/s</span>`;
+
+        // found
+        document.getElementById('found-label').textContent = isPool ? 'Blocks Found' : 'Blocks Found';
+        set('found', s.blocks_found);
+
+        // shares (pool) / hide (solo)
+        document.getElementById('shares-card').style.opacity = isPool ? '1' : '0.3';
+        document.getElementById('rejected-card').style.opacity = isPool ? '1' : '0.3';
+        document.getElementById('diff-card').style.opacity = isPool ? '1' : '0.3';
+        set('shares-accepted', s.shares_accepted);
+        set('shares-rejected', s.shares_rejected);
+
+        // height
+        set('height', s.current_height > 0 ? '#' + s.current_height : '-');
+
+        // pool diff
+        set('pool-diff', isPool ? s.pool_diff + ' zeros' : '-');
+
+        // info table
+        set('info-mode', s.mode.toUpperCase());
+        set('info-addr', s.miner_address || '-');
+        set('info-worker', s.worker_name || '-');
+
+        const poolRow = document.getElementById('pool-row');
+        const connRow = document.getElementById('conn-row');
+        if (isPool) {
+          poolRow.style.display = '';
+          connRow.style.display = '';
+          set('info-pool', s.pool_url || '-');
+          const dot = s.pool_connected ? '🟢 Connected' : '🔴 Disconnected';
+          set('info-conn', dot);
+        } else {
+          poolRow.style.display = 'none';
+          connRow.style.display = 'none';
+        }
+
+        set('info-started', fmtDate(s.started_at));
+        set('info-updated', new Date().toLocaleTimeString());
+
+      } catch(e) {
+        document.getElementById('uptime').textContent = 'connection error';
+      }
+    }
+
+    // progress bar animation
+    function resetProgress() {
+      const p = document.getElementById('progress');
+      p.style.transition = 'none';
+      p.style.width = '0%';
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          p.style.transition = 'width 3s linear';
+          p.style.width = '100%';
+        });
+      });
+    }
+
+    update();
+    resetProgress();
+    setInterval(() => { update(); resetProgress(); }, 3000);
+  </script>
+</body>
+</html>

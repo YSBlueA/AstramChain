@@ -11,6 +11,7 @@
 ///   POOL_HOST=127.0.0.1
 ///   POOL_PORT=3333
 ///   WORKER_NAME=worker1
+///   STATUS_PORT=8090          # miner status dashboard port (default: 8090)
 
 #[cfg(not(feature = "cuda-miner"))]
 compile_error!("Astram-miner requires CUDA. Build with `--features cuda-miner`.");
@@ -24,14 +25,110 @@ use Astram_core::consensus;
 use Astram_core::transaction::{BINCODE_CONFIG, Transaction};
 use futures::{SinkExt, StreamExt};
 use primitive_types::U256;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, sleep};
 use tokio_util::codec::{Framed, LinesCodec};
+
+// ─── Miner status (shared between mining tasks and HTTP server) ───────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct MinerStatus {
+    mode: String,
+    hashrate_mhs: f64,
+    miner_address: String,
+    worker_name: String,
+    started_at: i64,
+    uptime_secs: u64,
+    // pool
+    pool_connected: bool,
+    pool_url: String,
+    pool_diff: u32,
+    shares_accepted: u64,
+    shares_rejected: u64,
+    // common
+    current_height: u64,
+    blocks_found: u64,
+}
+
+impl MinerStatus {
+    fn new(mode: &str, miner_address: &str, worker_name: &str, pool_url: &str) -> Self {
+        Self {
+            mode: mode.to_string(),
+            hashrate_mhs: 0.0,
+            miner_address: miner_address.to_string(),
+            worker_name: worker_name.to_string(),
+            started_at: chrono::Utc::now().timestamp(),
+            uptime_secs: 0,
+            pool_connected: false,
+            pool_url: pool_url.to_string(),
+            pool_diff: 0,
+            shares_accepted: 0,
+            shares_rejected: 0,
+            current_height: 0,
+            blocks_found: 0,
+        }
+    }
+
+    fn refresh_uptime(&mut self) {
+        let now = chrono::Utc::now().timestamp();
+        self.uptime_secs = (now - self.started_at).max(0) as u64;
+    }
+}
+
+// ─── Status HTTP server ───────────────────────────────────────────────────────
+
+static DASHBOARD_HTML: &str = include_str!("../web/index.html");
+
+async fn run_status_server(status: Arc<Mutex<MinerStatus>>, port: u16) {
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => {
+            log::info!("[STATUS] Miner dashboard at http://localhost:{}", port);
+            l
+        }
+        Err(e) => {
+            log::error!("[STATUS] Failed to bind {}: {}", addr, e);
+            return;
+        }
+    };
+
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else { continue };
+        let status = status.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let path = req
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("/");
+
+            let (content_type, body) = if path == "/stats" {
+                let mut s = status.lock().unwrap();
+                s.refresh_uptime();
+                ("application/json", serde_json::to_string(&*s).unwrap_or_default())
+            } else {
+                ("text/html; charset=utf-8", DASHBOARD_HTML.to_string())
+            };
+
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+                content_type,
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).await.ok();
+        });
+    }
+}
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -49,6 +146,7 @@ struct MinerSettings {
     pool_port: u16,
     worker_name: String,
     miner_address: String,
+    status_port: u16,
 }
 
 impl MinerSettings {
@@ -58,6 +156,7 @@ impl MinerSettings {
         let mut pool_host = "127.0.0.1".to_string();
         let mut pool_port: u16 = 3333;
         let mut worker_name = "worker1".to_string();
+        let mut status_port: u16 = 8090;
 
         let conf_path = resolve_conf_path();
         if let Ok(contents) = std::fs::read_to_string(&conf_path) {
@@ -78,6 +177,7 @@ impl MinerSettings {
                         "POOL_HOST" => pool_host = value.trim().to_string(),
                         "POOL_PORT" => pool_port = value.trim().parse().unwrap_or(pool_port),
                         "WORKER_NAME" => worker_name = value.trim().to_string(),
+                        "STATUS_PORT" => status_port = value.trim().parse().unwrap_or(status_port),
                         _ => {}
                     }
                 }
@@ -95,8 +195,22 @@ impl MinerSettings {
             .ok_or_else(|| anyhow!("No 'address' field in wallet file"))?
             .to_string();
 
-        Ok(Self { mode, node_rpc_url, pool_host, pool_port, worker_name, miner_address })
+        Ok(Self { mode, node_rpc_url, pool_host, pool_port, worker_name, miner_address, status_port })
     }
+}
+
+/// Convert a pool difficulty (leading hex-zero count) to a 32-byte mining target.
+fn pool_leading_zeros_to_target(n: u32) -> [u8; 32] {
+    let zeros = n.min(63) as usize;
+    if zeros == 0 {
+        return [0xff; 32];
+    }
+    let bit_pos = 256 - zeros * 4;
+    let byte_idx = 31 - bit_pos / 8;
+    let bit_in_byte = bit_pos % 8;
+    let mut target = [0u8; 32];
+    target[byte_idx] = 1u8 << bit_in_byte;
+    target
 }
 
 fn resolve_conf_path() -> PathBuf {
@@ -189,7 +303,7 @@ async fn submit_block(client: &reqwest::Client, base_url: &str, block: &Block) -
 
 // ─── Solo mining ──────────────────────────────────────────────────────────────
 
-async fn run_solo(settings: MinerSettings) {
+async fn run_solo(settings: MinerSettings, status: Arc<Mutex<MinerStatus>>) {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -201,17 +315,19 @@ async fn run_solo(settings: MinerSettings) {
     println!("[SOLO] Miner address: {}", settings.miner_address);
 
     loop {
-        // 1. Fetch chain status
-        let status = match fetch_status(&http, &settings.node_rpc_url).await {
+        let chain = match fetch_status(&http, &settings.node_rpc_url).await {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("[SOLO] Failed to fetch status: {}", e);
+                {
+                    let mut s = status.lock().unwrap();
+                    s.hashrate_mhs = 0.0;
+                }
                 sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
 
-        // 2. Fetch mempool
         let (mempool_txs, total_fees) = match fetch_mempool(&http, &settings.node_rpc_url).await {
             Ok(r) => r,
             Err(e) => {
@@ -220,28 +336,29 @@ async fn run_solo(settings: MinerSettings) {
             }
         };
 
-        let next_height = status.height + 1;
-        let prev_hash = if status.tip_hash == "none" { "0".repeat(64) } else { status.tip_hash.clone() };
+        let next_height = chain.height + 1;
+        let prev_hash = if chain.tip_hash == "none" { "0".repeat(64) } else { chain.tip_hash.clone() };
         let reward = calculate_block_reward(next_height) + total_fees;
+
+        {
+            let mut s = status.lock().unwrap();
+            s.current_height = next_height;
+        }
 
         println!(
             "[SOLO] Mining block #{} | diff=0x{:08x} | txs={} | reward={} wei",
-            next_height, status.difficulty, mempool_txs.len(), reward
+            next_height, chain.difficulty, mempool_txs.len(), reward
         );
 
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let cancel_for_poll = cancel_flag.clone();
-
-        // 3. Poll for new block while mining (cancel if chain tip changes)
         let node_url = settings.node_rpc_url.clone();
-        let current_tip = status.tip_hash.clone();
+        let current_tip = chain.tip_hash.clone();
         let http_poll = http.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(3)).await;
-                if cancel_for_poll.load(Ordering::Relaxed) {
-                    break;
-                }
+                if cancel_for_poll.load(Ordering::Relaxed) { break; }
                 if let Ok(new_status) = fetch_status(&http_poll, &node_url).await {
                     if new_status.tip_hash != current_tip {
                         log::info!("[SOLO] New block detected, cancelling mining...");
@@ -252,11 +369,10 @@ async fn run_solo(settings: MinerSettings) {
             }
         });
 
-        // 4. Mine (blocking CUDA)
         let cancel_for_mine = cancel_flag.clone();
         let hr = hashrate.clone();
         let miner_addr = settings.miner_address.clone();
-        let diff = status.difficulty;
+        let diff = chain.difficulty;
 
         let mine_result: Result<Block> = tokio::task::spawn_blocking(move || {
             consensus::mine_block_with_coinbase_cuda(
@@ -274,13 +390,24 @@ async fn run_solo(settings: MinerSettings) {
         .map_err(|e| anyhow!("mining task panic: {}", e))
         .and_then(|r| r);
 
-        cancel_flag.store(true, Ordering::Relaxed); // stop poll task
+        cancel_flag.store(true, Ordering::Relaxed);
+
+        // Sync hashrate to status
+        {
+            let hr_val = *hashrate.lock().unwrap();
+            let mut s = status.lock().unwrap();
+            s.hashrate_mhs = hr_val / 1_000_000.0;
+        }
 
         match mine_result {
             Ok(block) => {
                 println!("[SOLO] ✅ Block found! #{} hash={}", block.header.index, &block.hash[..16]);
                 match submit_block(&http, &settings.node_rpc_url, &block).await {
-                    Ok(_) => println!("[SOLO] Block submitted successfully"),
+                    Ok(_) => {
+                        println!("[SOLO] Block submitted successfully");
+                        let mut s = status.lock().unwrap();
+                        s.blocks_found += 1;
+                    }
                     Err(e) => log::warn!("[SOLO] Submit failed: {}", e),
                 }
             }
@@ -309,12 +436,18 @@ struct StratumJob {
     difficulty: u32,
 }
 
-async fn run_pool(settings: MinerSettings) {
+async fn run_pool(settings: MinerSettings, status: Arc<Mutex<MinerStatus>>) {
     println!("[POOL] Starting pool miner → {}:{}", settings.pool_host, settings.pool_port);
     println!("[POOL] Miner address: {}", settings.miner_address);
 
     loop {
         let pool_addr = format!("{}:{}", settings.pool_host, settings.pool_port);
+
+        {
+            let mut s = status.lock().unwrap();
+            s.pool_connected = false;
+            s.hashrate_mhs = 0.0;
+        }
 
         let stream = match TcpStream::connect(&pool_addr).await {
             Ok(s) => s,
@@ -326,9 +459,18 @@ async fn run_pool(settings: MinerSettings) {
         };
 
         println!("[POOL] Connected to {}", pool_addr);
+        {
+            let mut s = status.lock().unwrap();
+            s.pool_connected = true;
+        }
 
-        if let Err(e) = run_stratum_session(stream, &settings).await {
+        if let Err(e) = run_stratum_session(stream, &settings, status.clone()).await {
             log::warn!("[POOL] Session ended: {}", e);
+        }
+
+        {
+            let mut s = status.lock().unwrap();
+            s.pool_connected = false;
         }
 
         println!("[POOL] Reconnecting in 5 seconds...");
@@ -336,11 +478,14 @@ async fn run_pool(settings: MinerSettings) {
     }
 }
 
-async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Result<()> {
+async fn run_stratum_session(
+    stream: TcpStream,
+    settings: &MinerSettings,
+    status: Arc<Mutex<MinerStatus>>,
+) -> Result<()> {
     let mut framed = Framed::new(stream, LinesCodec::new());
     let worker_login = format!("{}.{}", settings.miner_address, settings.worker_name);
 
-    // Subscribe
     let subscribe = serde_json::json!({
         "id": 1,
         "method": "mining.subscribe",
@@ -348,7 +493,6 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
     });
     framed.send(subscribe.to_string()).await?;
 
-    // Authorize
     let authorize = serde_json::json!({
         "id": 2,
         "method": "mining.authorize",
@@ -358,13 +502,20 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
 
     let hashrate: Arc<Mutex<f64>> = Arc::new(Mutex::new(0.0));
     let mut current_job: Option<StratumJob> = None;
-    let mut _pool_diff: u32 = 1; // share difficulty sent by pool (informational)
+    let mut pool_diff: u32 = 1;
+    let mut pool_target: [u8; 32] = pool_leading_zeros_to_target(pool_diff);
     let mut cancel_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let mut mining_handle: Option<tokio::task::JoinHandle<Result<(u64, String)>>> = None;
 
     loop {
+        // Sync hashrate to status every iteration
+        {
+            let hr_val = *hashrate.lock().unwrap();
+            let mut s = status.lock().unwrap();
+            s.hashrate_mhs = hr_val / 1_000_000.0;
+        }
+
         tokio::select! {
-            // ── Network message from pool ──────────────────────────────────
             maybe_line = framed.next() => {
                 let line = match maybe_line {
                     Some(Ok(l)) => l,
@@ -386,8 +537,11 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
                             .and_then(|a| a.first())
                             .and_then(|v| v.as_u64())
                         {
-                            _pool_diff = d as u32;
-                            log::info!("[POOL] Difficulty set to {}", _pool_diff);
+                            pool_diff = d as u32;
+                            pool_target = pool_leading_zeros_to_target(pool_diff);
+                            log::info!("[POOL] Difficulty set to {} leading zeros", pool_diff);
+                            let mut s = status.lock().unwrap();
+                            s.pool_diff = pool_diff;
                         }
                     }
 
@@ -397,7 +551,6 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
                             None => continue,
                         };
 
-                        // params: [job_id, height, prev_hash, merkle_root, timestamp, difficulty, pool_target]
                         let job_id    = params.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
                         let height    = params.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
                         let prev_hash = params.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -407,7 +560,11 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
 
                         log::info!("[POOL] New job {} height={} diff=0x{:08x}", job_id, height, diff);
 
-                        // Cancel ongoing mining
+                        {
+                            let mut s = status.lock().unwrap();
+                            s.current_height = height;
+                        }
+
                         cancel_flag.store(true, Ordering::Relaxed);
                         if let Some(h) = mining_handle.take() {
                             let _ = h.await;
@@ -416,7 +573,6 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
                         let job = StratumJob { job_id, height, prev_hash, merkle_root: merkle, timestamp, difficulty: diff };
                         current_job = Some(job.clone());
 
-                        // Start new mining task
                         cancel_flag = Arc::new(AtomicBool::new(false));
                         let header = BlockHeader {
                             index: job.height,
@@ -428,23 +584,41 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
                         };
                         let cf = cancel_flag.clone();
                         let hr = hashrate.clone();
+                        let pt = pool_target;
                         mining_handle = Some(tokio::task::spawn_blocking(move || {
-                            consensus::mine_header_cuda(header, cf, Some(hr))
+                            consensus::mine_header_cuda(header, cf, Some(hr), Some(pt))
                         }));
                     }
 
                     _ => {
-                        // Result messages (subscribe/authorize responses) – log errors only
-                        if let Some(err) = msg.get("error") {
-                            if !err.is_null() {
-                                log::warn!("[POOL] Server error: {}", err);
+                        // Handle pool responses (no "method" field = it's a reply)
+                        if msg.get("method").is_none() {
+                            let result_ok = msg.get("result")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let err_val = msg.get("error");
+                            let has_error = err_val.map(|e| !e.is_null()).unwrap_or(false);
+
+                            if result_ok {
+                                let block_found = msg.get("block_found")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                let mut s = status.lock().unwrap();
+                                s.shares_accepted += 1;
+                                if block_found {
+                                    s.blocks_found += 1;
+                                    println!("[POOL] 🎉 Block found! Total: {}", s.blocks_found);
+                                }
+                            } else if has_error {
+                                log::warn!("[POOL] Share rejected: {}", err_val.unwrap());
+                                let mut s = status.lock().unwrap();
+                                s.shares_rejected += 1;
                             }
                         }
                     }
                 }
             }
 
-            // ── Mining task completed ──────────────────────────────────────
             Some(result) = async {
                 if let Some(ref mut h) = mining_handle {
                     Some(h.await)
@@ -476,7 +650,10 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
                             return Err(anyhow!("send submit: {}", e));
                         }
 
-                        // Restart mining with same job (pool will send new notify on block found)
+                        // shares_accepted / blocks_found are incremented when the pool
+                        // confirms the submission (result: true in the response handler above)
+
+                        // Restart mining with same job
                         let new_header = BlockHeader {
                             index: job.height,
                             previous_hash: job.prev_hash.clone(),
@@ -488,8 +665,9 @@ async fn run_stratum_session(stream: TcpStream, settings: &MinerSettings) -> Res
                         cancel_flag = Arc::new(AtomicBool::new(false));
                         let cf = cancel_flag.clone();
                         let hr = hashrate.clone();
+                        let pt = pool_target;
                         mining_handle = Some(tokio::task::spawn_blocking(move || {
-                            consensus::mine_header_cuda(new_header, cf, Some(hr))
+                            consensus::mine_header_cuda(new_header, cf, Some(hr), Some(pt))
                         }));
                     }
                     Ok(Err(e)) => {
@@ -528,8 +706,27 @@ async fn main() {
 
     println!("[INFO] Mode: {:?}", settings.mode);
 
+    let mode_str = match settings.mode {
+        MiningMode::Solo => "solo",
+        MiningMode::Pool => "pool",
+    };
+    let pool_url = format!("{}:{}", settings.pool_host, settings.pool_port);
+    let status = Arc::new(Mutex::new(MinerStatus::new(
+        mode_str,
+        &settings.miner_address,
+        &settings.worker_name,
+        &pool_url,
+    )));
+
+    // Start status HTTP server
+    let status_port = settings.status_port;
+    let status_for_server = status.clone();
+    tokio::spawn(async move {
+        run_status_server(status_for_server, status_port).await;
+    });
+
     match settings.mode {
-        MiningMode::Solo => run_solo(settings).await,
-        MiningMode::Pool => run_pool(settings).await,
+        MiningMode::Solo => run_solo(settings, status).await,
+        MiningMode::Pool => run_pool(settings, status).await,
     }
 }

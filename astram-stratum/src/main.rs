@@ -1,3 +1,4 @@
+mod payout;
 mod session;
 mod share_validator;
 mod shares;
@@ -9,7 +10,9 @@ use futures::{SinkExt, StreamExt};
 use astram_config::config::Config;
 use Astram_core::block::{Block, BlockHeader, compute_merkle_root};
 use Astram_core::config::initial_block_reward;
+use Astram_core::crypto::WalletKeypair;
 use Astram_core::transaction::{BINCODE_CONFIG, Transaction};
+use payout::{PayoutDb, run_balance_sync, run_payout_loop};
 use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,6 +22,7 @@ use shares::{FoundBlock, Share, ShareTracker};
 use vardiff::{VarDiffConfig, check_vardiff};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
@@ -37,6 +41,10 @@ struct PoolConfig {
     pool_fee_percent: f64,
     pplns_window: usize,
     vardiff: VarDiffConfig,
+    // Payout settings
+    payout_threshold_ram: U256,
+    payout_interval_secs: u64,
+    payout_db_path: String,
 }
 
 impl PoolConfig {
@@ -56,7 +64,7 @@ impl PoolConfig {
             gbt_bind: std::env::var("GBT_BIND")
                 .unwrap_or_else(|_| "0.0.0.0:8332".to_string()),
             stats_bind: std::env::var("STATS_BIND")
-                .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+                .unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
             pool_address,
             pool_fee_percent: std::env::var("POOL_FEE_PERCENT")
                 .ok()
@@ -81,6 +89,19 @@ impl PoolConfig {
                     .unwrap_or(15.0),
                 ..VarDiffConfig::default()
             },
+            payout_threshold_ram: {
+                let asrm: f64 = std::env::var("PAYOUT_THRESHOLD_ASRM")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.5_f64);
+                U256::from((asrm * 1_000_000_000_000_000_000_f64) as u128)
+            },
+            payout_interval_secs: std::env::var("PAYOUT_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(600u64),
+            payout_db_path: std::env::var("POOL_DB_PATH")
+                .unwrap_or_else(|_| "pool_data".to_string()),
         })
     }
 }
@@ -102,7 +123,8 @@ struct MempoolSnapshot {
 #[derive(Debug, Clone)]
 struct ChainStatus {
     height: u64,
-    difficulty: u32,
+    difficulty: u32,      // current chain tip compact bits
+    next_difficulty: u32, // DWG3-adjusted difficulty for the next block
     tip_hash: String,
 }
 
@@ -132,27 +154,33 @@ impl NodeClient {
         let url = format!("{}/status", self.base_url);
         let value: Value = self.client.get(&url).send().await?.json().await?;
 
-        let height = value
-            .get("blockchain")
+        let bc = value.get("blockchain");
+
+        let height = bc
             .and_then(|v| v.get("height"))
             .and_then(|v| v.as_u64())
             .or_else(|| value.get("height").and_then(|v| v.as_u64()))
             .unwrap_or(0);
 
-        let difficulty = value
-            .get("blockchain")
+        let difficulty = bc
             .and_then(|v| v.get("difficulty"))
             .and_then(|v| v.as_u64())
             .unwrap_or(1) as u32;
 
-        let tip_hash = value
-            .get("blockchain")
+        // Use next_difficulty (DWG3-adjusted) for block templates.
+        // Falls back to difficulty if the node is older and doesn't expose it.
+        let next_difficulty = bc
+            .and_then(|v| v.get("next_difficulty"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(difficulty as u64) as u32;
+
+        let tip_hash = bc
             .and_then(|v| v.get("chain_tip"))
             .and_then(|v| v.as_str())
             .unwrap_or("none")
             .to_string();
 
-        Ok(ChainStatus { height, difficulty, tip_hash })
+        Ok(ChainStatus { height, difficulty, next_difficulty, tip_hash })
     }
 
     async fn fetch_mempool(&self) -> Result<MempoolSnapshot> {
@@ -239,13 +267,16 @@ async fn build_template(
     let txids: Vec<String> = all_txs.iter().map(|t| t.txid.clone()).collect();
     let merkle_root = compute_merkle_root(&txids);
 
-    let pool_diff = initial_pool_difficulty(status.difficulty);
+    // Use next_difficulty so the block header matches what the node's DWG3
+    // algorithm expects for the next block — prevents "difficulty mismatch" rejections.
+    let block_difficulty = status.next_difficulty;
+    let pool_diff = initial_pool_difficulty(block_difficulty);
 
     Ok(MiningTemplate {
         job_id,
         height,
         prev_hash,
-        difficulty: status.difficulty,
+        difficulty: block_difficulty,
         pool_diff,
         timestamp: chrono::Utc::now().timestamp(),
         merkle_root,
@@ -291,16 +322,37 @@ fn decode_block_payload(input: &str) -> Result<Block> {
 
 type SharedTracker = Arc<Mutex<ShareTracker>>;
 type TemplateStore = Arc<Mutex<HashMap<String, MiningTemplate>>>;
+type ActiveConnections = Arc<AtomicU64>;
 
 // ─── Stratum connection handler ───────────────────────────────────────────────
 
 async fn handle_stratum_connection(
     stream: TcpStream,
     template_store: TemplateStore,
+    job_rx: broadcast::Receiver<MiningTemplate>,
+    pool_cfg: Arc<PoolConfig>,
+    client: NodeClient,
+    tracker: SharedTracker,
+) -> Result<()> {
+    // Shared slot: inner handler writes extranonce1 here on auth so we can clean up on exit.
+    let registered_e1: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let result = handle_stratum_inner(
+        stream, template_store, job_rx, pool_cfg, client, tracker.clone(), registered_e1.clone(),
+    ).await;
+    if let Some(e1) = registered_e1.lock().unwrap().take() {
+        tracker.lock().unwrap().unregister_worker(&e1);
+    }
+    result
+}
+
+async fn handle_stratum_inner(
+    stream: TcpStream,
+    template_store: TemplateStore,
     mut job_rx: broadcast::Receiver<MiningTemplate>,
     pool_cfg: Arc<PoolConfig>,
     client: NodeClient,
     tracker: SharedTracker,
+    registered_e1: Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<()> {
     let mut framed = Framed::new(stream, LinesCodec::new());
     let mut session: Option<MinerSession> = None;
@@ -383,6 +435,14 @@ async fn handle_stratum_connection(
                                 s.worker_name,
                                 s.difficulty
                             );
+                            // Register as connected worker so it shows in the stats UI
+                            tracker.lock().unwrap().register_worker(
+                                s.extranonce1.clone(),
+                                s.miner_address.clone(),
+                                s.worker_name.clone(),
+                                s.difficulty,
+                            );
+                            *registered_e1.lock().unwrap() = Some(s.extranonce1.clone());
                         }
 
                         let resp = serde_json::json!({"id": id, "result": true, "error": null});
@@ -505,7 +565,7 @@ async fn handle_stratum_connection(
                                                     );
                                                 }
                                                 s.record_accepted_share();
-                                                let resp = serde_json::json!({"id": id, "result": true, "error": null});
+                                                let resp = serde_json::json!({"id": id, "result": true, "block_found": true, "error": null});
                                                 framed.send(resp.to_string()).await?;
                                             }
                                             Err(e) => {
@@ -634,6 +694,7 @@ async fn run_stratum_server(
     pool_cfg: Arc<PoolConfig>,
     client: NodeClient,
     tracker: SharedTracker,
+    active_connections: ActiveConnections,
 ) -> Result<()> {
     let listener = TcpListener::bind(&pool_cfg.stratum_bind).await?;
     let templates: TemplateStore = Arc::new(Mutex::new(HashMap::new()));
@@ -656,12 +717,13 @@ async fn run_stratum_server(
         let client = client.clone();
         let pool_cfg = pool_cfg.clone();
         let tracker = tracker.clone();
+        let ac = active_connections.clone();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_stratum_connection(stream, templates, job_rx, pool_cfg, client, tracker)
-                    .await
-            {
+            ac.fetch_add(1, AtomicOrdering::Relaxed);
+            let result = handle_stratum_connection(stream, templates, job_rx, pool_cfg, client, tracker).await;
+            ac.fetch_sub(1, AtomicOrdering::Relaxed);
+            if let Err(e) = result {
                 log::debug!("[STRATUM] {} disconnected: {}", peer_addr, e);
             }
         });
@@ -814,13 +876,14 @@ async fn run_gbt_server(
 /// HTML dashboard embedded at compile time from web/index.html
 static DASHBOARD_HTML: &str = include_str!("../web/index.html");
 
-async fn run_stats_server(bind_addr: String, tracker: SharedTracker) -> Result<()> {
+async fn run_stats_server(bind_addr: String, tracker: SharedTracker, active_connections: ActiveConnections) -> Result<()> {
     // Serve the dashboard at /
     let index = warp::path::end()
         .and(warp::get())
         .map(|| warp::reply::html(DASHBOARD_HTML.to_string()));
 
     let t1 = tracker.clone();
+    let ac1 = active_connections.clone();
     let stats = warp::path!("stats").and(warp::get()).map(move || {
         let t = t1.lock().unwrap();
         warp::reply::json(&serde_json::json!({
@@ -828,6 +891,7 @@ async fn run_stats_server(bind_addr: String, tracker: SharedTracker) -> Result<(
             "total_shares_rejected": t.total_shares_rejected,
             "blocks_found": t.found_blocks.len(),
             "pplns_window_shares": t.recent_shares.len(),
+            "active_connections": ac1.load(AtomicOrdering::Relaxed),
         }))
     });
 
@@ -864,6 +928,24 @@ async fn run_stats_server(bind_addr: String, tracker: SharedTracker) -> Result<(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Load the pool wallet keypair (used to sign payout transactions).
+/// Priority: POOL_WALLET_SECRET env var → wallet file secret_key field.
+fn load_pool_keypair(cfg: &Config) -> Result<WalletKeypair> {
+    if let Ok(secret) = std::env::var("POOL_WALLET_SECRET") {
+        return WalletKeypair::from_secret_hex(&secret)
+            .map_err(|e| anyhow!("invalid POOL_WALLET_SECRET: {}", e));
+    }
+    let wallet_path = cfg.wallet_path_resolved();
+    let data = std::fs::read_to_string(&wallet_path)
+        .map_err(|e| anyhow!("cannot read wallet file {:?}: {}", wallet_path, e))?;
+    let wallet: serde_json::Value = serde_json::from_str(&data)?;
+    let secret = wallet["secret_key"]
+        .as_str()
+        .ok_or_else(|| anyhow!("no 'secret_key' field in wallet file"))?;
+    WalletKeypair::from_secret_hex(secret)
+        .map_err(|e| anyhow!("invalid secret_key in wallet file: {}", e))
+}
+
 fn load_pool_address(cfg: &Config) -> Result<String> {
     let wallet_path = cfg.wallet_path_resolved();
     let wallet_file = std::fs::read_to_string(wallet_path)
@@ -888,7 +970,29 @@ async fn main() -> Result<()> {
     let cfg = Config::load();
     let pool_cfg = Arc::new(PoolConfig::from_env(&cfg)?);
     let client = NodeClient::new(pool_cfg.node_rpc_url.clone());
+
+    // ── Payout system setup ──────────────────────────────────────────────────
+    let keypair = Arc::new(load_pool_keypair(&cfg)?);
+
+    let payout_db = Arc::new(
+        PayoutDb::open(&pool_cfg.payout_db_path)
+            .map_err(|e| anyhow!("failed to open payout DB: {}", e))?,
+    );
+
+    // Initialise tracker and load persisted balances
     let tracker: SharedTracker = Arc::new(Mutex::new(ShareTracker::new(pool_cfg.pplns_window)));
+    {
+        let saved = payout_db.load_all().unwrap_or_default();
+        if !saved.is_empty() {
+            let mut t = tracker.lock().unwrap();
+            for (addr, bal) in &saved {
+                t.balances.insert(addr.clone(), *bal);
+            }
+            log::info!("💾 Loaded {} pending balances from DB", saved.len());
+        }
+    }
+
+    let active_connections: ActiveConnections = Arc::new(AtomicU64::new(0));
 
     log::info!("🏊 Astram Mining Pool starting...");
     log::info!("  Stratum   : {}", pool_cfg.stratum_bind);
@@ -903,6 +1007,11 @@ async fn main() -> Result<()> {
         pool_cfg.vardiff.min_diff,
         pool_cfg.vardiff.max_diff,
         pool_cfg.vardiff.target_share_time
+    );
+    log::info!(
+        "  Payout    : threshold={} ram, interval={}s",
+        pool_cfg.payout_threshold_ram,
+        pool_cfg.payout_interval_secs
     );
 
     // Spawn GBT server
@@ -922,13 +1031,41 @@ async fn main() -> Result<()> {
     {
         let stats_bind = pool_cfg.stats_bind.clone();
         let stats_tracker = tracker.clone();
+        let stats_ac = active_connections.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_stats_server(stats_bind, stats_tracker).await {
+            if let Err(e) = run_stats_server(stats_bind, stats_tracker, stats_ac).await {
                 log::error!("Stats server failed: {}", e);
             }
         });
     }
 
+    // Spawn balance persistence task (syncs balances to DB every 30 s)
+    {
+        let sync_tracker = tracker.clone();
+        let sync_db = payout_db.clone();
+        tokio::spawn(async move {
+            run_balance_sync(sync_tracker, sync_db).await;
+        });
+    }
+
+    // Spawn payout loop
+    {
+        let pay_http = client.client.clone();
+        let pay_url = pool_cfg.node_rpc_url.clone();
+        let pay_tracker = tracker.clone();
+        let pay_db = payout_db.clone();
+        let pay_kp = keypair.clone();
+        let pay_addr = pool_cfg.pool_address.clone();
+        let pay_threshold = pool_cfg.payout_threshold_ram;
+        let pay_interval = pool_cfg.payout_interval_secs;
+        tokio::spawn(async move {
+            run_payout_loop(
+                pay_http, pay_url, pay_tracker, pay_db,
+                pay_kp, pay_addr, pay_threshold, pay_interval,
+            ).await;
+        });
+    }
+
     // Run stratum server (blocking)
-    run_stratum_server(pool_cfg, client, tracker).await
+    run_stratum_server(pool_cfg, client, tracker, active_connections).await
 }

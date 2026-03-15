@@ -263,8 +263,10 @@ pub async fn run_server(
                 chain_tip,
                 genesis_hash,
                 chain_height,
+                chain_difficulty,
+                next_difficulty,
                 is_mining,
-                current_difficulty,
+                _current_difficulty,
                 hashrate,
                 blocks_mined_count,
                 uptime_secs,
@@ -273,11 +275,11 @@ pub async fn run_server(
                 let state = node.clone();
 
                 let _bc_lock_start = std::time::Instant::now();
-                let (chain_tip, genesis_hash, chain_height) = {
+                let (chain_tip, genesis_hash, chain_height, chain_difficulty, next_difficulty) = {
                     let bc = state.bc.lock().unwrap();
                     let tip = bc.chain_tip
                         .as_ref()
-                        .map(|h| hex::encode(h))
+                        .map(|h| h.clone())
                         .unwrap_or_else(|| "none".to_string());
                     let genesis = bc
                         .db
@@ -293,7 +295,11 @@ pub async fn run_server(
                         .and_then(|tip_hash| bc.load_header(tip_hash).ok().flatten())
                         .map(|h| h.index)
                         .unwrap_or(0);
-                    (tip, genesis, height)
+                    // Real compact-bits difficulty from chain (not mining.current_difficulty which stays 1)
+                    let diff = bc.difficulty;
+                    // Next block's expected difficulty (DWG3 adjusted) — what the stratum must use
+                    let next_diff = bc.calculate_adjusted_difficulty(height + 1).unwrap_or(diff);
+                    (tip, genesis, height, diff, next_diff)
                 };
                 let _chain_lock_start = std::time::Instant::now();
                 let memory_count = {
@@ -323,6 +329,8 @@ pub async fn run_server(
                     chain_tip,
                     genesis_hash,
                     chain_height,
+                    chain_difficulty,
+                    next_difficulty,
                     state.mining.active.load(std::sync::atomic::Ordering::Relaxed),
                     diff,
                     hash,
@@ -335,7 +343,7 @@ pub async fn run_server(
             // the bc Mutex on a tokio thread (would starve P2P and mining).
             let wallet_balance = {
                 let bc_arc = node.bc.clone();
-                let addr = miner_address.clone();
+                let addr: String = miner_address.clone();
                 tokio::task::spawn_blocking(move || {
                     bc_arc
                         .lock()
@@ -370,7 +378,8 @@ pub async fn run_server(
                     "chain_tip": chain_tip,
                     "genesis_hash": genesis_hash,
                     "my_height": my_height,
-                    "difficulty": current_difficulty,
+                    "difficulty": chain_difficulty,
+                    "next_difficulty": next_difficulty,
                 },
                 "mempool": {
                     "pending_transactions": pending_tx,
@@ -392,7 +401,7 @@ pub async fn run_server(
                 "mining": {
                     "active": is_mining,
                     "hashrate": hashrate,
-                    "difficulty": current_difficulty,
+                    "difficulty": chain_difficulty,
                     "blocks_mined": blocks_mined_count,
                 },
                 "wallet": {
@@ -958,7 +967,7 @@ pub async fn run_server(
 
 
     // -------------------------------
-    // GET / - Dashboard HTML
+    // GET / - Node Status Dashboard HTML
     let dashboard = warp::path::end()
         .and(warp::get())
         .map(|| {
@@ -1059,22 +1068,24 @@ pub async fn run_public_server(
                     None => (HashMap::new(), 0, 0, 0),
                 };
 
-            let (chain_tip, chain_height) = {
+            let (chain_tip, chain_height, chain_difficulty) = {
                 let bc = node.bc.lock().unwrap();
-                let tip = bc.chain_tip.as_ref().map(|h| hex::encode(h)).unwrap_or_else(|| "none".to_string());
+                let tip = bc.chain_tip.as_ref().map(|h| h.clone()).unwrap_or_else(|| "none".to_string());
                 let height = bc.chain_tip
                     .as_ref()
                     .and_then(|tip_hash| bc.load_header(tip_hash).ok().flatten())
                     .map(|h| h.index)
                     .unwrap_or(0);
-                (tip, height)
+                // Real compact-bits difficulty from chain tip
+                let diff = bc.difficulty;
+                (tip, height, diff)
             };
             let memory_blocks = chain_state.lock().unwrap().blockchain.len();
             let (pending_tx, seen_tx) = {
                 let mp = node.mempool.lock().unwrap();
                 (mp.pending.len(), mp.seen_tx.len())
             };
-            let diff = *node.mining.current_difficulty.lock().unwrap();
+            let _diff = *node.mining.current_difficulty.lock().unwrap();
             let hashrate = *node.mining.current_hashrate.lock().unwrap();
             let is_mining = node.mining.active.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -1094,7 +1105,7 @@ pub async fn run_public_server(
                     "height": chain_height,
                     "memory_blocks": memory_blocks,
                     "chain_tip": chain_tip,
-                    "difficulty": diff,
+                    "difficulty": chain_difficulty,
                 },
                 "mempool": {
                     "pending_transactions": pending_tx,
@@ -1114,7 +1125,7 @@ pub async fn run_public_server(
                 "mining": {
                     "active": is_mining,
                     "hashrate": hashrate,
-                    "difficulty": diff,
+                    "difficulty": chain_difficulty,
                 },
                 "security": {
                     "validation_failures_total": total_failures,

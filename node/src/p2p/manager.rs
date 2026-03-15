@@ -176,6 +176,9 @@ pub struct PeerManager {
     /// Sync blacklist: peer_id → time when the ban was imposed.
     /// Banned peers are excluded from sync for SYNC_BAN_DURATION_SECS.
     sync_blacklist: Shared<HashMap<PeerId, std::time::Instant>>,
+    /// Unix timestamp (secs) of the last Block message received from any peer.
+    /// Used to distinguish "slow processing" from "true stall" in sync.
+    last_block_received_at: Arc<std::sync::atomic::AtomicU64>,
     /// callback when a new block is received
     on_block: Arc<Mutex<Option<Arc<dyn Fn(block::Block) + Send + Sync>>>>,
     /// callback when a new transaction is received
@@ -192,6 +195,9 @@ pub struct PeerManager {
     on_headers: Arc<
         Mutex<Option<Arc<dyn Fn(PeerId, Vec<block::BlockHeader>) -> bool + Send + Sync>>>,
     >,
+    /// Callback to check whether a block hash (hex string) already exists in our DB.
+    /// Used by the Headers handler to skip requesting blocks we already have.
+    check_block_exists: Arc<Mutex<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>>,
 }
 
 impl PeerManager {
@@ -214,6 +220,8 @@ impl PeerManager {
             on_headers: Arc::new(Mutex::new(None)),
             pending_header_requests: Arc::new(Mutex::new(HashMap::new())),
             sync_blacklist: Arc::new(Mutex::new(HashMap::new())),
+            last_block_received_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            check_block_exists: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -257,6 +265,13 @@ impl PeerManager {
         F: Fn(PeerId, InventoryType, Vec<Vec<u8>>) + Send + Sync + 'static,
     {
         *self.on_getdata.lock() = Some(Arc::new(cb));
+    }
+
+    pub fn set_check_block_exists<F>(&self, cb: F)
+    where
+        F: Fn(&str) -> bool + Send + Sync + 'static,
+    {
+        *self.check_block_exists.lock() = Some(Arc::new(cb));
     }
 
     pub fn set_my_height(&self, height: u64) {
@@ -1234,20 +1249,30 @@ impl PeerManager {
                         }
                     }
 
-                    // request full blocks for these headers
+                    // request full blocks for these headers, skipping ones we already have
+                    let exists_cb = self.check_block_exists.lock().clone();
                     let mut hashes: Vec<Vec<u8>> = Vec::new();
                     for hdr in headers.iter() {
                         if let Ok(hash_hex) = block::compute_header_hash(hdr) {
+                            // Skip blocks already in our DB to avoid duplicate downloads
+                            if let Some(ref cb) = exists_cb {
+                                if (cb)(&hash_hex) {
+                                    debug!("[P2P] Skipping already-known block #{} in headers response", hdr.index);
+                                    continue;
+                                }
+                            }
                             if let Ok(bytes) = hex::decode(hash_hex) {
                                 hashes.push(bytes);
                             }
                         }
                     }
-                    if let Some(tx) = self.peers.lock().get(&peer_id) {
-                        let _ = tx.send(P2pMessage::GetData {
-                            object_type: InventoryType::Block,
-                            hashes,
-                        });
+                    if !hashes.is_empty() {
+                        if let Some(tx) = self.peers.lock().get(&peer_id) {
+                            let _ = tx.send(P2pMessage::GetData {
+                                object_type: InventoryType::Block,
+                                hashes,
+                            });
+                        }
                     }
                 }
             }
@@ -1310,6 +1335,12 @@ impl PeerManager {
                     "[P2P] 📦 {} sent block #{} {}",
                     peer_id, block.header.index, block.hash
                 );
+                // Track last block arrival time for stall detection
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                self.last_block_received_at.store(now_secs, std::sync::atomic::Ordering::Relaxed);
                 let callback_start = std::time::Instant::now();
                 let lock_start = std::time::Instant::now();
                 let cb = self.on_block.lock().clone();
@@ -1544,19 +1575,29 @@ impl PeerManager {
     // are banned for SYNC_BAN_DURATION_SECS (10 minutes) from sync requests.
     // -----------------------------------------------------------------------
 
-    /// Ban a peer from sync requests for `duration`. Also disconnects it immediately.
+    /// Returns how many seconds ago the last block was received from any peer.
+    /// Returns u64::MAX if no block has been received yet.
+    pub fn get_last_block_received_secs_ago(&self) -> u64 {
+        let last = self.last_block_received_at.load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return u64::MAX;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        now.saturating_sub(last)
+    }
+
+    /// Ban a peer from sync requests for `duration`.
+    /// Does NOT disconnect the TCP connection — the peer can still deliver blocks via Inv.
     pub fn ban_sync_peer(&self, peer_id: &PeerId, duration: std::time::Duration) {
         warn!(
-            "[SYNC] 🚫 Banning peer {} for {:.0}s (sync timeout)",
+            "[SYNC] 🚫 Sync-banning peer {} for {:.0}s (stall timeout, TCP kept alive)",
             peer_id,
             duration.as_secs_f64()
         );
-        self.disconnect_peer(peer_id, "sync timeout");
         self.sync_blacklist.lock().insert(peer_id.clone(), std::time::Instant::now());
-        // Store ban start; expiry is checked against `duration` in is_sync_banned.
-        // We keep duration in the map via a tuple so callers can use different durations.
-        // Simple approach: store ban_time and compare with a fixed constant.
-        // (The duration is passed at call site; all callers use the same 600s constant.)
     }
 
     /// Returns true if the peer is currently banned from sync.

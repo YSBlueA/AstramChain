@@ -166,13 +166,21 @@ pub async fn get_transaction_by_hash(
 pub async fn get_blockchain_stats(db: web::Data<Arc<ExplorerDB>>) -> HttpResponse {
     match db.get_stats() {
         Ok((total_blocks, total_transactions, total_volume)) => {
+            let average_block_time = db.compute_avg_block_time(50).unwrap_or(0.0);
+            let current_difficulty = db
+                .get_latest_block()
+                .ok()
+                .flatten()
+                .map(|b| b.difficulty)
+                .unwrap_or(1);
+
             let stats = BlockchainStats {
                 total_blocks,
                 total_transactions,
                 total_volume,
-                average_block_time: 0.0, // TODO: 계산
+                average_block_time,
                 average_block_size: 250,
-                current_difficulty: 1, // TODO: 최신 블록에서 가져오기
+                current_difficulty,
                 network_hashrate: "0.00 TH/s".to_string(),
             };
 

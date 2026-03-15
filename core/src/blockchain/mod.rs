@@ -590,6 +590,9 @@ impl Blockchain {
 
         put_batch(&self.db, batch)?;
         self.chain_tip = Some(block.hash.clone());
+        // Keep bc.difficulty in sync with the accepted chain tip so /status
+        // and calculate_adjusted_difficulty(next) both see the latest value.
+        self.difficulty = block.header.difficulty;
 
         Ok(())
     }
@@ -769,37 +772,6 @@ impl Blockchain {
         );
 
         Ok(next_bits)
-    }
-
-    /// Find a valid nonce by updating header.nonce and computing header hash.
-    /// Returns (nonce, hash).
-    pub fn find_valid_nonce(
-        &self,
-        header: &mut BlockHeader,
-        difficulty: u32,
-    ) -> Result<(u64, String)> {
-        let target = Self::compact_to_target(difficulty);
-        if target.is_zero() {
-            return Err(anyhow!(
-                "cannot mine with invalid target bits: 0x{:08x}",
-                difficulty
-            ));
-        }
-
-        let mut nonce: u64 = header.nonce;
-
-        loop {
-            header.nonce = nonce;
-            let hash = compute_header_hash(header)?;
-            let hash_u256 = Self::hash_to_u256(&hash)?;
-            if hash_u256 < target {
-                return Ok((nonce, hash));
-            }
-
-            nonce = nonce.wrapping_add(1);
-            // Periodic yield can be added by caller if needed (to avoid busy-wait in single-threaded contexts)
-            // For large scale mining, this loop would be replaced with GPU/parallel miners.
-        }
     }
 
     pub fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>> {
@@ -1243,6 +1215,10 @@ impl Blockchain {
         batch.put(b"tip", new_block_hash.as_bytes());
         put_batch(&self.db, batch)?;
         self.chain_tip = Some(new_block_hash.to_string());
+        // Sync bc.difficulty after reorg
+        if let Some(new_tip_block) = apply_blocks.last() {
+            self.difficulty = new_tip_block.header.difficulty;
+        }
 
         log::warn!(
             "✅ Reorganization complete: new tip = {}",

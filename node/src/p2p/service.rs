@@ -90,6 +90,17 @@ impl P2PService {
         // Create unbounded channel for sequential block processing (prevents deadlock)
         let (block_tx, mut block_rx) = tokio::sync::mpsc::unbounded_channel::<block::Block>();
 
+        // Check if a block hash already exists in our DB (used by Headers handler to skip duplicates)
+        let nh_exists = node_handle.clone();
+        p2p.set_check_block_exists(move |hash_hex: &str| {
+            if let Ok(bc) = nh_exists.bc.try_lock() {
+                let key = format!("b:{}", hash_hex);
+                bc.db.get(key.as_bytes()).ok().flatten().is_some()
+            } else {
+                false // If lock contended, assume block doesn't exist (safe to re-request)
+            }
+        });
+
         // set chain locator callback for syncing (use persisted DB tip, not in-memory cache)
         let nh_locator = node_handle.clone();
         p2p.set_on_get_chain_locator(move || {
@@ -279,7 +290,16 @@ impl P2PService {
                 debug!("[LOCK-DEBUG] 🔒 Block #{} attempting bc.lock()...", block.header.index);
                 let mut bc = state.bc.lock().unwrap();
                 debug!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() after {:?}", block.header.index, lock_start.elapsed());
-                
+
+                // Early duplicate check: if the block is already in the DB, skip all processing.
+                // This avoids: wrong [OK] log, wrong set_my_height downgrade, and unnecessary reorg work.
+                let block_key = format!("b:{}", block.hash);
+                if bc.db.get(block_key.as_bytes()).ok().flatten().is_some() {
+                    debug!("[P2P] Block #{} ({}) already in DB, skipping", block.header.index, &block.hash[..16]);
+                    drop(bc);
+                    continue;
+                }
+
                 let validation_start = std::time::Instant::now();
                 let syncing = p2p_block.get_syncing();
                 match bc.validate_and_insert_block(&block) {
@@ -872,16 +892,24 @@ impl P2PService {
     fn start_block_sync(&self, node_handle: NodeHandle) {
         let p2p = self.manager.clone();
         tokio::spawn(async move {
-            // How long a stalled peer stays banned (10 minutes).
+            // How long a stalled peer stays banned from sync (10 minutes).
             const BAN_DURATION: std::time::Duration = std::time::Duration::from_secs(600);
-            // If the current sync peer delivers no new block within this window → ban it.
-            const PEER_STALL_SECS: u64 = 10;
+            // If no new block committed AND none received from network within this window → ban.
+            // 30s gives time for large batches (200 blocks) to be delivered and committed.
+            const PEER_STALL_SECS: u64 = 30;
             // Log every N blocks to avoid spamming.
             const SYNC_LOG_INTERVAL: u64 = 100;
             // How often to refresh peer heights when already synced.
-            const HEIGHT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+            // 10s means we catch up within 10s if a peer mines new blocks.
+            const HEIGHT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+            // Minimum gap between GetHeaders requests to the same peer (avoid spam).
+            const GETHEADERS_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
-            let mut last_syncing_state = false;
+            // Pre-set syncing=true so blocks processed before the first loop iteration
+            // (startup race window) use debug! level instead of spamming info!.
+            // The loop will set it back to false once we confirm we are caught up.
+            p2p.set_syncing(true);
+            let mut last_syncing_state = true;
             let mut last_height_refresh = std::time::Instant::now();
             let mut last_logged_height: u64 = 0;
 
@@ -889,6 +917,9 @@ impl P2PService {
             let mut sync_peer: Option<String> = None;       // peer we are currently syncing from
             let mut last_progress_height: u64 = 0;
             let mut last_progress_time = std::time::Instant::now();
+            // Rate-limit GetHeaders requests to avoid spamming the same peer.
+            // Initialize far enough in the past so the first iteration sends immediately.
+            let mut last_getheaders_sent = std::time::Instant::now() - Duration::from_secs(10);
 
             loop {
                 // Purge expired bans to keep the map small.
@@ -966,23 +997,36 @@ impl P2PService {
                         last_progress_height = my_height;
                         last_progress_time = std::time::Instant::now();
                     } else if last_progress_time.elapsed().as_secs() >= PEER_STALL_SECS {
-                        warn!(
-                            "[SYNC] ⚠️  Peer {} stalled for {}s at block #{} (target: {}). Blacklisting for {}s.",
-                            target_peer,
-                            last_progress_time.elapsed().as_secs(),
-                            my_height,
-                            max_available_height,
-                            BAN_DURATION.as_secs()
-                        );
-                        p2p.ban_sync_peer(&target_peer, BAN_DURATION);
-                        sync_peer = None;
-                        last_progress_time = std::time::Instant::now();
-                        // Immediately retry with next best peer on the next loop tick.
-                        sleep(Duration::from_millis(100)).await;
-                        continue;
+                        // Before banning, check whether blocks are still being delivered
+                        // over the network (just slow to commit due to queue backlog).
+                        let secs_since_block = p2p.get_last_block_received_secs_ago();
+                        if secs_since_block < PEER_STALL_SECS {
+                            // Blocks are still flowing — reset stall clock, don't ban.
+                            debug!(
+                                "[SYNC] ℹ️  Height stuck at {} but blocks still arriving ({:.0}s ago). Waiting…",
+                                my_height, secs_since_block
+                            );
+                            last_progress_time = std::time::Instant::now();
+                        } else {
+                            // True stall: no blocks from network either.
+                            warn!(
+                                "[SYNC] ⚠️  Peer {} stalled for {}s at block #{} (target: {}). Sync-banning for {}s.",
+                                target_peer,
+                                last_progress_time.elapsed().as_secs(),
+                                my_height,
+                                max_available_height,
+                                BAN_DURATION.as_secs()
+                            );
+                            p2p.ban_sync_peer(&target_peer, BAN_DURATION);
+                            sync_peer = None;
+                            last_progress_time = std::time::Instant::now();
+                            // Immediately retry with next best peer on the next loop tick.
+                            sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
                     }
 
-                    // ── 5. send GetHeaders to the targeted peer ───────────────────
+                    // ── 5. send GetHeaders to the targeted peer (rate-limited) ────
                     if my_height == 0 || my_height.saturating_sub(last_logged_height) >= SYNC_LOG_INTERVAL {
                         info!(
                             "[SYNC] Progress: {}/{} ({:.1}%) via peer {}",
@@ -993,15 +1037,18 @@ impl P2PService {
                         last_logged_height = my_height;
                     }
 
-                    let locator = {
-                        let bc = node_handle.bc.lock().unwrap();
-                        bc.chain_tip
-                            .as_ref()
-                            .and_then(|h| hex::decode(h).ok())
-                            .map(|b| vec![b])
-                            .unwrap_or_default()
-                    };
-                    p2p.request_headers_from_peer(&target_peer, locator, None);
+                    if last_getheaders_sent.elapsed() >= GETHEADERS_COOLDOWN {
+                        let locator = {
+                            let bc = node_handle.bc.lock().unwrap();
+                            bc.chain_tip
+                                .as_ref()
+                                .and_then(|h| hex::decode(h).ok())
+                                .map(|b| vec![b])
+                                .unwrap_or_default()
+                        };
+                        p2p.request_headers_from_peer(&target_peer, locator, None);
+                        last_getheaders_sent = std::time::Instant::now();
+                    }
 
                 } else {
                     // ── synced ────────────────────────────────────────────────────
@@ -1010,9 +1057,12 @@ impl P2PService {
                         last_syncing_state = false;
                         sync_peer = None;
                         info!("[SYNC] ✅ Fully synced at height {}", my_height);
+                        // Immediately refresh peer heights so we detect new blocks fast.
+                        last_height_refresh = std::time::Instant::now() - HEIGHT_REFRESH_INTERVAL;
                     }
 
                     // Periodic height refresh (broadcast to all peers).
+                    // Every 10s so we catch new blocks from active miners quickly.
                     if last_height_refresh.elapsed() >= HEIGHT_REFRESH_INTERVAL {
                         last_height_refresh = std::time::Instant::now();
                         let locator = {

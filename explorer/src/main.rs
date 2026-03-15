@@ -173,14 +173,15 @@ async fn sync_blockchain(db: &ExplorerDB, rpc_client: &NodeRpcClient) -> anyhow:
         }
     }
 
-    // Update sync metadata (tx_count / total_volume are maintained by save_transaction)
-    db.set_block_count(latest_height + 1)?;
+    // Update sync metadata (block_count / tx_count / total_volume are maintained by save_block/save_transaction)
     db.set_last_synced_height(latest_height)?;
 
     if new_blocks > 0 || new_transactions > 0 {
+        let total_blocks = db.get_block_count().unwrap_or(0);
+        let total_txs = db.get_transaction_count().unwrap_or(0);
         info!(
-            "Indexed {} new blocks, {} new transactions (Height: {} -> {}, Total: {} blocks, {} txs)",
-            new_blocks, new_transactions, last_synced, latest_height, latest_height, latest_height
+            "Indexed {} new blocks, {} new transactions (Height: {} -> {}, DB total: {} blocks, {} txs)",
+            new_blocks, new_transactions, last_synced, latest_height, total_blocks, total_txs
         );
     }
 

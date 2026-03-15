@@ -79,8 +79,20 @@ impl ExplorerDB {
             }
 
             if max_height > 0 {
-                self.set_block_count(max_height + 1)?;
-                info!("🔧 Initialized block_count to {} from existing data", max_height + 1);
+                // Count actual number of indexed blocks (not height + 1)
+                let mut actual_count = 0u64;
+                let mut iter2 = self.db.raw_iterator();
+                iter2.seek(b"b:");
+                while iter2.valid() {
+                    if let Some(k) = iter2.key() {
+                        if !k.starts_with(b"b:") { break; }
+                        actual_count += 1;
+                    }
+                    iter2.next();
+                }
+                self.set_block_count(actual_count)?;
+                self.db.put(b"meta:last_height", max_height.to_string().as_bytes())?;
+                info!("🔧 Initialized block_count={} last_height={} from existing data", actual_count, max_height);
             }
         }
 
@@ -103,6 +115,35 @@ impl ExplorerDB {
             if count > 0 {
                 self.set_transaction_count(count)?;
                 info!("🔧 Initialized tx_count to {} from existing data", count);
+            }
+        }
+
+        // One-time migration: set meta:last_height if missing (upgrade from old schema)
+        if self.db.get(b"meta:last_height")?.is_none() {
+            let mut max_height = 0u64;
+            let mut actual_count = 0u64;
+            let mut iter = self.db.raw_iterator();
+            iter.seek(b"b:");
+            while iter.valid() {
+                if let Some(key) = iter.key() {
+                    if !key.starts_with(b"b:") { break; }
+                    let key_str = String::from_utf8_lossy(key);
+                    if let Some(h_str) = key_str.strip_prefix("b:") {
+                        if let Ok(h) = h_str.parse::<u64>() {
+                            max_height = max_height.max(h);
+                        }
+                    }
+                    actual_count += 1;
+                }
+                iter.next();
+            }
+            if max_height > 0 {
+                let mut batch = WriteBatch::default();
+                batch.put(b"meta:last_height", max_height.to_string().as_bytes());
+                // Also fix block_count if it was inflated to height+1
+                batch.put(b"meta:block_count", actual_count.to_string().as_bytes());
+                self.db.write(batch)?;
+                info!("🔧 Migration: set last_height={}, corrected block_count={}", max_height, actual_count);
             }
         }
 
@@ -154,11 +195,14 @@ impl ExplorerDB {
     /// Key: b:<height> -> BlockInfo (JSON)
     /// Key: bh:<hash> -> height
     pub fn save_block(&self, block: &BlockInfo) -> Result<()> {
-        log::info!("🗄️  ExplorerDB: Saving block height={}", block.height);
+        let block_key = format!("b:{}", block.height);
+
+        // Dedup: only count truly new blocks
+        let is_new = self.db.get(block_key.as_bytes())?.is_none();
+
         let mut batch = WriteBatch::default();
 
         // b:<height> -> BlockInfo
-        let block_key = format!("b:{}", block.height);
         let block_json = serde_json::to_string(block)?;
         batch.put(block_key.as_bytes(), block_json.as_bytes());
 
@@ -166,14 +210,57 @@ impl ExplorerDB {
         let hash_key = format!("bh:{}", block.hash);
         batch.put(hash_key.as_bytes(), block.height.to_string().as_bytes());
 
-        // meta:block_count 업데이트 (최고 높이 + 1)
-        let current_count = self.get_block_count().unwrap_or(0);
-        let new_count = current_count.max(block.height + 1);
-        batch.put(b"meta:block_count", new_count.to_string().as_bytes());
+        if is_new {
+            // Increment actual indexed block count (same pattern as tx_count)
+            let current_count = self.get_block_count().unwrap_or(0);
+            batch.put(b"meta:block_count", (current_count + 1).to_string().as_bytes());
+        }
+
+        // Track highest indexed height separately (used for pagination)
+        let prev_last = self.get_last_indexed_height().unwrap_or(0);
+        if block.height >= prev_last {
+            batch.put(b"meta:last_height", block.height.to_string().as_bytes());
+        }
 
         self.db.write(batch)?;
-        log::info!("✅ ExplorerDB: Block height={} persisted", block.height);
         Ok(())
+    }
+
+    /// 가장 높게 인덱싱된 블록 높이 (페이징 기준점)
+    pub fn get_last_indexed_height(&self) -> Result<u64> {
+        match self.db.get(b"meta:last_height")? {
+            Some(data) => Ok(String::from_utf8(data.to_vec())?.parse()?),
+            None => Ok(0),
+        }
+    }
+
+    /// 최신 블록 정보 조회
+    pub fn get_latest_block(&self) -> Result<Option<BlockInfo>> {
+        let h = self.get_last_indexed_height()?;
+        if h == 0 && self.get_block_count()? == 0 {
+            return Ok(None);
+        }
+        self.get_block_by_height(h)
+    }
+
+    /// 최근 블록들의 평균 생성 간격 (초) 계산
+    pub fn compute_avg_block_time(&self, sample: u64) -> Result<f64> {
+        let last = self.get_last_indexed_height()?;
+        if last < 2 {
+            return Ok(0.0);
+        }
+        let from = last.saturating_sub(sample);
+        let mut times: Vec<i64> = Vec::new();
+        for h in from..=last {
+            if let Some(b) = self.get_block_by_height(h)? {
+                times.push(b.timestamp.timestamp());
+            }
+        }
+        if times.len() < 2 {
+            return Ok(0.0);
+        }
+        let span = times.last().unwrap() - times.first().unwrap();
+        Ok(span as f64 / (times.len() - 1) as f64)
     }
 
     /// 블록 조회 (높이로)
@@ -182,13 +269,9 @@ impl ExplorerDB {
         match self.db.get(key.as_bytes())? {
             Some(data) => {
                 let mut block: BlockInfo = serde_json::from_slice(&data)?;
-                // Calculate confirmations based on current chain height
-                let current_height = self.get_block_count()?;
-                block.confirmations = if current_height > height {
-                    current_height - height
-                } else {
-                    0
-                };
+                // Calculate confirmations based on chain tip height
+                let tip = self.get_last_indexed_height()?;
+                block.confirmations = if tip > height { tip - height } else { 0 };
                 Ok(Some(block))
             }
             None => Ok(None),
@@ -211,6 +294,7 @@ impl ExplorerDB {
 
     /// 모든 블록 조회 (페이징)
     pub fn get_blocks(&self, page: u32, limit: u32) -> Result<Vec<BlockInfo>> {
+        let last_height = self.get_last_indexed_height()?;
         let total_blocks = self.get_block_count()?;
 
         if total_blocks == 0 {
@@ -227,8 +311,8 @@ impl ExplorerDB {
             return Ok(Vec::new());
         }
 
-        // 최신 블록 높이부터 시작
-        let start_height = total_blocks.saturating_sub(1 + skip);
+        // 최신 블록 높이(last_height)부터 시작
+        let start_height = last_height.saturating_sub(skip);
         let end_height = start_height.saturating_sub(limit as u64 - 1);
 
         // 최신 블록부터 역순으로 (높은 높이 -> 낮은 높이)

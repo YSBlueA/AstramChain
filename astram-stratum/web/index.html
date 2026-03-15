@@ -113,40 +113,6 @@
     .card-value.accent { color: var(--accent); }
     .card-value.yellow { color: var(--yellow); }
 
-    /* ── Stratum connect banner ── */
-    .connect-banner {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 1rem 1.4rem;
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-    .connect-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
-    .connect-url {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 4px 10px;
-      font-family: monospace;
-      color: var(--accent);
-      font-size: 13px;
-      user-select: all;
-    }
-    .copy-btn {
-      background: none;
-      border: 1px solid var(--border);
-      color: var(--muted);
-      padding: 3px 10px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 11px;
-      transition: all .2s;
-    }
-    .copy-btn:hover { border-color: var(--green); color: var(--green); }
-
     /* ── Tables ── */
     .table-wrap {
       background: var(--surface);
@@ -249,20 +215,6 @@
 
 <main>
 
-  <!-- Connect -->
-  <section>
-    <h2>Connect Your Miner</h2>
-    <div class="connect-banner">
-      <span class="connect-label">Stratum URL</span>
-      <span class="connect-url" id="stratum-url">stratum+tcp://loading...</span>
-      <button class="copy-btn" onclick="copyUrl()">Copy</button>
-      <span class="connect-label" style="margin-left:.5rem;">Worker</span>
-      <span class="connect-url">YOUR_ADDRESS.rig1</span>
-      <span class="connect-label" style="margin-left:.5rem;">Password</span>
-      <span class="connect-url">x</span>
-    </div>
-  </section>
-
   <!-- Stats -->
   <section>
     <h2>Pool Statistics</h2>
@@ -288,9 +240,9 @@
         <div class="card-sub">recent shares</div>
       </div>
       <div class="card">
-        <div class="card-label">Active Miners</div>
-        <div class="card-value" id="stat-miners">—</div>
-        <div class="card-sub">with shares in window</div>
+        <div class="card-label">Connected Miners</div>
+        <div class="card-value" id="stat-connections">—</div>
+        <div class="card-sub"><span id="stat-miners">—</span> with shares</div>
       </div>
     </div>
   </section>
@@ -310,6 +262,8 @@
           <thead>
             <tr>
               <th>Miner Address</th>
+              <th>Worker</th>
+              <th>Diff</th>
               <th>Shares (accepted)</th>
               <th>Shares (rejected)</th>
               <th>In Window</th>
@@ -318,7 +272,7 @@
             </tr>
           </thead>
           <tbody id="miners-body">
-            <tr><td colspan="6" class="empty">Loading...</td></tr>
+            <tr><td colspan="8" class="empty">Loading...</td></tr>
           </tbody>
         </table>
       </div>
@@ -374,7 +328,6 @@
 <script>
   // ── Config ──────────────────────────────────────────────────────────────────
   const API = '';   // same origin — stats server serves this page
-  const STRATUM_PORT = 3333;
 
   // ── State ───────────────────────────────────────────────────────────────────
   let online = false;
@@ -408,22 +361,6 @@
     document.getElementById('status-text').textContent = v ? 'Online' : 'Unreachable';
   }
 
-  // ── Stratum URL ─────────────────────────────────────────────────────────────
-  (function() {
-    const host = location.hostname || '127.0.0.1';
-    document.getElementById('stratum-url').textContent =
-      `stratum+tcp://${host}:${STRATUM_PORT}`;
-  })();
-
-  function copyUrl() {
-    const txt = document.getElementById('stratum-url').textContent;
-    navigator.clipboard.writeText(txt).then(() => {
-      const b = document.querySelector('.copy-btn');
-      b.textContent = '✓ Copied';
-      setTimeout(() => b.textContent = 'Copy', 1500);
-    });
-  }
-
   // ── Tab switching ───────────────────────────────────────────────────────────
   function showTab(name, el) {
     ['miners','blocks','payments'].forEach(t => {
@@ -443,13 +380,14 @@
   // ── Load stats ───────────────────────────────────────────────────────────────
   async function loadStats() {
     const d = await fetchJSON('/stats');
-    document.getElementById('stat-blocks').textContent   = fmt(d.blocks_found);
-    document.getElementById('stat-accepted').textContent = fmt(d.total_shares_accepted);
-    document.getElementById('stat-window').textContent   = fmt(d.pplns_window_shares);
+    document.getElementById('stat-blocks').textContent      = fmt(d.blocks_found);
+    document.getElementById('stat-accepted').textContent    = fmt(d.total_shares_accepted);
+    document.getElementById('stat-window').textContent      = fmt(d.pplns_window_shares);
+    document.getElementById('stat-connections').textContent = fmt(d.active_connections ?? 0);
     const rej = d.total_shares_rejected;
     const tot = d.total_shares_accepted + rej;
-    document.getElementById('stat-rejected').textContent  = fmt(rej);
-    document.getElementById('stat-reject-pct').textContent = pct(rej,tot) + ' reject rate';
+    document.getElementById('stat-rejected').textContent    = fmt(rej);
+    document.getElementById('stat-reject-pct').textContent  = pct(rej,tot) + ' reject rate';
   }
 
   // ── Load miners ──────────────────────────────────────────────────────────────
@@ -460,18 +398,26 @@
 
     const body = document.getElementById('miners-body');
     if (!miners.length) {
-      body.innerHTML = '<tr><td colspan="6" class="empty">No miners yet.</td></tr>';
+      body.innerHTML = '<tr><td colspan="8" class="empty">No miners yet.</td></tr>';
       return;
     }
-    miners.sort((a,b) => b.shares_in_window - a.shares_in_window);
+    // Connected miners first, then sort by shares in window
+    miners.sort((a,b) => (b.connected ? 1 : 0) - (a.connected ? 1 : 0) || b.shares_in_window - a.shares_in_window);
     body.innerHTML = miners.map(m => {
       const asrm = weiToAsrm(m.balance);
       const bal  = parseFloat(asrm) > 0 ? asrm : '<span class="muted">0.0000</span>';
       const inWin = m.shares_in_window > 0
         ? `<span class="badge badge-green">${fmt(m.shares_in_window)}</span>`
         : `<span class="muted">0</span>`;
+      const status = m.connected
+        ? `<span class="badge badge-green">online</span>`
+        : `<span class="muted">offline</span>`;
+      const worker = m.worker_name ? `${m.worker_name} ${status}` : status;
+      const diff = m.difficulty > 0 ? m.difficulty : '<span class="muted">—</span>';
       return `<tr>
         <td class="mono accent">${m.address}</td>
+        <td>${worker}</td>
+        <td>${diff}</td>
         <td class="green">${fmt(m.shares_accepted)}</td>
         <td>${fmt(m.shares_rejected)}</td>
         <td>${inWin}</td>

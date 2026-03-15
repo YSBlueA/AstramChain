@@ -111,55 +111,57 @@ __device__ void blake3_compress(uint32_t cv[8], const uint8_t block[BLAKE3_BLOCK
     }
 }
 
-// Simplified Blake3 hash for mining (single chunk)
+// Blake3 flags per spec
+#define BLAKE3_FLAG_CHUNK_START 0x01
+#define BLAKE3_FLAG_CHUNK_END   0x02
+#define BLAKE3_FLAG_ROOT        0x08
+
+// Blake3 hash for mining (single-chunk input, ≤1024 bytes).
+// Flags follow the Blake3 reference spec:
+//   - first block of chunk: CHUNK_START
+//   - last block of chunk:  CHUNK_END | ROOT  (ROOT because this IS the only chunk)
+//   - only block (≤64 B):   CHUNK_START | CHUNK_END | ROOT
+//
+// IMPORTANT: All blocks within a single chunk use counter = 0 (the chunk index).
+// Incrementing the counter per block is wrong — the counter tracks chunks, not
+// blocks within a chunk. For single-chunk inputs this is always 0.
 __device__ void blake3_hash_simple(const uint8_t *input, int len, uint8_t output[32])
 {
     uint32_t cv[8];
-
-// Initialize chaining value with IV
-#pragma unroll
     for (int i = 0; i < 8; i++)
-    {
         cv[i] = BLAKE3_IV[i];
-    }
 
     uint8_t block[BLAKE3_BLOCK_LEN];
     int processed = 0;
-    uint64_t chunk_counter = 0;
+    int is_first = 1;
 
-    // Process complete 64-byte blocks
-    while (processed + BLAKE3_BLOCK_LEN <= len)
+    // Process every block except the last one (strict <).
+    // This guarantees at least one byte reaches the "final block" path.
+    while (processed + BLAKE3_BLOCK_LEN < len)
     {
-#pragma unroll
         for (int i = 0; i < BLAKE3_BLOCK_LEN; i++)
-        {
             block[i] = input[processed + i];
-        }
-        blake3_compress(cv, block, BLAKE3_BLOCK_LEN, chunk_counter++, 0);
+
+        uint8_t flags = is_first ? BLAKE3_FLAG_CHUNK_START : 0;
+        // counter = 0: this is chunk 0; all blocks within a chunk share the same counter.
+        blake3_compress(cv, block, BLAKE3_BLOCK_LEN, 0, flags);
         processed += BLAKE3_BLOCK_LEN;
+        is_first = 0;
     }
 
-    // Process final block (with padding)
+    // Final block (may be a full 64-byte block if input length is a multiple of 64).
     int remaining = len - processed;
-#pragma unroll
     for (int i = 0; i < BLAKE3_BLOCK_LEN; i++)
-    {
-        if (i < remaining)
-        {
-            block[i] = input[processed + i];
-        }
-        else
-        {
-            block[i] = 0;
-        }
-    }
+        block[i] = (i < remaining) ? input[processed + i] : 0;
 
-    // Final block flag (0x01 for chunk end, 0x08 for root)
-    uint8_t flags = 0x01 | 0x08;
-    blake3_compress(cv, block, remaining, chunk_counter, flags);
+    uint8_t final_flags = BLAKE3_FLAG_CHUNK_END | BLAKE3_FLAG_ROOT;
+    if (is_first)
+        final_flags |= BLAKE3_FLAG_CHUNK_START;  // single block: also CHUNK_START
 
-// Extract output (little-endian)
-#pragma unroll
+    // counter = 0: chunk 0, consistent with all blocks above
+    blake3_compress(cv, block, (uint8_t)remaining, 0, final_flags);
+
+    // Extract output (little-endian word order, matching blake3 Rust crate)
     for (int i = 0; i < 8; i++)
     {
         output[i * 4 + 0] = (uint8_t)(cv[i]);
@@ -313,19 +315,21 @@ extern "C" __global__ void mine_kernel(
             }
         }
 
-        // Step 4: Final Blake3 hash
+        // Step 4: Final Blake3 DAG-PoW hash (kept for future node-side validation)
         uint8_t final_hash[32];
         blake3_hash_simple(mix, 128, final_hash);
 
-        // Check if meets target
-        if (meets_target(final_hash, target))
+        // Check if canonical header hash (Blake3) meets target.
+        // Pool and node both validate using the canonical Blake3 header hash,
+        // so shares/blocks are accepted when header_hash < target.
+        if (meets_target(header_hash, target))
         {
             if (atomicCAS(found_flag, 0, 1) == 0)
             {
                 *found_nonce = nonce;
                 for (int j = 0; j < 32; j++)
                 {
-                    found_hash[j] = final_hash[j];
+                    found_hash[j] = header_hash[j];
                 }
             }
             return;

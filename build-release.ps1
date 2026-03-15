@@ -120,13 +120,13 @@ Write-Info "Creating launcher script..."
 $LauncherContent = @'
 #!/usr/bin/env pwsh
 # Astram Launcher for Windows
-# Usage: .\Astram.ps1 [node|dns|explorer|wallet] [args...]
+# Usage: .\Astram.ps1 [node|miner|stratum|dns|explorer|wallet] [args...]
 
 param(
     [Parameter(Position=0)]
-    [ValidateSet('node', 'dns', 'explorer', 'wallet')]
+    [ValidateSet('node', 'miner', 'stratum', 'dns', 'explorer', 'wallet')]
     [string]$Component = 'node',
-    
+
     [Parameter(ValueFromRemainingArguments=$true)]
     [string[]]$RemainingArgs
 )
@@ -176,6 +176,23 @@ function Ensure-ConfigDefaults {
     return $config
 }
 
+# Load a .conf file (KEY=VALUE) and return as hashtable
+function Load-ConfFile {
+    param([string]$Path)
+    $result = @{}
+    if (Test-Path $Path) {
+        Get-Content $Path | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -and -not $line.StartsWith('#')) {
+                if ($line -match '^([^=]+)=(.*)$') {
+                    $result[$matches[1].Trim()] = $matches[2].Trim()
+                }
+            }
+        }
+    }
+    return $result
+}
+
 $config = Ensure-ConfigDefaults
 
 # Load build configuration (MINER_BACKEND)
@@ -186,11 +203,7 @@ if (Test-Path $BuildInfoFile) {
             $key = $matches[1]
             $value = $matches[2]
             if ($key -eq "MINER_BACKEND") {
-                if ([string]::IsNullOrWhiteSpace($value)) {
-                    $env:MINER_BACKEND = "cuda"
-                } else {
-                    $env:MINER_BACKEND = $value
-                }
+                $env:MINER_BACKEND = if ([string]::IsNullOrWhiteSpace($value)) { "cuda" } else { $value }
             }
         }
     }
@@ -202,6 +215,8 @@ if ([string]::IsNullOrWhiteSpace($env:MINER_BACKEND)) {
 
 switch ($Component) {
     'node'     { $exe = "Astram-node.exe" }
+    'miner'    { $exe = "Astram-miner.exe" }
+    'stratum'  { $exe = "Astram-stratum.exe" }
     'dns'      { $exe = "Astram-dns.exe" }
     'explorer' { $exe = "Astram-explorer.exe" }
     'wallet'   { $exe = "wallet-cli.exe" }
@@ -214,31 +229,60 @@ if (-not (Test-Path $exePath)) {
     exit 1
 }
 
-if ($Component -eq 'node' -and -not (Test-Path $config.wallet_path)) {
+# Wallet auto-create: needed for node, miner (reward address) and stratum (pool fee address)
+if ($Component -in @('node', 'miner', 'stratum') -and -not (Test-Path $config.wallet_path)) {
     Write-Host "Wallet file not found. Creating a new wallet at $($config.wallet_path)" -ForegroundColor Yellow
     & (Join-Path $ScriptDir "wallet-cli.exe") generate
 }
 
+# Miner: show mode from config file before starting
+if ($Component -eq 'miner') {
+    $MinerConf = Join-Path $ScriptDir "config\minerSettings.conf"
+    $MiningMode = "pool"
+    if (Test-Path $MinerConf) {
+        $modeMatch = Get-Content $MinerConf | Where-Object { $_ -match "^MINING_MODE\s*=" } | Select-Object -First 1
+        if ($modeMatch -match "=\s*(.+)$") { $MiningMode = $matches[1].Trim() }
+    }
+    Write-Host ""
+    Write-Host "  Mining mode : $MiningMode" -ForegroundColor Cyan
+    if ($MiningMode -eq "solo") {
+        Write-Host "  Requires    : Astram-node.exe running on this machine" -ForegroundColor Yellow
+        Write-Host "  Edit config\minerSettings.conf to switch to pool mode" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  Pool        : pool.astramchain.com:3333" -ForegroundColor Cyan
+        Write-Host "  Edit config\minerSettings.conf to switch to solo mode" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+}
+
+# Stratum: load poolSettings.conf and inject as environment variables
+if ($Component -eq 'stratum') {
+    $PoolConf = Join-Path $ScriptDir "config\poolSettings.conf"
+    $poolSettings = Load-ConfFile $PoolConf
+    foreach ($key in $poolSettings.Keys) {
+        [System.Environment]::SetEnvironmentVariable($key, $poolSettings[$key], 'Process')
+    }
+
+    $pNodeRpc  = if ($poolSettings['NODE_RPC_URL']) { $poolSettings['NODE_RPC_URL'] } else { 'http://127.0.0.1:19533' }
+    $pStratum  = if ($poolSettings['STRATUM_BIND']) { $poolSettings['STRATUM_BIND'] } else { '0.0.0.0:3333' }
+    $pStats    = if ($poolSettings['STATS_BIND'])   { $poolSettings['STATS_BIND']   } else { '0.0.0.0:8081' }
+
+    Write-Host ""
+    Write-Host "  Stratum pool server" -ForegroundColor Cyan
+    Write-Host ("  Node RPC    : " + $pNodeRpc)  -ForegroundColor Cyan
+    Write-Host ("  Stratum     : " + $pStratum)  -ForegroundColor Cyan
+    Write-Host ("  Stats API   : " + $pStats)    -ForegroundColor Cyan
+    Write-Host "  Requires    : Astram-node.exe running on this machine" -ForegroundColor Yellow
+    Write-Host "  Edit config\poolSettings.conf to change pool settings" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
 Write-Host "Starting Astram $Component..." -ForegroundColor Green
-if ($Component -eq 'node') {
-    # Open browser in background after a delay
-    Start-Job -ScriptBlock {
-        Start-Sleep -Seconds 10
-        Start-Process "http://localhost:19533"
-    } | Out-Null
-    
-    # Run node in current console
-    if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
-        & $exePath @RemainingArgs
-    } else {
-        & $exePath
-    }
+
+if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
+    & $exePath @RemainingArgs
 } else {
-    if ($RemainingArgs -and $RemainingArgs.Count -gt 0) {
-        & $exePath @RemainingArgs
-    } else {
-        & $exePath
-    }
+    & $exePath
 }
 '@
 
@@ -259,7 +303,7 @@ HTTP_BIND_ADDR=127.0.0.1
 HTTP_PORT=19533
 
 # DNS discovery server
-DNS_SERVER_URL=http://161.33.19.183:8053
+DNS_SERVER_URL=https://seed.astramchain.com
 
 # Network selection (default: mainnet)
 # Uncomment to use testnet:
@@ -277,6 +321,107 @@ DATA_DIR=%USERPROFILE%\.Astram\data
 
 Set-Content -Path "$ReleaseDir/config/nodeSettings.conf" -Value $NodeSettingsContent
 
+# Create miner settings config
+Write-Info "Creating miner settings configuration..."
+$MinerSettingsContent = @'
+# Astram Miner Settings
+# This file is read by Astram-miner.exe at startup.
+# Location: config/minerSettings.conf  (next to the miner binary)
+
+# ----- Mining Mode -----------------------------------------------------------------------
+# pool : Connect to a Stratum mining pool.
+#        Rewards are split among pool participants, providing steady payouts.
+#        Recommended for most users — no need to run a full node.
+#
+# solo : Mine directly against your own node (Astram-node.exe must be running).
+#        100% of the block reward goes to your wallet when you find a block.
+#        Best suited for high-hashrate miners or testing.
+#        Requires: Astram-node.exe running on the same machine.
+#
+MINING_MODE=pool
+
+# ----- Pool Mode Settings (used when MINING_MODE=pool) -----------------------------------------------------------------------
+# Address and port of the Stratum mining pool server.
+POOL_HOST=pool.astramchain.com
+POOL_PORT=3333
+
+# Worker name shown on the pool dashboard.
+# Format: <wallet_address>.<worker_name>
+# The wallet address is read automatically from your wallet file.
+WORKER_NAME=worker1
+
+# ----- Solo Mode Settings (used when MINING_MODE=solo) -----------------------------------------------------------------------
+# HTTP API URL of the local Astram node.
+# Change the port if you modified HTTP_PORT in nodeSettings.conf.
+NODE_RPC_URL=http://127.0.0.1:19533
+'@
+
+Set-Content -Path "$ReleaseDir/config/minerSettings.conf" -Value $MinerSettingsContent
+Write-Success "Created config/minerSettings.conf (default: pool mode)"
+
+# Create pool (stratum) settings config
+Write-Info "Creating pool settings configuration..."
+$PoolSettingsContent = @'
+# Astram Stratum Pool Settings
+# This file is read by Astram-stratum.exe via the launcher (Astram.ps1 stratum).
+# All values here are injected as environment variables before the process starts.
+# You can also set these as system environment variables directly — they take precedence.
+
+# ------ Node Connection----------------------------------------------------------------
+# Full Astram node must be running. Stratum uses it to fetch block templates
+# and submit completed blocks.
+NODE_RPC_URL=http://127.0.0.1:19533
+
+# ------ Pool Fee Address----------------------------------------------------------------
+# Wallet address that receives the pool fee from every mined block.
+# If left blank, the address from your wallet file is used automatically.
+# POOL_ADDRESS=ASRMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# ------ Network Ports----------------------------------------------------------------
+
+# Stratum port: miners connect here (standard Stratum protocol)
+STRATUM_BIND=0.0.0.0:3333
+
+# getblocktemplate JSON-RPC port (for GBT-compatible mining software)
+GBT_BIND=0.0.0.0:8332
+
+# Stats REST API port: pool dashboard and monitoring
+STATS_BIND=0.0.0.0:8081
+
+# ------ Economics----------------------------------------------------------------
+# Pool fee percentage deducted from each block reward before distribution (%).
+POOL_FEE_PERCENT=1.0
+
+# PPLNS window: number of recent accepted shares used for reward distribution.
+# Larger = smoother payouts. Smaller = more sensitive to luck.
+PPLNS_WINDOW=30000
+
+# ------ VarDiff (variable miner difficulty) ----------------------------------------------------------------
+# Minimum difficulty assigned to a miner (leading zero count).
+VARDIFF_MIN=4
+
+# Maximum difficulty assigned to a miner.
+VARDIFF_MAX=1024
+
+# Target seconds between accepted shares per miner (e.g. 15 = 1 share/15s).
+# VarDiff adjusts each miner's difficulty to hit this target.
+VARDIFF_TARGET_SECS=15
+
+# ------ Payout ----------------------------------------------------------------
+# Minimum pending balance (in ASRM) before a miner is paid out.
+# Miners below this threshold keep accumulating until the next interval.
+PAYOUT_THRESHOLD_ASRM=10
+
+# How often (seconds) to scan and execute pending payouts. Default: 600 (10 min).
+PAYOUT_INTERVAL_SECS=600
+
+# RocksDB path for persisting miner balances across pool restarts.
+POOL_DB_PATH=pool_data
+'@
+
+Set-Content -Path "$ReleaseDir/config/poolSettings.conf" -Value $PoolSettingsContent
+Write-Success "Created config/poolSettings.conf"
+
 # Create README
 Write-Info "Creating README..."
 $ReadmeContent = @'
@@ -289,35 +434,58 @@ Double-click `start-mining-pool.bat` (or right-click > Run with PowerShell on `p
 The script will:
 1. Detect your NVIDIA GPU
 2. Create a wallet automatically if you don't have one
-3. Connect to the pool at `pool.Astramchin.com:3333`
+3. Connect to the pool at `pool.astramchain.com:3333`
 
-Pool dashboard: https://pool.Astramchin.com
+Pool dashboard: https://pool.astramchain.com
 
-## Option B — Run Your Own Node
+## Option B — Run Your Own Node + Miner
 
-1. Extract this archive to a folder
-2. Open PowerShell in this directory
-3. Run a component:
+Open PowerShell in this directory and run each component in a separate window:
 
 ```powershell
-# Run blockchain node
+# 1. Start the blockchain node (syncs with the network)
 .\Astram.ps1 node
 
-# Run DNS server
-.\Astram.ps1 dns
+# 2. Start the miner (after the node has synced)
+.\Astram.ps1 miner
 
-# Run blockchain explorer
-.\Astram.ps1 explorer
-
-# Run wallet CLI
-.\Astram.ps1 wallet
+# Other components
+.\Astram.ps1 stratum    # Run your own mining pool
+.\Astram.ps1 dns        # DNS discovery server
+.\Astram.ps1 explorer   # Blockchain explorer
+.\Astram.ps1 wallet     # Wallet CLI
 ```
+
+### Miner Mode
+
+Edit `config\minerSettings.conf` to choose your mining mode:
+
+- **pool** (default) — Connect to `pool.astramchain.com:3333`. No local node required.
+- **solo** — Mine directly against your local node. Full block reward goes to your wallet.
+  Requires `Astram-node.exe` running on the same machine.
+
+### Running Your Own Pool (Stratum)
+
+Edit `config\poolSettings.conf`, then:
+
+```powershell
+# Terminal 1: start the node
+.\Astram.ps1 node
+
+# Terminal 2: start the pool server
+.\Astram.ps1 stratum
+```
+
+Miners connect to `<your-ip>:3333` using standard Stratum protocol.
+Pool stats are available at `http://localhost:8081`.
 
 ## Components
 
 - **start-mining-pool.bat** - One-click pool mining launcher
 - **pool-mining.ps1** - PowerShell pool mining script
 - **Astram-node.exe** - Main blockchain node (HTTP: 19533, P2P: 8335)
+- **Astram-miner.exe** - GPU miner (pool or solo mode, NVIDIA CUDA required)
+- **Astram-stratum.exe** - Stratum mining pool server (Stratum: 3333, Stats: 8081)
 - **Astram-dns.exe** - DNS discovery server (Port: 8053)
 - **Astram-explorer.exe** - Web-based blockchain explorer (Port: 3000)
 - **wallet-cli.exe** - Command-line wallet interface

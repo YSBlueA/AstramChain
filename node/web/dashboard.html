@@ -3,691 +3,597 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Astram Node Dashboard</title>
+    <title>Astram Node Status</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #333;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: #e0e0e0;
             min-height: 100vh;
-            padding: 2rem;
+            padding: 0;
         }
 
-        .container {
+        /* Navigation */
+        nav {
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            gap: 0;
+            height: 56px;
+        }
+
+        .nav-brand {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #53d8fb;
+            letter-spacing: 1px;
+            margin-right: 2rem;
+            text-decoration: none;
+        }
+
+        .nav-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0 1.2rem;
+            height: 56px;
+            color: #aaa;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 0.9rem;
+            border-bottom: 3px solid transparent;
+            transition: color 0.2s, border-color 0.2s;
+        }
+
+        .nav-link:hover { color: #fff; }
+
+        .nav-link.active {
+            color: #53d8fb;
+            border-bottom-color: #53d8fb;
+        }
+
+        .nav-icon { font-size: 1rem; }
+
+        /* Main layout */
+        .page {
             max-width: 1400px;
             margin: 0 auto;
-        }
-
-        h1 {
-            color: white;
-            font-size: 2.5rem;
-            margin-bottom: 2rem;
-            text-align: center;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
-        }
-
-        .loading {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 4rem;
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
-        }
-
-        .spinner {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #667eea;
-            border-radius: 50%;
-            width: 50px;
-            height: 50px;
-            animation: spin 1s linear infinite;
-            margin-bottom: 1rem;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .error-message {
-            background-color: #fee;
-            border: 2px solid #c33;
-            border-radius: 12px;
             padding: 2rem;
-            text-align: center;
-            color: #c33;
         }
 
-        .error-message h3 {
-            margin-bottom: 1rem;
+        .page-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 0.5rem;
         }
 
-        .retry-btn {
-            margin-top: 1rem;
-            padding: 0.75rem 1.5rem;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 1rem;
-            font-weight: 600;
-            transition: transform 0.2s;
+        .page-subtitle {
+            color: #888;
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
         }
 
-        .retry-btn:hover {
-            transform: translateY(-2px);
+        /* Status bar */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 2rem;
+            padding: 0.75rem 1.25rem;
+            background: rgba(255,255,255,0.04);
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.08);
+            font-size: 0.85rem;
+            color: #888;
         }
 
-        .dashboard {
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #27ae60;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(39,174,96,0.4); }
+            50% { opacity: 0.8; box-shadow: 0 0 0 6px rgba(39,174,96,0); }
+        }
+
+        .status-bar span { color: #ccc; }
+        #status-timestamp { margin-left: auto; }
+
+        /* Grid */
+        .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
             gap: 1.5rem;
         }
 
+        .grid-wide {
+            grid-column: 1 / -1;
+        }
+
+        /* Cards */
         .card {
-            background: white;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
             border-radius: 12px;
             padding: 1.5rem;
-            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
-            transition: transform 0.2s, box-shadow 0.2s;
+            backdrop-filter: blur(4px);
         }
 
-        .card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
-        }
-
-        .card h2 {
-            font-size: 1.4rem;
+        .card-title {
+            font-size: 0.8rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #53d8fb;
             margin-bottom: 1.25rem;
-            color: #2c3e50;
-            border-bottom: 3px solid #667eea;
-            padding-bottom: 0.5rem;
             display: flex;
             align-items: center;
             gap: 0.5rem;
         }
 
-        .info-grid {
-            display: grid;
-            gap: 1rem;
-        }
-
-        .info-item {
+        /* Stat rows */
+        .stat-row {
             display: flex;
-            flex-direction: column;
-            padding: 0.75rem;
-            background: #f8f9fa;
-            border-radius: 6px;
-            transition: background-color 0.2s;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.65rem 0;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
         }
 
-        .info-item:hover {
-            background: #e9ecef;
-        }
+        .stat-row:last-child { border-bottom: none; }
 
-        .info-item.highlight {
-            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
-            border-left: 4px solid #667eea;
-        }
-
-        .info-item .label {
+        .stat-label {
             font-size: 0.85rem;
-            color: #666;
-            margin-bottom: 0.25rem;
-            font-weight: 500;
+            color: #888;
         }
 
-        .info-item .value {
-            font-size: 1.3rem;
-            font-weight: 700;
-            color: #2c3e50;
-            transition: all 0.3s ease;
+        .stat-value {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #fff;
+            text-align: right;
+            transition: all 0.3s;
         }
 
-        .value.hash {
+        .stat-value.mono {
             font-family: 'Courier New', monospace;
-            font-size: 0.9rem;
-            word-break: break-all;
+            font-size: 0.8rem;
+            color: #aaa;
+            max-width: 260px;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
-        .value.status-online {
-            color: #27ae60;
+        .stat-value.highlight { color: #53d8fb; }
+        .stat-value.green { color: #27ae60; }
+        .stat-value.yellow { color: #f39c12; }
+
+        .stat-value.changed {
+            animation: flash 0.5s ease;
         }
 
-        .value.changed {
-            animation: valueChanged 0.6s ease;
+        @keyframes flash {
+            0% { color: #53d8fb; }
+            100% { color: inherit; }
         }
 
-        @keyframes valueChanged {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.05); color: #667eea; }
-            100% { transform: scale(1); }
+        /* Big stat (featured) */
+        .big-stat {
+            padding: 1rem;
+            background: rgba(83,216,251,0.08);
+            border-radius: 8px;
+            border: 1px solid rgba(83,216,251,0.2);
+            margin-bottom: 1rem;
+            text-align: center;
         }
 
-        .mining-card {
-            border: 3px solid #eee;
+        .big-stat .label {
+            font-size: 0.75rem;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 0.25rem;
         }
 
-        .mining-card.active {
-            border-color: #27ae60;
-            background: linear-gradient(to bottom right, #ffffff, #e8f5e9);
+        .big-stat .value {
+            font-size: 2rem;
+            font-weight: 800;
+            color: #53d8fb;
         }
 
-        .wallet-card {
-            border: 3px solid #f39c12;
-            background: linear-gradient(to bottom right, #ffffff, #fef5e7);
-        }
-
-        .mining-active {
-            color: #27ae60;
-            animation: pulse 2s infinite;
-        }
-
-        .mining-inactive {
-            color: #95a5a6;
-        }
-
-        .balance {
-            color: #f39c12;
-            font-size: 1.5rem !important;
-            font-weight: 800 !important;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.7; }
-        }
-
-        .peer-list {
-            margin-top: 1rem;
-            padding-top: 1rem;
-            border-top: 2px solid #eee;
-        }
-
-        .peer-list h3 {
-            font-size: 1rem;
-            margin-bottom: 0.75rem;
-            color: #555;
-        }
+        /* Peer list */
+        .peer-list { margin-top: 1rem; }
 
         .peer-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 0.75rem;
-            background: #f8f9fa;
+            padding: 0.6rem 0.75rem;
+            background: rgba(255,255,255,0.04);
             border-radius: 6px;
-            margin-bottom: 0.5rem;
-            transition: background-color 0.2s;
+            margin-bottom: 0.4rem;
+            font-size: 0.82rem;
         }
 
-        .peer-item:hover {
-            background: #e9ecef;
-        }
-
-        .peer-id {
+        .peer-addr {
             font-family: 'Courier New', monospace;
-            font-size: 0.85rem;
-            color: #555;
+            color: #aaa;
         }
 
         .peer-height {
+            background: rgba(83,216,251,0.15);
+            color: #53d8fb;
+            padding: 0.2rem 0.6rem;
+            border-radius: 10px;
             font-weight: 600;
-            color: #667eea;
-            background: #e3f2fd;
-            padding: 0.25rem 0.75rem;
-            border-radius: 12px;
         }
 
         .no-peers {
-            padding: 1.5rem;
             text-align: center;
-            color: #999;
+            color: #666;
+            padding: 1rem;
             font-style: italic;
-            background: #f8f9fa;
-            border-radius: 6px;
-            margin-top: 1rem;
         }
 
+        /* Loading / error */
+        #loading, #error-msg {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 4rem;
+            background: rgba(255,255,255,0.04);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.1);
+            text-align: center;
+        }
+
+        .spinner {
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top: 3px solid #53d8fb;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 1rem;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        #error-msg { color: #e74c3c; border-color: rgba(231,76,60,0.3); }
+        #error-msg button {
+            margin-top: 1rem;
+            padding: 0.6rem 1.5rem;
+            background: #e74c3c;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        /* Controls */
         .controls {
             position: fixed;
             bottom: 2rem;
             right: 2rem;
             display: flex;
-            gap: 1rem;
-            flex-direction: column;
-            align-items: flex-end;
+            gap: 0.75rem;
+            align-items: center;
+            background: rgba(15,20,40,0.9);
+            padding: 0.75rem 1.25rem;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
         }
 
-        .auto-refresh-toggle {
-            background: white;
-            padding: 1rem 1.5rem;
-            border-radius: 12px;
-            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+        .controls label {
             display: flex;
             align-items: center;
-            gap: 0.75rem;
-        }
-
-        .auto-refresh-toggle label {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            cursor: pointer;
-            font-weight: 500;
-            color: #2c3e50;
-        }
-
-        .auto-refresh-toggle input[type="checkbox"] {
-            width: 20px;
-            height: 20px;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+            color: #aaa;
             cursor: pointer;
         }
 
-        .refresh-btn {
-            padding: 1rem 2rem;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+        .controls input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; }
+
+        .btn-refresh {
+            padding: 0.5rem 1rem;
+            background: #53d8fb;
+            color: #1a1a2e;
             border: none;
-            border-radius: 12px;
+            border-radius: 6px;
             cursor: pointer;
-            font-size: 1rem;
-            font-weight: 600;
-            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
-            transition: transform 0.2s, box-shadow 0.2s;
+            font-weight: 700;
+            font-size: 0.85rem;
+            transition: opacity 0.2s;
         }
 
-        .refresh-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
-        }
-
-        .refresh-btn:active {
-            transform: translateY(0);
-        }
+        .btn-refresh:hover { opacity: 0.85; }
 
         @media (max-width: 768px) {
-            body {
-                padding: 1rem;
-            }
-
-            h1 {
-                font-size: 1.8rem;
-            }
-
-            .dashboard {
-                grid-template-columns: 1fr;
-            }
-
-            .controls {
-                position: static;
-                margin-top: 2rem;
-                align-items: stretch;
-            }
-
-            .auto-refresh-toggle {
-                justify-content: center;
-            }
+            .page { padding: 1rem; }
+            .grid { grid-template-columns: 1fr; }
+            .controls { position: static; margin-top: 2rem; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Astram Node Dashboard</h1>
 
-        <div id="loading" class="loading">
-            <div class="spinner"></div>
-            <p>Loading node status...</p>
-        </div>
+<nav>
+    <a class="nav-brand" href="/">ASTRAM</a>
+    <a class="nav-link active" href="/"><span class="nav-icon">&#9632;</span> Node Status</a>
+</nav>
 
-        <div id="error" class="error-message" style="display: none;">
-            <h3>Cannot connect to node</h3>
-            <p id="error-message"></p>
-            <button class="retry-btn" onclick="fetchStatus()">Retry</button>
-        </div>
+<div class="page">
+    <div class="page-title">Node Status</div>
+    <div class="page-subtitle">Real-time Astram blockchain node monitor</div>
 
-        <div id="dashboard" class="dashboard" style="display: none;">
-            <!-- Node Info -->
-            <div class="card">
-                <h2>Node Info</h2>
-                <div class="info-grid">
-                    <div class="info-item">
-                        <span class="label">Version</span>
-                        <span class="value" id="node-version">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Status</span>
-                        <span class="value status-online">Online</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Uptime</span>
-                        <span class="value" id="node-uptime">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Last Update</span>
-                        <span class="value" id="node-timestamp">-</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Mining Status -->
-            <div class="card mining-card" id="mining-card">
-                <h2>Mining Status</h2>
-                <div class="info-grid">
-                    <div class="info-item highlight">
-                        <span class="label">Status</span>
-                        <span class="value" id="mining-status">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Hashrate</span>
-                        <span class="value" id="mining-hashrate">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Difficulty</span>
-                        <span class="value" id="mining-difficulty">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Blocks Mined</span>
-                        <span class="value" id="mining-blocks">-</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Wallet Info -->
-            <div class="card wallet-card">
-                <h2>Wallet Info</h2>
-                <div class="info-grid">
-                    <div class="info-item">
-                        <span class="label">Address</span>
-                        <span class="value hash" id="wallet-address">-</span>
-                    </div>
-                    <div class="info-item highlight">
-                        <span class="label">Balance</span>
-                        <span class="value balance" id="wallet-balance">-</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Blockchain Status -->
-            <div class="card">
-                <h2>Blockchain Status</h2>
-                <div class="info-grid">
-                    <div class="info-item highlight">
-                        <span class="label">Current Height</span>
-                        <span class="value" id="blockchain-height">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Memory Blocks</span>
-                        <span class="value" id="blockchain-memory">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Sync Height</span>
-                        <span class="value" id="blockchain-sync">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Difficulty</span>
-                        <span class="value" id="blockchain-difficulty">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Chain Tip Hash</span>
-                        <span class="value hash" id="blockchain-tip">-</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Mempool Status -->
-            <div class="card">
-                <h2>Mempool Status</h2>
-                <div class="info-grid">
-                    <div class="info-item highlight">
-                        <span class="label">Pending Transactions</span>
-                        <span class="value" id="mempool-pending">-</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="label">Seen Transactions</span>
-                        <span class="value" id="mempool-seen">-</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Network Status -->
-            <div class="card">
-                <h2>Network Status</h2>
-                <div class="info-grid">
-                    <div class="info-item highlight">
-                        <span class="label">Connected Peers</span>
-                        <span class="value" id="network-peers">-</span>
-                    </div>
-                </div>
-                <div class="peer-list" id="peer-list-container">
-                    <h3>Peer List</h3>
-                    <div id="peer-list"></div>
-                </div>
-            </div>
-        </div>
-
-        <div class="controls">
-            <div class="auto-refresh-toggle">
-                <label>
-                    <input type="checkbox" id="auto-refresh" checked>
-                    <span>Auto Refresh (5s)</span>
-                </label>
-            </div>
-            <button class="refresh-btn" onclick="fetchStatus()">Manual Refresh</button>
-        </div>
+    <div class="status-bar">
+        <div class="status-dot" id="dot"></div>
+        <span id="status-text">Connecting...</span>
+        <span id="status-timestamp"></span>
     </div>
 
-    <script>
-        let refreshInterval = null;
+    <div id="loading">
+        <div class="spinner"></div>
+        <p>Loading node data...</p>
+    </div>
 
-        function formatUptime(seconds) {
-            if (!seconds) return 'N/A';
-            const hours = Math.floor(seconds / 3600);
-            const minutes = Math.floor((seconds % 3600) / 60);
-            const secs = seconds % 60;
-            
-            if (hours > 0) {
-                return `${hours}h ${minutes}m`;
-            } else if (minutes > 0) {
-                return `${minutes}m ${secs}s`;
+    <div id="error-msg" style="display:none;">
+        <p id="err-text">Cannot connect to node.</p>
+        <button onclick="fetchStatus()">Retry</button>
+    </div>
+
+    <div id="main" style="display:none;">
+        <div class="grid">
+
+            <!-- Node Info -->
+            <div class="card">
+                <div class="card-title">&#9632; Node Info</div>
+                <div class="big-stat">
+                    <div class="label">Block Height</div>
+                    <div class="value" id="chain-height">-</div>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Version</span>
+                    <span class="stat-value" id="node-version">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Status</span>
+                    <span class="stat-value green">Online</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Uptime</span>
+                    <span class="stat-value" id="node-uptime">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Network ID</span>
+                    <span class="stat-value" id="network-id">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Chain ID</span>
+                    <span class="stat-value" id="chain-id">-</span>
+                </div>
+            </div>
+
+            <!-- Blockchain -->
+            <div class="card">
+                <div class="card-title">&#9670; Blockchain</div>
+                <div class="stat-row">
+                    <span class="stat-label">Height</span>
+                    <span class="stat-value highlight" id="bc-height">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Difficulty (compact)</span>
+                    <span class="stat-value mono" id="bc-difficulty">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Memory Blocks</span>
+                    <span class="stat-value" id="bc-memory">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Sync Height (P2P)</span>
+                    <span class="stat-value" id="bc-sync">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Chain Tip</span>
+                    <span class="stat-value mono" id="bc-tip">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Genesis Hash</span>
+                    <span class="stat-value mono" id="bc-genesis">-</span>
+                </div>
+            </div>
+
+            <!-- Mempool -->
+            <div class="card">
+                <div class="card-title">&#9675; Mempool</div>
+                <div class="big-stat">
+                    <div class="label">Pending Transactions</div>
+                    <div class="value" id="mp-pending">-</div>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Seen Transactions</span>
+                    <span class="stat-value" id="mp-seen">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Max Pool Size</span>
+                    <span class="stat-value" id="mp-max">-</span>
+                </div>
+            </div>
+
+            <!-- Network -->
+            <div class="card">
+                <div class="card-title">&#9728; Network</div>
+                <div class="big-stat">
+                    <div class="label">Connected Peers</div>
+                    <div class="value" id="net-peers">-</div>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Unique /24 Subnets</span>
+                    <span class="stat-value" id="net-sub24">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Unique /16 Subnets</span>
+                    <span class="stat-value" id="net-sub16">-</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">Network Magic</span>
+                    <span class="stat-value mono" id="net-magic">-</span>
+                </div>
+                <div class="peer-list" id="peer-list">
+                    <div class="no-peers">No connected peers</div>
+                </div>
+            </div>
+
+            <!-- Security -->
+            <div class="card">
+                <div class="card-title">&#9632; Security</div>
+                <div class="stat-row">
+                    <span class="stat-label">Validation Failures</span>
+                    <span class="stat-value" id="sec-failures">-</span>
+                </div>
+                <div id="sec-detail" style="margin-top:0.75rem;"></div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<div class="controls">
+    <label>
+        <input type="checkbox" id="auto-refresh" checked>
+        Auto (5s)
+    </label>
+    <button class="btn-refresh" onclick="fetchStatus()">Refresh</button>
+</div>
+
+<script>
+    let timer = null;
+
+    function formatUptime(s) {
+        if (!s) return 'N/A';
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        if (h > 0) return `${h}h ${m}m`;
+        if (m > 0) return `${m}m ${sec}s`;
+        return `${sec}s`;
+    }
+
+    function shortHash(h) {
+        if (!h || h === 'none') return 'N/A';
+        return h.length > 16 ? h.slice(0, 10) + '…' + h.slice(-10) : h;
+    }
+
+    function set(id, val) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const v = val === null || val === undefined ? '-' : String(val);
+        if (el.textContent !== v) {
+            el.textContent = v;
+            el.classList.remove('changed');
+            void el.offsetWidth;
+            el.classList.add('changed');
+        }
+    }
+
+    async function fetchStatus() {
+        try {
+            const res = await fetch('/status');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const d = await res.json();
+
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error-msg').style.display = 'none';
+            document.getElementById('main').style.display = 'block';
+
+            const ts = d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : '';
+            document.getElementById('status-text').textContent = 'Online';
+            document.getElementById('status-timestamp').textContent = `Last update: ${ts}`;
+
+            // Node
+            const h = d.blockchain?.height ?? 0;
+            set('chain-height', h.toLocaleString());
+            set('node-version', d.node?.version ?? '-');
+            set('node-uptime', formatUptime(d.node?.uptime_seconds));
+            set('network-id', d.network?.network_id ?? '-');
+            set('chain-id', d.network?.chain_id ?? '-');
+
+            // Blockchain
+            set('bc-height', (d.blockchain?.height ?? 0).toLocaleString());
+            set('bc-difficulty', '0x' + (d.blockchain?.difficulty ?? 0).toString(16).toUpperCase());
+            set('bc-memory', d.blockchain?.memory_blocks ?? 0);
+            set('bc-sync', d.blockchain?.my_height ?? 0);
+            set('bc-tip', shortHash(d.blockchain?.chain_tip));
+            set('bc-genesis', shortHash(d.blockchain?.genesis_hash));
+
+            // Mempool
+            set('mp-pending', d.mempool?.pending_transactions ?? 0);
+            set('mp-seen', d.mempool?.seen_transactions ?? 0);
+            set('mp-max', d.mempool?.max_size ?? '-');
+
+            // Network
+            set('net-peers', d.network?.connected_peers ?? 0);
+            set('net-sub24', d.network?.subnet_diversity?.unique_24_subnets ?? 0);
+            set('net-sub16', d.network?.subnet_diversity?.unique_16_subnets ?? 0);
+            set('net-magic', d.network?.network_magic ?? '-');
+
+            const peerEl = document.getElementById('peer-list');
+            const peers = d.network?.peer_heights ?? {};
+            const peerEntries = Object.entries(peers);
+            if (peerEntries.length === 0) {
+                peerEl.innerHTML = '<div class="no-peers">No connected peers</div>';
             } else {
-                return `${secs}s`;
+                peerEl.innerHTML = peerEntries.map(([addr, ht]) =>
+                    `<div class="peer-item"><span class="peer-addr">${addr}</span><span class="peer-height">${ht}</span></div>`
+                ).join('');
             }
-        }
 
-        function formatHashrate(hashrate) {
-            if (!hashrate || hashrate === 0) return '0 H/s';
-            
-            if (hashrate >= 1e12) {
-                return `${(hashrate / 1e12).toFixed(2)} TH/s`;
-            } else if (hashrate >= 1e9) {
-                return `${(hashrate / 1e9).toFixed(2)} GH/s`;
-            } else if (hashrate >= 1e6) {
-                return `${(hashrate / 1e6).toFixed(2)} MH/s`;
-            } else if (hashrate >= 1e3) {
-                return `${(hashrate / 1e3).toFixed(2)} KH/s`;
+            // Security
+            const secFail = d.security?.validation_failures_total ?? 0;
+            set('sec-failures', secFail);
+            const secDetail = document.getElementById('sec-detail');
+            const failures = d.security?.validation_failures ?? [];
+            if (failures.length > 0) {
+                secDetail.innerHTML = failures.map(([k, v]) =>
+                    `<div class="stat-row"><span class="stat-label">${k}</span><span class="stat-value yellow">${v}</span></div>`
+                ).join('');
             } else {
-                return `${hashrate.toFixed(2)} H/s`;
+                secDetail.innerHTML = '';
             }
+
+        } catch (e) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('main').style.display = 'none';
+            document.getElementById('error-msg').style.display = 'flex';
+            document.getElementById('err-text').textContent = e.message || 'Cannot connect to node';
+            document.getElementById('status-text').textContent = 'Offline';
+            document.getElementById('dot').style.background = '#e74c3c';
         }
+    }
 
-        function formatBalance(balanceHex) {
-            if (!balanceHex) return '0 ASRM';
-            
-            try {
-                const hex = balanceHex.startsWith('0x') ? balanceHex.slice(2) : balanceHex;
-                const wei = BigInt('0x' + hex);
-                const ASRM = Number(wei) / 1e18;
-                return `${ASRM.toFixed(4)} ASRM`;
-            } catch (e) {
-                console.error('Error formatting balance:', e);
-                return '0 ASRM';
-            }
+    document.getElementById('auto-refresh').addEventListener('change', function() {
+        if (this.checked) {
+            timer = setInterval(fetchStatus, 5000);
+        } else {
+            clearInterval(timer);
+            timer = null;
         }
+    });
 
-        function formatHash(hash) {
-            if (!hash || hash === 'none') return 'N/A';
-            if (hash.length > 16) {
-                return hash.substring(0, 8) + '...' + hash.substring(hash.length - 8);
-            }
-            return hash;
-        }
-
-        function formatTimestamp(timestamp) {
-            if (!timestamp) return 'N/A';
-            const date = new Date(timestamp);
-            return date.toLocaleString('en-US');
-        }
-
-        async function fetchStatus() {
-            try {
-                // Only show loading on first load
-                const dashboard = document.getElementById('dashboard');
-                if (dashboard.style.display === 'none') {
-                    document.getElementById('loading').style.display = 'flex';
-                    document.getElementById('error').style.display = 'none';
-                }
-
-                const response = await fetch('/status');
-                if (!response.ok) {
-                    throw new Error('Failed to fetch status');
-                }
-
-                const data = await response.json();
-                
-                // Helper function to update value with animation on change
-                function updateValue(elementId, newValue, formatter = null) {
-                    const element = document.getElementById(elementId);
-                    if (!element) return;
-                    
-                    const formattedValue = formatter ? formatter(newValue) : newValue.toString();
-                    if (element.textContent !== formattedValue) {
-                        element.textContent = formattedValue;
-                        element.classList.add('changed');
-                        setTimeout(() => element.classList.remove('changed'), 600);
-                    }
-                }
-                
-                // Node info
-                updateValue('node-version', data.node?.version || 'N/A');
-                updateValue('node-uptime', data.node?.uptime_seconds, formatUptime);
-                updateValue('node-timestamp', data.timestamp, formatTimestamp);
-
-                // Mining status
-                const miningCard = document.getElementById('mining-card');
-                const isMining = data.mining?.active;
-                if (isMining) {
-                    miningCard.classList.add('active');
-                } else {
-                    miningCard.classList.remove('active');
-                }
-                
-                const miningStatus = document.getElementById('mining-status');
-                const newMiningText = isMining ? 'Active' : 'Idle';
-                const newMiningClass = 'value ' + (isMining ? 'mining-active' : 'mining-inactive');
-                
-                if (miningStatus.textContent !== newMiningText) {
-                    miningStatus.textContent = newMiningText;
-                    miningStatus.className = newMiningClass;
-                }
-                
-                updateValue('mining-hashrate', data.mining?.hashrate || 0, formatHashrate);
-                updateValue('mining-difficulty', data.mining?.difficulty || data.blockchain?.difficulty || 0);
-                updateValue('mining-blocks', data.mining?.blocks_mined || 0);
-
-                // Wallet info
-                updateValue('wallet-address', data.wallet?.address || 'N/A');
-                updateValue('wallet-balance', data.wallet?.balance, formatBalance);
-
-                // Blockchain status
-                updateValue('blockchain-height', data.blockchain?.height || 0);
-                updateValue('blockchain-memory', data.blockchain?.memory_blocks || 0);
-                updateValue('blockchain-sync', data.blockchain?.my_height || 0);
-                updateValue('blockchain-difficulty', data.blockchain?.difficulty || 1);
-                updateValue('blockchain-tip', data.blockchain?.chain_tip, formatHash);
-
-                // Mempool status
-                updateValue('mempool-pending', data.mempool?.pending_transactions || 0);
-                updateValue('mempool-seen', data.mempool?.seen_transactions || 0);
-
-                // Network status
-                updateValue('network-peers', data.network?.connected_peers || 0);
-
-                // Peer list - only update if changed
-                const peerListContainer = document.getElementById('peer-list');
-                if (data.network?.peer_heights && Object.keys(data.network.peer_heights).length > 0) {
-                    const peers = Object.entries(data.network.peer_heights);
-                    const newPeerList = peers.map(([id, height]) => `
-                        <div class="peer-item">
-                            <span class="peer-id">${id}</span>
-                            <span class="peer-height">Height: ${height}</span>
-                        </div>
-                    `).join('');
-                    
-                    if (peerListContainer.innerHTML !== newPeerList) {
-                        peerListContainer.innerHTML = newPeerList;
-                    }
-                } else {
-                    const noPeersMsg = '<div class="no-peers">No connected peers</div>';
-                    if (peerListContainer.innerHTML !== noPeersMsg) {
-                        peerListContainer.innerHTML = noPeersMsg;
-                    }
-                }
-
-                // Show dashboard only on first load
-                const loading = document.getElementById('loading');
-                const dashboardEl = document.getElementById('dashboard');
-                if (dashboardEl.style.display === 'none') {
-                    loading.style.display = 'none';
-                    dashboardEl.style.display = 'grid';
-                }
-            } catch (error) {
-                console.error('Failed to fetch node status:', error);
-                document.getElementById('loading').style.display = 'none';
-                document.getElementById('error').style.display = 'block';
-                document.getElementById('error-message').textContent = error.message || 'Unable to fetch node status';
-            }
-        }
-
-        function toggleAutoRefresh() {
-            const checkbox = document.getElementById('auto-refresh');
-            if (checkbox.checked) {
-                startAutoRefresh();
-            } else {
-                stopAutoRefresh();
-            }
-        }
-
-        function startAutoRefresh() {
-            stopAutoRefresh();
-            refreshInterval = setInterval(fetchStatus, 3000);
-        }
-
-        function stopAutoRefresh() {
-            if (refreshInterval) {
-                clearInterval(refreshInterval);
-                refreshInterval = null;
-            }
-        }
-
-        // Initialize
-        document.getElementById('auto-refresh').addEventListener('change', toggleAutoRefresh);
-        
-        // Initial fetch
-        fetchStatus();
-        startAutoRefresh();
-    </script>
+    fetchStatus();
+    timer = setInterval(fetchStatus, 5000);
+</script>
 </body>
 </html>
-
