@@ -1,28 +1,27 @@
 #!/usr/bin/env pwsh
 # Astram Pool Mining Launcher
-# Connects this node to the Astram Mining Pool at pool.Astramchin.com
+# Connects this miner to the Astram Mining Pool at pool.astramchain.com
 
 $ErrorActionPreference = "Stop"
 
 # Configuration
-$PoolUrl      = "pool.Astramchin.com:3333"
-$ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$AstramHome   = if ($env:APPDATA) { Join-Path $env:APPDATA "Astram" } else { Join-Path $env:USERPROFILE ".Astram" }
-$WalletFile   = Join-Path $AstramHome "wallet.json"
-$DataDir      = Join-Path $AstramHome "data"
-$NodeExe      = Join-Path $ScriptDir "Astram-node.exe"
-$WalletExe    = Join-Path $ScriptDir "wallet-cli.exe"
+$PoolUrl    = "pool.astramchain.com:3333"
+$ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AstramHome = if ($env:APPDATA) { Join-Path $env:APPDATA "Astram" } else { Join-Path $env:USERPROFILE ".Astram" }
+$WalletFile = Join-Path $AstramHome "wallet.json"
+$MinerExe   = Join-Path $ScriptDir "Astram-miner.exe"
+$WalletExe  = Join-Path $ScriptDir "wallet-cli.exe"
 
 # Banner
 Write-Host ""
 Write-Host "  =====================================================" -ForegroundColor Cyan
-Write-Host "   ASTRAM MINING POOL  -  pool.Astramchin.com" -ForegroundColor Cyan
+Write-Host "   ASTRAM MINING POOL  -  pool.astramchain.com" -ForegroundColor Cyan
 Write-Host "  =====================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Check node binary
-if (-not (Test-Path $NodeExe)) {
-    Write-Host "[ERROR] Astram-node.exe not found at: $NodeExe" -ForegroundColor Red
+# Check miner binary
+if (-not (Test-Path $MinerExe)) {
+    Write-Host "[ERROR] Astram-miner.exe not found at: $MinerExe" -ForegroundColor Red
     Write-Host ""
     Write-Host "  Please run this script from the extracted Astram release folder." -ForegroundColor Yellow
     Read-Host "Press ENTER to exit"
@@ -45,9 +44,8 @@ if ($gpuName) {
     if ($ans -notmatch '^[Yy]') { exit 0 }
 }
 
-# Create directories
+# Create wallet directory
 New-Item -ItemType Directory -Force -Path $AstramHome | Out-Null
-New-Item -ItemType Directory -Force -Path $DataDir    | Out-Null
 
 # Create wallet if missing
 if (-not (Test-Path $WalletFile)) {
@@ -95,22 +93,17 @@ if (Test-Path $BuildInfoFile) {
 
 # Summary
 Write-Host "  Mining wallet : $WalletAddr" -ForegroundColor Green
-Write-Host "  Pool URL      : $PoolUrl"     -ForegroundColor Cyan
-Write-Host "  Data dir      : $DataDir"
+Write-Host "  Pool URL      : $PoolUrl"    -ForegroundColor Cyan
 Write-Host "  Miner backend : $env:MINER_BACKEND"
 Write-Host ""
 Write-Host "  Starting miner... Press Ctrl+C to stop." -ForegroundColor Green
 Write-Host ""
 
-# Launch node in pool mode
-& $NodeExe `
-    --pool       $PoolUrl `
-    --wallet     $WalletAddr `
-    --data-dir   $DataDir `
-    --http-bind  "127.0.0.1:19533"
+# Launch miner (reads config/minerSettings.conf automatically)
+& $MinerExe
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
-    Write-Host "[ERROR] Node exited with code $LASTEXITCODE. See output above." -ForegroundColor Red
+    Write-Host "[ERROR] Miner exited with code $LASTEXITCODE. See output above." -ForegroundColor Red
     Read-Host "Press ENTER to exit"
 }

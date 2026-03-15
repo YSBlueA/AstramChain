@@ -4,23 +4,22 @@
 
 set -e
 
-POOL_URL="pool.Astramchin.com:3333"
+POOL_URL="pool.astramchain.com:3333"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ASTRAM_HOME="${HOME}/.Astram"
 WALLET_FILE="${ASTRAM_HOME}/wallet.json"
-DATA_DIR="${ASTRAM_HOME}/data"
-NODE_EXE="${SCRIPT_DIR}/Astram-node"
+MINER_EXE="${SCRIPT_DIR}/Astram-miner"
 WALLET_EXE="${SCRIPT_DIR}/wallet-cli"
 
 echo ""
 echo "  ====================================================="
-echo "   ASTRAM MINING POOL  -  pool.Astramchin.com"
+echo "   ASTRAM MINING POOL  -  pool.astramchain.com"
 echo "  ====================================================="
 echo ""
 
-# Check node binary
-if [ ! -f "$NODE_EXE" ]; then
-    echo "[ERROR] Astram-node not found at: $NODE_EXE"
+# Check miner binary
+if [ ! -f "$MINER_EXE" ]; then
+    echo "[ERROR] Astram-miner not found at: $MINER_EXE"
     echo ""
     echo "  Please run this script from the extracted Astram release folder."
     exit 1
@@ -45,8 +44,8 @@ else
     esac
 fi
 
-# Create directories
-mkdir -p "$ASTRAM_HOME" "$DATA_DIR"
+# Create wallet directory
+mkdir -p "$ASTRAM_HOME"
 
 # Create wallet if missing
 if [ ! -f "$WALLET_FILE" ]; then
@@ -90,15 +89,10 @@ fi
 # Summary
 echo "  Mining wallet : $WALLET_ADDR"
 echo "  Pool URL      : $POOL_URL"
-echo "  Data dir      : $DATA_DIR"
 echo "  Miner backend : $MINER_BACKEND"
 echo ""
 echo "  Starting miner... Press Ctrl+C to stop."
 echo ""
 
-# Launch node in pool mode
-exec "$NODE_EXE" \
-    --pool      "$POOL_URL" \
-    --wallet    "$WALLET_ADDR" \
-    --data-dir  "$DATA_DIR" \
-    --http-bind "127.0.0.1:19533"
+# Launch miner (reads config/minerSettings.conf automatically)
+exec "$MINER_EXE"
