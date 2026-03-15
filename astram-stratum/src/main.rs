@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::time::{Duration, sleep};
 use tokio_util::codec::{Framed, LinesCodec};
 use warp::Filter;
@@ -333,11 +333,12 @@ async fn handle_stratum_connection(
     pool_cfg: Arc<PoolConfig>,
     client: NodeClient,
     tracker: SharedTracker,
+    force_rebuild_tx: watch::Sender<u64>,
 ) -> Result<()> {
     // Shared slot: inner handler writes extranonce1 here on auth so we can clean up on exit.
     let registered_e1: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let result = handle_stratum_inner(
-        stream, template_store, job_rx, pool_cfg, client, tracker.clone(), registered_e1.clone(),
+        stream, template_store, job_rx, pool_cfg, client, tracker.clone(), registered_e1.clone(), force_rebuild_tx,
     ).await;
     if let Some(e1) = registered_e1.lock().unwrap().take() {
         tracker.lock().unwrap().unregister_worker(&e1);
@@ -353,6 +354,7 @@ async fn handle_stratum_inner(
     client: NodeClient,
     tracker: SharedTracker,
     registered_e1: Arc<std::sync::Mutex<Option<String>>>,
+    force_rebuild_tx: watch::Sender<u64>,
 ) -> Result<()> {
     let mut framed = Framed::new(stream, LinesCodec::new());
     let mut session: Option<MinerSession> = None;
@@ -565,6 +567,8 @@ async fn handle_stratum_inner(
                                                     );
                                                 }
                                                 s.record_accepted_share();
+                                                // Signal template loop to rebuild immediately
+                                                let _ = force_rebuild_tx.send(chrono::Utc::now().timestamp_millis() as u64);
                                                 let resp = serde_json::json!({"id": id, "result": true, "block_found": true, "error": null});
                                                 framed.send(resp.to_string()).await?;
                                             }
@@ -572,6 +576,8 @@ async fn handle_stratum_inner(
                                                 log::warn!("[BLOCK] submit failed: {}", e);
                                                 s.record_rejected_share();
                                                 tracker.lock().unwrap().add_rejected(&s.miner_address);
+                                                // Signal template loop to rebuild immediately (stale tip / fork)
+                                                let _ = force_rebuild_tx.send(chrono::Utc::now().timestamp_millis() as u64);
                                                 let resp = serde_json::json!({"id": id, "result": false, "error": e.to_string()});
                                                 framed.send(resp.to_string()).await?;
                                             }
@@ -646,11 +652,19 @@ async fn run_template_loop(
     pool_address: String,
     templates: TemplateStore,
     job_tx: broadcast::Sender<MiningTemplate>,
+    mut force_rebuild_rx: watch::Receiver<u64>,
 ) {
     let mut last_tip = String::new();
     let mut last_job_time = 0i64;
 
     loop {
+        // Wait up to 500 ms OR wake immediately when force_rebuild is signalled
+        // (e.g. right after a block is submitted by the stratum handler).
+        tokio::select! {
+            _ = sleep(Duration::from_millis(500)) => {}
+            _ = force_rebuild_rx.changed() => {}
+        }
+
         let now = chrono::Utc::now().timestamp();
         let status = client.fetch_status().await;
 
@@ -683,8 +697,6 @@ async fn run_template_loop(
                 }
             }
         }
-
-        sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -699,6 +711,9 @@ async fn run_stratum_server(
     let listener = TcpListener::bind(&pool_cfg.stratum_bind).await?;
     let templates: TemplateStore = Arc::new(Mutex::new(HashMap::new()));
     let (job_tx, _) = broadcast::channel::<MiningTemplate>(32);
+    // force_rebuild: stratum handler signals this after block submission so the
+    // template loop rebuilds immediately instead of waiting up to 1 s.
+    let (force_rebuild_tx, force_rebuild_rx) = watch::channel::<u64>(0);
 
     // Spawn template polling loop
     tokio::spawn(run_template_loop(
@@ -706,6 +721,7 @@ async fn run_stratum_server(
         pool_cfg.pool_address.clone(),
         templates.clone(),
         job_tx.clone(),
+        force_rebuild_rx,
     ));
 
     loop {
@@ -718,10 +734,11 @@ async fn run_stratum_server(
         let pool_cfg = pool_cfg.clone();
         let tracker = tracker.clone();
         let ac = active_connections.clone();
+        let rebuild_tx = force_rebuild_tx.clone();
 
         tokio::spawn(async move {
             ac.fetch_add(1, AtomicOrdering::Relaxed);
-            let result = handle_stratum_connection(stream, templates, job_rx, pool_cfg, client, tracker).await;
+            let result = handle_stratum_connection(stream, templates, job_rx, pool_cfg, client, tracker, rebuild_tx).await;
             ac.fetch_sub(1, AtomicOrdering::Relaxed);
             if let Err(e) = result {
                 log::debug!("[STRATUM] {} disconnected: {}", peer_addr, e);
