@@ -108,7 +108,7 @@ pub fn mine_header_cuda(
     let target = target_override.unwrap_or(network_target);
     let target_dev = DeviceBuffer::from_slice(&target)?;
 
-    let mut start_nonce: u64 = 0;
+    let mut start_nonce: u64 = header.nonce;
     let mut last_rate_update = std::time::Instant::now();
     let mut hashes_since_update: u64 = 0;
     let mut last_console_update = std::time::Instant::now();
