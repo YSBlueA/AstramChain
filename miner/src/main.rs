@@ -634,7 +634,38 @@ async fn run_stratum_session(
                 };
 
                 match result {
-                    Ok(Ok((nonce, _hash))) => {
+                    Ok(Ok((nonce, hash))) => {
+                        // Verify hash still meets the current pool difficulty.
+                        // set_difficulty may have arrived while the CUDA task was running,
+                        // so the found hash could satisfy the old (easier) target but not
+                        // the new (harder) one.  Submitting would just get a rejection.
+                        let required_prefix = "0".repeat(pool_diff as usize);
+                        if !hash.starts_with(&required_prefix) {
+                            log::debug!(
+                                "[POOL] Share stale (diff changed {} → {}), discarding nonce=0x{:016x}",
+                                hash.chars().take_while(|c| *c == '0').count(),
+                                pool_diff,
+                                nonce
+                            );
+                            // Restart mining with updated target — no submission
+                            let new_header = BlockHeader {
+                                index: job.height,
+                                previous_hash: job.prev_hash.clone(),
+                                merkle_root: job.merkle_root.clone(),
+                                timestamp: job.timestamp,
+                                nonce: nonce.wrapping_add(1),
+                                difficulty: job.difficulty,
+                            };
+                            cancel_flag = Arc::new(AtomicBool::new(false));
+                            let cf = cancel_flag.clone();
+                            let hr = hashrate.clone();
+                            let pt = pool_target;
+                            mining_handle = Some(tokio::task::spawn_blocking(move || {
+                                consensus::mine_header_cuda(new_header, cf, Some(hr), Some(pt))
+                            }));
+                            continue;
+                        }
+
                         println!("[POOL] ✅ Share found! job={} nonce=0x{:016x}", job.job_id, nonce);
 
                         let submit = serde_json::json!({

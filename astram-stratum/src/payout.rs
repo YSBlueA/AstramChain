@@ -329,8 +329,25 @@ pub async fn run_payout_loop(
                         let _ = payout_db.set(&miner_addr, U256::zero());
                     }
                     Err(e) => {
-                        log::warn!("❌ Payout failed for {}: {}", miner_addr, e);
-                        // Keep balance; will retry next interval
+                        let e_str = e.to_string();
+                        // If the TX is already in the mempool (from a previous attempt),
+                        // the payment will confirm on its own — treat it as sent.
+                        if e_str.contains("already used in mempool")
+                            || e_str.contains("Double-spend")
+                        {
+                            log::info!(
+                                "⏳ Payout TX for {} is already in mempool, clearing balance",
+                                miner_addr
+                            );
+                            {
+                                let mut t = tracker.lock().unwrap();
+                                t.balances.remove(&miner_addr);
+                            }
+                            let _ = payout_db.set(&miner_addr, U256::zero());
+                        } else {
+                            log::warn!("❌ Payout failed for {}: {}", miner_addr, e);
+                            // Keep balance; will retry next interval
+                        }
                     }
                 }
             }
