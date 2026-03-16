@@ -722,11 +722,18 @@ async fn run_template_loop(
     let mut last_job_time = 0i64;
 
     loop {
-        // Wait up to 500 ms OR wake immediately when force_rebuild is signalled
-        // (e.g. right after a block is submitted by the stratum handler).
-        tokio::select! {
-            _ = sleep(Duration::from_millis(500)) => {}
-            _ = force_rebuild_rx.changed() => {}
+        // Wait up to 500 ms OR wake when force_rebuild is signalled.
+        let force_triggered = tokio::select! {
+            _ = sleep(Duration::from_millis(500)) => false,
+            _ = force_rebuild_rx.changed() => true,
+        };
+
+        // After a forced rebuild (new block just submitted), wait an extra 800 ms
+        // so the node has time to update its UTXO set and evict spent mempool TXs.
+        // Without this delay, the template would include stale mempool transactions
+        // that reference UTXOs already consumed by the just-confirmed block.
+        if force_triggered {
+            sleep(Duration::from_millis(800)).await;
         }
 
         let now = chrono::Utc::now().timestamp();
