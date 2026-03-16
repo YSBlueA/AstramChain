@@ -774,6 +774,22 @@ impl Blockchain {
             None => self.difficulty,
         };
 
+        // Clamp the result to the same 4× limit that block validation enforces,
+        // so DWG3 can never produce a value that the validator would reject.
+        let prev_target = Self::compact_to_target(previous_bits);
+        if !prev_target.is_zero() {
+            let max_increase = prev_target.saturating_mul(U256::from(4u8));
+            let min_decrease = prev_target / U256::from(4u8);
+            if new_target > max_increase {
+                new_target = max_increase;
+            } else if new_target < min_decrease {
+                new_target = min_decrease;
+            }
+            if new_target.is_zero() {
+                new_target = U256::one();
+            }
+        }
+
         let next_bits = Self::target_to_compact(new_target);
 
         log::debug!(

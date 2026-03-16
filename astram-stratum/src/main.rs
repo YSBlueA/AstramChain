@@ -617,7 +617,9 @@ async fn handle_stratum_inner(
                                                 let is_stale = e_str.contains("utxo not found")
                                                     || e_str.contains("already exists")
                                                     || e_str.contains("stale")
-                                                    || e_str.contains("duplicate");
+                                                    || e_str.contains("duplicate")
+                                                    || e_str.contains("too aggressively")
+                                                    || e_str.contains("difficulty target");
                                                 if is_stale {
                                                     log::warn!("[BLOCK] stale template at height={}: {}", tmpl.height, e_str);
                                                 } else {
