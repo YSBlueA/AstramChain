@@ -127,8 +127,10 @@ pub fn initial_pool_difficulty(block_compact: u32) -> PoolDifficulty {
         }
     }
 
-    // Pool difficulty: 2 leading zeros easier than network, minimum 1
-    leading_zero_nibbles.saturating_sub(2).max(1)
+    // Pool difficulty: 1 leading zero easier than network, minimum 1.
+    // Proof of safety: a hash with (N-1) leading zero nibbles has its Nth nibble > 0,
+    // while the network target's Nth nibble is 0 → hash > target → cannot be a valid block.
+    leading_zero_nibbles.saturating_sub(1).max(1)
 }
 
 /// Validate that a claimed full-block hash satisfies block difficulty.
