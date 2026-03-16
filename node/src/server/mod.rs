@@ -794,6 +794,19 @@ pub async fn run_server(
                             .recently_mined_blocks
                             .retain(|_, &mut timestamp| now - timestamp < 300);
                     }
+                    // Remove confirmed transactions from the mempool so they are
+                    // not included again in future block templates.
+                    {
+                        let block_txids: std::collections::HashSet<String> =
+                            block.transactions.iter().map(|tx| tx.txid.clone()).collect();
+                        let mut mempool = state.mempool.lock().unwrap();
+                        let before = mempool.pending.len();
+                        mempool.pending.retain(|tx| !block_txids.contains(&tx.txid));
+                        let removed = before - mempool.pending.len();
+                        if removed > 0 {
+                            log::info!("[MEMPOOL] Removed {} confirmed TXs after block {}", removed, block.header.index);
+                        }
+                    }
                     p2p.set_my_height(block.header.index);
 
                     let block_to_broadcast = block.clone();

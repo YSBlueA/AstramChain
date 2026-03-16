@@ -2,14 +2,16 @@
 ///
 /// Responsibilities:
 ///   1. Persist miner balances to RocksDB so they survive pool restarts.
-///   2. Periodically scan pending balances and send on-chain payouts to miners
-///      whose balance exceeds the configured threshold.
+///   2. Periodically build signed payout transactions and place them in a
+///      pool-managed queue (PendingPayouts).
+///   3. The stratum block-submission handler includes queued TXs in the next
+///      block it mines, then clears the queue on success.
 ///
-/// Payout flow per miner:
-///   1. Fetch pool wallet UTXOs from node  (GET /address/<pool>/utxos)
-///   2. Coin-select + fee-converge (same algorithm as wallet-cli)
-///   3. Sign with pool keypair
-///   4. POST /tx  →  if accepted: zero out miner balance in tracker + DB
+/// Payout flow:
+///   1. Every interval: fetch pool UTXOs, build + sign payout TXs → PendingPayouts queue
+///   2. build_template includes those TXs directly in the block (no node mempool)
+///   3. On successful block: zero miner balances in tracker + DB, clear queue
+///   4. On failed block: clear queue → rebuilt fresh next interval
 
 use anyhow::{Result, anyhow};
 use Astram_core::config::calculate_default_fee;
@@ -25,6 +27,20 @@ use tokio::time::{Duration, sleep};
 use crate::shares::ShareTracker;
 
 type SharedTracker = Arc<std::sync::Mutex<ShareTracker>>;
+
+// ─── Pending payout queue ─────────────────────────────────────────────────────
+
+/// A signed payout transaction waiting to be included in the next mined block.
+#[derive(Clone)]
+pub struct PendingPayout {
+    pub miner_addr: String,
+    pub amount: U256,
+    pub tx: Transaction,
+}
+
+/// Shared queue of built-but-not-yet-confirmed payout transactions.
+/// Populated by run_payout_loop; drained by the block-submission handler.
+pub type PendingPayouts = Arc<std::sync::Mutex<Vec<PendingPayout>>>;
 
 // ─── Payout database ─────────────────────────────────────────────────────────
 
@@ -163,24 +179,21 @@ async fn fetch_utxos(
 
 // ─── Payout transaction builder ───────────────────────────────────────────────
 
-/// Build, sign, and submit a payout transaction.
-///
-/// Sends `amount` (ram) from pool_address to `to`.
-/// Uses a fee-convergence loop identical to wallet-cli.
-pub async fn send_payout(
+/// Build and sign a payout transaction without submitting it to the node.
+/// The returned TX is included directly in the next mined block.
+pub async fn build_payout_tx(
     http: &reqwest::Client,
     base_url: &str,
     keypair: &WalletKeypair,
     pool_address: &str,
     to: &str,
     amount: U256,
-) -> Result<()> {
+) -> Result<Transaction> {
     let input_pool = fetch_utxos(http, base_url, pool_address).await?;
     if input_pool.is_empty() {
         return Err(anyhow!("pool wallet has no UTXOs"));
     }
 
-    // Greedy coin selection: take UTXOs until we have enough for `amount`
     let mut selected: Vec<TransactionInput> = Vec::new();
     let mut input_sum = U256::zero();
     let mut cursor = 0usize;
@@ -199,10 +212,9 @@ pub async fn send_payout(
         ));
     }
 
-    // Fee convergence: keep iterating until fee is stable
+    // Fee convergence loop
     let mut fee = U256::zero();
     for _ in 0..16 {
-        // Add more UTXOs if needed to cover amount + fee
         while input_sum < amount + fee {
             if cursor >= input_pool.len() {
                 return Err(anyhow!("pool balance insufficient to cover amount + fee"));
@@ -231,31 +243,11 @@ pub async fn send_payout(
 
         let body = bincode::encode_to_vec(&tx, *BINCODE_CONFIG)
             .map_err(|e| anyhow!("serialize error: {}", e))?;
-
         let new_fee = calculate_default_fee(body.len());
 
         if new_fee <= fee {
-            // Fee has stabilised – submit
-            let resp: Value = http
-                .post(format!("{}/tx", base_url))
-                .body(body)
-                .header("Content-Type", "application/octet-stream")
-                .send()
-                .await?
-                .json()
-                .await?;
-
-            return if resp.get("status").and_then(|s| s.as_str()) == Some("ok") {
-                Ok(())
-            } else {
-                let msg = resp
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("rejected by node");
-                Err(anyhow!("tx rejected: {}", msg))
-            };
+            return Ok(tx);
         }
-
         fee = new_fee;
     }
 
@@ -279,23 +271,24 @@ pub async fn run_balance_sync(tracker: SharedTracker, payout_db: Arc<PayoutDb>) 
     }
 }
 
-/// Payout loop: every `interval_secs`, send on-chain transactions to all miners
-/// whose pending balance is >= `threshold` (in ram).
+/// Payout loop: every `interval_secs`, build signed payout TXs for eligible miners
+/// and place them in `pending_payouts`. The block-submission handler will include
+/// them in the next mined block and zero out balances on confirmation.
 pub async fn run_payout_loop(
     http: reqwest::Client,
     base_url: String,
     tracker: SharedTracker,
-    payout_db: Arc<PayoutDb>,
+    _payout_db: Arc<PayoutDb>,
     keypair: Arc<WalletKeypair>,
     pool_address: String,
     threshold: U256,
     interval_secs: u64,
+    pending_payouts: PendingPayouts,
 ) {
     // Stagger the first run so the pool has time to sync with the node
     sleep(Duration::from_secs(60)).await;
 
     loop {
-        // Collect candidates (exclude pool address itself)
         let candidates: Vec<(String, U256)> = {
             let t = tracker.lock().unwrap();
             t.balances
@@ -309,48 +302,25 @@ pub async fn run_payout_loop(
 
         if !candidates.is_empty() {
             log::info!(
-                "💸 Payout: {} miner(s) eligible (threshold {} ram)",
-                candidates.len(),
-                threshold
+                "💸 Payout: {} miner(s) eligible, building TXs for next block",
+                candidates.len()
             );
 
-            for (miner_addr, balance) in candidates {
-                log::info!("💸 Paying {} → {} ram", miner_addr, balance);
-                match send_payout(&http, &base_url, &keypair, &pool_address, &miner_addr, balance)
-                    .await
-                {
-                    Ok(()) => {
-                        log::info!("✅ Payout sent to {}", miner_addr);
-                        // Zero out balance in tracker and DB
-                        {
-                            let mut t = tracker.lock().unwrap();
-                            t.balances.remove(&miner_addr);
-                        }
-                        let _ = payout_db.set(&miner_addr, U256::zero());
+            // Rebuild the queue fresh each interval (UTXOs may have changed).
+            let mut new_pending: Vec<PendingPayout> = Vec::new();
+            for (miner_addr, amount) in candidates {
+                match build_payout_tx(&http, &base_url, &keypair, &pool_address, &miner_addr, amount).await {
+                    Ok(tx) => {
+                        log::info!("💸 Queued payout {} → {} ram", miner_addr, amount);
+                        new_pending.push(PendingPayout { miner_addr, amount, tx });
                     }
                     Err(e) => {
-                        let e_str = e.to_string();
-                        // If the TX is already in the mempool (from a previous attempt),
-                        // the payment will confirm on its own — treat it as sent.
-                        if e_str.contains("already used in mempool")
-                            || e_str.contains("Double-spend")
-                        {
-                            log::info!(
-                                "⏳ Payout TX for {} is already in mempool, clearing balance",
-                                miner_addr
-                            );
-                            {
-                                let mut t = tracker.lock().unwrap();
-                                t.balances.remove(&miner_addr);
-                            }
-                            let _ = payout_db.set(&miner_addr, U256::zero());
-                        } else {
-                            log::warn!("❌ Payout failed for {}: {}", miner_addr, e);
-                            // Keep balance; will retry next interval
-                        }
+                        log::warn!("❌ Failed to build payout TX for {}: {}", miner_addr, e);
                     }
                 }
             }
+
+            *pending_payouts.lock().unwrap() = new_pending;
         }
 
         sleep(Duration::from_secs(interval_secs)).await;

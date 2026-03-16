@@ -12,7 +12,7 @@ use Astram_core::block::{Block, BlockHeader, compute_merkle_root};
 use Astram_core::config::calculate_block_reward;
 use Astram_core::crypto::WalletKeypair;
 use Astram_core::transaction::{BINCODE_CONFIG, Transaction};
-use payout::{PayoutDb, run_balance_sync, run_payout_loop};
+use payout::{PayoutDb, PendingPayouts, run_balance_sync, run_payout_loop};
 use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -118,6 +118,12 @@ struct NodeClient {
 struct MempoolSnapshot {
     txs: Vec<Transaction>,
     total_fees: U256,
+}
+
+impl Default for MempoolSnapshot {
+    fn default() -> Self {
+        Self { txs: vec![], total_fees: U256::zero() }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +252,7 @@ async fn build_template(
     client: &NodeClient,
     pool_address: &str,
     job_id: String,
+    pending_payouts: &PendingPayouts,
 ) -> Result<MiningTemplate> {
     let status = client.fetch_status().await?;
 
@@ -257,13 +264,22 @@ async fn build_template(
     };
 
     let base_reward = calculate_block_reward(height);
-    // Do not include mempool transactions: payout TXs that reference already-spent
-    // UTXOs can linger in the node mempool and cause "referenced utxo not found"
-    // rejections on every block submission.  Coinbase-only blocks are always valid.
+
+    // Include pool-managed payout TXs directly (no node mempool dependency).
+    // These TXs are built with fresh UTXOs each payout cycle and cleared after
+    // a successful block submission.
+    let payout_txs: Vec<Transaction> = pending_payouts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| p.tx.clone())
+        .collect();
+
     let coinbase_value = base_reward;
     let coinbase = Transaction::coinbase(pool_address, coinbase_value).with_hashes();
 
-    let all_txs = vec![coinbase];
+    let mut all_txs = vec![coinbase];
+    all_txs.extend(payout_txs);
 
     let txids: Vec<String> = all_txs.iter().map(|t| t.txid.clone()).collect();
     let merkle_root = compute_merkle_root(&txids);
@@ -335,11 +351,11 @@ async fn handle_stratum_connection(
     client: NodeClient,
     tracker: SharedTracker,
     force_rebuild_tx: watch::Sender<u64>,
+    pending_payouts: PendingPayouts,
 ) -> Result<()> {
-    // Shared slot: inner handler writes extranonce1 here on auth so we can clean up on exit.
     let registered_e1: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let result = handle_stratum_inner(
-        stream, template_store, job_rx, pool_cfg, client, tracker.clone(), registered_e1.clone(), force_rebuild_tx,
+        stream, template_store, job_rx, pool_cfg, client, tracker.clone(), registered_e1.clone(), force_rebuild_tx, pending_payouts,
     ).await;
     if let Some(e1) = registered_e1.lock().unwrap().take() {
         tracker.lock().unwrap().unregister_worker(&e1);
@@ -356,6 +372,7 @@ async fn handle_stratum_inner(
     tracker: SharedTracker,
     registered_e1: Arc<std::sync::Mutex<Option<String>>>,
     force_rebuild_tx: watch::Sender<u64>,
+    pending_payouts: PendingPayouts,
 ) -> Result<()> {
     let mut framed = Framed::new(stream, LinesCodec::new());
     let mut session: Option<MinerSession> = None;
@@ -411,7 +428,7 @@ async fn handle_stratum_inner(
 
                         // Build initial template to get block difficulty for VarDiff
                         let job_id = format!("{}", chrono::Utc::now().timestamp_millis());
-                        let init_diff = match build_template(&client, &pool_cfg.pool_address, job_id.clone()).await {
+                        let init_diff = match build_template(&client, &pool_cfg.pool_address, job_id.clone(), &pending_payouts).await {
                             Ok(t) => {
                                 template_store.lock().unwrap().insert(job_id.clone(), t.clone());
                                 let pool_diff = t.pool_diff.max(pool_cfg.vardiff.min_diff);
@@ -597,13 +614,23 @@ async fn handle_stratum_inner(
                                                     }
                                                 }
                                                 s.record_accepted_share();
-                                                // Purge all stale templates for this height so
-                                                // subsequent submissions don't reuse transactions
-                                                // that were just included in this block.
+                                                // Purge all stale templates for this height.
                                                 {
                                                     let mut store = template_store.lock().unwrap();
                                                     let found_height = tmpl.height;
                                                     store.retain(|_, t| t.height != found_height);
+                                                }
+                                                // Block confirmed: zero out balances for miners
+                                                // whose payout TXs were included in this block.
+                                                {
+                                                    let paid = pending_payouts.lock().unwrap().drain(..).collect::<Vec<_>>();
+                                                    if !paid.is_empty() {
+                                                        let mut t = tracker.lock().unwrap();
+                                                        for p in &paid {
+                                                            t.balances.remove(&p.miner_addr);
+                                                            log::info!("✅ Payout confirmed for {} ({} ram)", p.miner_addr, p.amount);
+                                                        }
+                                                    }
                                                 }
                                                 // Signal template loop to rebuild immediately
                                                 let _ = force_rebuild_tx.send(chrono::Utc::now().timestamp_millis() as u64);
@@ -623,6 +650,9 @@ async fn handle_stratum_inner(
                                                     || e_str.contains("difficulty target");
                                                 if is_stale {
                                                     log::warn!("[BLOCK] stale template at height={}: {}", tmpl.height, e_str);
+                                                    // Clear pending payouts so they are rebuilt with
+                                                    // fresh UTXOs on the next payout interval.
+                                                    pending_payouts.lock().unwrap().clear();
                                                 } else {
                                                     log::warn!("[BLOCK] submit failed: {}", e_str);
                                                     s.record_rejected_share();
@@ -718,39 +748,29 @@ async fn run_template_loop(
     templates: TemplateStore,
     job_tx: broadcast::Sender<MiningTemplate>,
     mut force_rebuild_rx: watch::Receiver<u64>,
+    pending_payouts: PendingPayouts,
 ) {
     let mut last_tip = String::new();
     let mut last_job_time = 0i64;
 
     loop {
-        // Wait up to 500 ms OR wake when force_rebuild is signalled.
-        let force_triggered = tokio::select! {
-            _ = sleep(Duration::from_millis(500)) => false,
-            _ = force_rebuild_rx.changed() => true,
-        };
-
-        // After a forced rebuild (new block just submitted), wait an extra 800 ms
-        // so the node has time to update its UTXO set and evict spent mempool TXs.
-        // Without this delay, the template would include stale mempool transactions
-        // that reference UTXOs already consumed by the just-confirmed block.
-        if force_triggered {
-            sleep(Duration::from_millis(800)).await;
+        // Wait up to 500 ms OR wake immediately when force_rebuild is signalled.
+        tokio::select! {
+            _ = sleep(Duration::from_millis(500)) => {}
+            _ = force_rebuild_rx.changed() => {}
         }
 
         let now = chrono::Utc::now().timestamp();
         let status = client.fetch_status().await;
 
         let should_rebuild = match &status {
-            Ok(s) => {
-                // Rebuild immediately on new block OR every 15s for fresh mempool
-                s.tip_hash != last_tip || (now - last_job_time) >= 15
-            }
+            Ok(s) => s.tip_hash != last_tip || (now - last_job_time) >= 15,
             Err(_) => false,
         };
 
         if should_rebuild {
             let job_id = format!("{}", chrono::Utc::now().timestamp_millis());
-            match build_template(&client, &pool_address, job_id.clone()).await {
+            match build_template(&client, &pool_address, job_id.clone(), &pending_payouts).await {
                 Ok(template) => {
                     let new_tip = template.prev_hash.clone();
                     let is_new_block = new_tip != last_tip;
@@ -779,12 +799,11 @@ async fn run_stratum_server(
     client: NodeClient,
     tracker: SharedTracker,
     active_connections: ActiveConnections,
+    pending_payouts: PendingPayouts,
 ) -> Result<()> {
     let listener = TcpListener::bind(&pool_cfg.stratum_bind).await?;
     let templates: TemplateStore = Arc::new(Mutex::new(HashMap::new()));
     let (job_tx, _) = broadcast::channel::<MiningTemplate>(32);
-    // force_rebuild: stratum handler signals this after block submission so the
-    // template loop rebuilds immediately instead of waiting up to 1 s.
     let (force_rebuild_tx, force_rebuild_rx) = watch::channel::<u64>(0);
 
     // Spawn template polling loop
@@ -794,6 +813,7 @@ async fn run_stratum_server(
         templates.clone(),
         job_tx.clone(),
         force_rebuild_rx,
+        pending_payouts.clone(),
     ));
 
     loop {
@@ -807,10 +827,11 @@ async fn run_stratum_server(
         let tracker = tracker.clone();
         let ac = active_connections.clone();
         let rebuild_tx = force_rebuild_tx.clone();
+        let pp = pending_payouts.clone();
 
         tokio::spawn(async move {
             ac.fetch_add(1, AtomicOrdering::Relaxed);
-            let result = handle_stratum_connection(stream, templates, job_rx, pool_cfg, client, tracker, rebuild_tx).await;
+            let result = handle_stratum_connection(stream, templates, job_rx, pool_cfg, client, tracker, rebuild_tx, pp).await;
             ac.fetch_sub(1, AtomicOrdering::Relaxed);
             if let Err(e) = result {
                 log::debug!("[STRATUM] {} disconnected: {}", peer_addr, e);
@@ -873,7 +894,8 @@ async fn run_gbt_server(
                 match request.method.as_str() {
                     "getblocktemplate" => {
                         let job_id = format!("{}", chrono::Utc::now().timestamp_millis());
-                        match build_template(&client, &pool_address, job_id).await {
+                        let empty_pp: PendingPayouts = Arc::new(Mutex::new(vec![]));
+                        match build_template(&client, &pool_address, job_id, &empty_pp).await {
                             Ok(template) => {
                                 let txs = template
                                     .transactions
@@ -1138,6 +1160,8 @@ async fn main() -> Result<()> {
     }
 
     // Spawn payout loop
+    let pending_payouts: PendingPayouts = Arc::new(Mutex::new(vec![]));
+
     {
         let pay_http = client.client.clone();
         let pay_url = pool_cfg.node_rpc_url.clone();
@@ -1147,14 +1171,15 @@ async fn main() -> Result<()> {
         let pay_addr = pool_cfg.pool_address.clone();
         let pay_threshold = pool_cfg.payout_threshold_ram;
         let pay_interval = pool_cfg.payout_interval_secs;
+        let pay_pp = pending_payouts.clone();
         tokio::spawn(async move {
             run_payout_loop(
                 pay_http, pay_url, pay_tracker, pay_db,
-                pay_kp, pay_addr, pay_threshold, pay_interval,
+                pay_kp, pay_addr, pay_threshold, pay_interval, pay_pp,
             ).await;
         });
     }
 
     // Run stratum server (blocking)
-    run_stratum_server(pool_cfg, client, tracker, active_connections).await
+    run_stratum_server(pool_cfg, client, tracker, active_connections, pending_payouts).await
 }
