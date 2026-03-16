@@ -248,7 +248,6 @@ async fn build_template(
     job_id: String,
 ) -> Result<MiningTemplate> {
     let status = client.fetch_status().await?;
-    let mempool = client.fetch_mempool().await?;
 
     let height = status.height + 1;
     let prev_hash = if status.tip_hash == "none" {
@@ -258,11 +257,13 @@ async fn build_template(
     };
 
     let base_reward = calculate_block_reward(height);
-    let coinbase_value = base_reward + mempool.total_fees;
+    // Do not include mempool transactions: payout TXs that reference already-spent
+    // UTXOs can linger in the node mempool and cause "referenced utxo not found"
+    // rejections on every block submission.  Coinbase-only blocks are always valid.
+    let coinbase_value = base_reward;
     let coinbase = Transaction::coinbase(pool_address, coinbase_value).with_hashes();
 
-    let mut all_txs = vec![coinbase];
-    all_txs.extend(mempool.txs);
+    let all_txs = vec![coinbase];
 
     let txids: Vec<String> = all_txs.iter().map(|t| t.txid.clone()).collect();
     let merkle_root = compute_merkle_root(&txids);
