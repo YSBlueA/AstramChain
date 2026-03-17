@@ -38,7 +38,7 @@
       <div class="stat-card accent-card">
         <div class="stat-label">Network Hashrate</div>
         <div class="stat-value">{{ stats.network_hashrate }}</div>
-        <div class="stat-sub">current pool</div>
+        <div class="stat-sub">estimated from chain</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">Difficulty</div>

@@ -14,7 +14,6 @@
           <li><router-link to="/blocks">Blocks</router-link></li>
           <li><router-link to="/transactions">Transactions</router-link></li>
           <li><router-link to="/richlist">Rich List</router-link></li>
-          <li><router-link to="/node" class="nav-status-link">Node Status</router-link></li>
         </ul>
         <div class="nav-right">
           <span class="live-dot"></span>

@@ -165,7 +165,6 @@ pub async fn get_transaction_by_hash(
 // 블록체인 통계 조회
 pub async fn get_blockchain_stats(
     db: web::Data<Arc<ExplorerDB>>,
-    rpc: web::Data<Arc<NodeRpcClient>>,
 ) -> HttpResponse {
     match db.get_stats() {
         Ok((total_blocks, total_transactions, total_volume)) => {
@@ -179,9 +178,15 @@ pub async fn get_blockchain_stats(
             let total_addresses = db.get_address_count().unwrap_or(0);
             let circulating_supply = db.get_circulating_supply().unwrap_or_default();
 
-            // Fetch real hashrate from node
-            let hashrate_raw = rpc.fetch_hashrate().await.unwrap_or(0.0);
-            let network_hashrate = format_hashrate(hashrate_raw);
+            // 네트워크 전체 해시레이트 추정 (블록체인 데이터 기반)
+            // 공식: 16^difficulty / 평균_블록_시간(초)
+            // difficulty = 선행 0 nibble 수 → 유효 해시 확률 = 1/16^difficulty
+            let network_hashrate = if average_block_time > 0.0 {
+                let expected_hashes = 16f64.powi(current_difficulty as i32);
+                format_hashrate(expected_hashes / average_block_time)
+            } else {
+                "—".to_string()
+            };
 
             let stats = BlockchainStats {
                 total_blocks,
