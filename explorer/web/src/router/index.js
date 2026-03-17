@@ -6,6 +6,7 @@ import Transactions from '../views/Transactions.vue'
 import TransactionDetail from '../views/TransactionDetail.vue'
 import Address from '../views/Address.vue'
 import Richlist from '../views/Richlist.vue'
+import NodeStatus from '../views/NodeStatus.vue'
 
 const routes = [
   {
@@ -47,6 +48,11 @@ const routes = [
     path: '/richlist',
     name: 'Richlist',
     component: Richlist,
+  },
+  {
+    path: '/node',
+    name: 'NodeStatus',
+    component: NodeStatus,
   },
 ]
 

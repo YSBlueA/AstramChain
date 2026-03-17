@@ -1,224 +1,167 @@
 <template>
-  <div class="address-page">
-    <div v-if="addressInfo" class="detail-container">
-      <h1>Address Information</h1>
-
-      <div class="address-header">
-        <div class="address-hash monospace">{{ addressInfo.address }}</div>
+  <div class="page">
+    <div v-if="addressInfo">
+      <div class="page-header">
+        <button class="back-btn" @click="$router.push('/')">← Home</button>
+        <h1>Address</h1>
       </div>
 
-      <div class="detail-grid">
-        <div class="detail-item highlight">
-          <span class="label">Balance</span>
-          <span class="value balance"
-            >{{ formatAmount(addressInfo.balance) }} ASRM</span
-          >
-        </div>
-        <div class="detail-item">
-          <span class="label">Total Received</span>
-          <span class="value received"
-            >{{ formatAmount(addressInfo.received) }} ASRM</span
-          >
-        </div>
-        <div class="detail-item">
-          <span class="label">Total Sent</span>
-          <span class="value sent"
-            >{{ formatAmount(addressInfo.sent) }} ASRM</span
-          >
-        </div>
-        <div class="detail-item">
-          <span class="label">Transactions</span>
-          <span class="value">{{ addressInfo.transaction_count }}</span>
-        </div>
-        <div class="detail-item">
-          <span class="label">Last Activity</span>
-          <span class="value">
-            {{
-              addressInfo.last_transaction
-                ? formatTime(addressInfo.last_transaction)
-                : "No Activity"
-            }}
-          </span>
-        </div>
+      <!-- Address hash -->
+      <div class="addr-card">
+        <div class="addr-label">Wallet Address</div>
+        <div class="addr-hash mono">{{ addressInfo.address }}</div>
       </div>
 
-      <div class="actions">
-        <button @click="goHome" class="btn btn-primary">Home</button>
+      <!-- Stats row -->
+      <div class="stats-row">
+        <div class="stat-box highlight">
+          <div class="stat-label">Balance</div>
+          <div class="stat-val accent-text">{{ formatAmount(addressInfo.balance) }} <span class="unit">ASRM</span></div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Total Received</div>
+          <div class="stat-val green-text">{{ formatAmount(addressInfo.received) }} <span class="unit">ASRM</span></div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Total Sent</div>
+          <div class="stat-val yellow-text">{{ formatAmount(addressInfo.sent) }} <span class="unit">ASRM</span></div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Transactions</div>
+          <div class="stat-val">{{ addressInfo.transaction_count }}</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Last Activity</div>
+          <div class="stat-val small">{{ addressInfo.last_transaction ? formatTime(addressInfo.last_transaction) : 'No activity' }}</div>
+        </div>
       </div>
     </div>
-    <div v-else class="loading">Loading...</div>
+
+    <div v-else class="empty"><span class="spin">⟳</span> Loading address...</div>
   </div>
 </template>
 
 <script>
 import { explorerAPI } from "../api/explorer";
-
 export default {
   name: "Address",
-  data() {
-    return {
-      addressInfo: null,
-    };
-  },
-  mounted() {
-    this.fetchAddressInfo();
-  },
+  data() { return { addressInfo: null }; },
+  mounted() { this.fetch(); },
   methods: {
-    async fetchAddressInfo() {
+    async fetch() {
       try {
-        const address = this.$route.params.address;
-        const res = await explorerAPI.getAddressInfo(address);
+        const res = await explorerAPI.getAddressInfo(this.$route.params.address);
         this.addressInfo = res.data;
-        console.log("Address Info:", res.data);
-        console.log("Balance:", res.data.balance, typeof res.data.balance);
-      } catch (error) {
-        console.error("Failed to load address info:", error);
-      }
+      } catch (e) { console.error(e); }
     },
-    formatTime(timestamp) {
-      const date = new Date(timestamp);
-      return date.toLocaleString("ko-KR");
-    },
+    formatTime(ts) { return new Date(ts).toLocaleString("ko-KR"); },
     formatAmount(value) {
-      // Handle hex string (0x...), decimal string, number, and U256 array format
-      let num;
-      
-      if (Array.isArray(value)) {
-        // U256 is serialized as [u64, u64, u64, u64]
-        num =
-          BigInt(value[0]) +
-          (BigInt(value[1]) << BigInt(64)) +
-          (BigInt(value[2]) << BigInt(128)) +
-          (BigInt(value[3]) << BigInt(192));
-      } else if (typeof value === "string") {
-        // Handle hex string (0x...) or decimal string
-        if (value.startsWith("0x")) {
-          num = BigInt(value); // BigInt automatically handles hex with 0x prefix
-        } else {
-          num = BigInt(value);
-        }
-      } else {
-        num = BigInt(value || 0);
-      }
-
-      // Convert to ASRM using BigInt division
-      const divisor = BigInt("1000000000000000000"); // 10^18
-      const ASRM = Number(num) / Number(divisor);
-
-      return ASRM.toLocaleString("en-US", {
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 6,
-      });
-    },
-    goHome() {
-      this.$router.push("/");
+      try {
+        let n;
+        if (Array.isArray(value)) n = BigInt(value[0]) + (BigInt(value[1]) << 64n) + (BigInt(value[2]) << 128n) + (BigInt(value[3]) << 192n);
+        else n = BigInt(value || 0);
+        return (Number(n) / 1e18).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+      } catch { return "0"; }
     },
   },
 };
 </script>
 
 <style scoped>
-.address-page {
-  background: white;
-  padding: 2rem;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-}
+.page { width: 100%; }
 
-h1 {
-  margin-bottom: 2rem;
-  color: #667eea;
-}
-
-.address-header {
-  background-color: #f8f9ff;
-  padding: 1.5rem;
-  border-radius: 8px;
-  margin-bottom: 2rem;
-  border-left: 4px solid #667eea;
-}
-
-.address-hash {
-  font-size: 0.9rem;
-  word-break: break-all;
-  color: #333;
-}
-
-.detail-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 2rem;
-  margin-bottom: 2rem;
-}
-
-.detail-item {
+.page-header {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 1.5rem;
-  background-color: #f8f9ff;
-  border-radius: 8px;
-  border-left: 4px solid #ddd;
-}
-
-.detail-item.highlight {
-  border-left-color: #667eea;
-  background: linear-gradient(135deg, #f8f9ff 0%, #f0f3ff 100%);
-}
-
-.label {
-  font-size: 0.9rem;
-  color: #666;
-  font-weight: bold;
-}
-
-.value {
-  font-size: 1.1rem;
-  color: #333;
-}
-
-.balance {
-  color: #667eea;
-  font-weight: bold;
-}
-
-.received {
-  color: #10b981;
-  font-weight: bold;
-}
-
-.sent {
-  color: #f59e0b;
-  font-weight: bold;
-}
-
-.actions {
-  display: flex;
+  align-items: center;
   gap: 1rem;
+  margin-bottom: 1.5rem;
 }
 
-.btn {
-  padding: 0.75rem 1.5rem;
-  border: none;
-  border-radius: 8px;
+h1 { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+
+.back-btn {
+  padding: 0.35rem 0.9rem;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  color: var(--text2);
   cursor: pointer;
-  font-weight: bold;
-  transition: all 0.3s;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+.back-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.addr-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.25rem;
 }
 
-.btn-primary {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
+.addr-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text2);
+  margin-bottom: 0.5rem;
 }
 
-.btn-primary:hover {
-  transform: scale(1.05);
+.addr-hash {
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-all;
 }
 
-.loading {
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.stat-box {
+  background: var(--surface);
+  padding: 1.25rem 1.5rem;
+  transition: background 0.15s;
+}
+.stat-box:hover { background: var(--surface2); }
+.stat-box.highlight { background: rgba(59,130,246,.07); }
+.stat-box.highlight:hover { background: rgba(59,130,246,.12); }
+
+.stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text2);
+  margin-bottom: 0.4rem;
+}
+
+.stat-val {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.stat-val.small { font-size: 0.85rem; }
+
+.unit { font-size: 0.7rem; font-weight: 400; color: var(--muted); }
+.mono { font-family: var(--mono); }
+.accent-text { color: var(--accent); }
+.green-text { color: var(--green); }
+.yellow-text { color: var(--yellow); }
+
+.empty {
+  padding: 4rem;
   text-align: center;
-  padding: 3rem;
-  color: #999;
+  color: var(--muted);
+  font-size: 13px;
 }
-</style>
 
+.spin { display: inline-block; animation: spin 1.5s linear infinite; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>

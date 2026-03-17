@@ -1,106 +1,77 @@
 <template>
-  <div class="transaction-detail-page">
-    <div v-if="loading" class="loading">
-      <p>Loading transaction...</p>
-    </div>
-    <div v-else-if="error" class="error-container">
-      <h2>Transaction not found</h2>
-      <p class="error-message">{{ error }}</p>
-      <p class="hash-display">
-        Searched hash: <code>{{ searchHash }}</code>
-      </p>
-      <div class="actions">
-        <button @click="goToTransactions" class="btn btn-primary">
-          View All Transactions
-        </button>
-      </div>
-    </div>
-    <div v-else-if="transaction" class="detail-container">
-      <h1>Transaction Details</h1>
+  <div class="page">
+    <div v-if="loading" class="empty"><span class="spin">⟳</span> Loading transaction...</div>
 
-      <div v-if="isCoinbase" class="info-banner coinbase-banner">
-        Mining Reward Transaction
+    <div v-else-if="error" class="error-card">
+      <div class="error-icon">✕</div>
+      <h2>Transaction not found</h2>
+      <p>{{ error }}</p>
+      <code class="error-hash">{{ searchHash }}</code>
+      <button class="back-btn" @click="$router.push('/transactions')">← All Transactions</button>
+    </div>
+
+    <div v-else-if="transaction">
+      <div class="page-header">
+        <button class="back-btn" @click="$router.push('/transactions')">← Transactions</button>
+        <h1>Transaction</h1>
+        <span v-if="isCoinbase" class="type-tag mining">⛏ Mining Reward</span>
+        <span v-else class="type-tag transfer">⇄ Transfer</span>
+        <span class="status-badge" :class="transaction.status">{{ transaction.status }}</span>
       </div>
 
       <div class="detail-grid">
-        <div class="detail-item">
-          <span class="label">Hash</span>
-          <span class="value monospace">{{ transaction.hash }}</span>
+        <div class="detail-row">
+          <span class="detail-label">Hash</span>
+          <span class="detail-value mono">{{ transaction.hash }}</span>
         </div>
-        <div class="detail-item" v-if="!isCoinbase">
-          <span class="label">From Address</span>
+        <div class="detail-row">
+          <span class="detail-label">From</span>
           <span
-            class="value address-link"
-            @click="goToAddress(transaction.from)"
-          >
-            {{ transaction.from }}
-          </span>
+            class="detail-value mono"
+            :class="isCoinbase ? 'yellow-text' : 'accent-text clickable'"
+            @click="!isCoinbase && $router.push(`/address/${transaction.from}`)"
+          >{{ transaction.from }}</span>
         </div>
-        <div class="detail-item" v-else>
-          <span class="label">From Address</span>
-          <span class="value coinbase-from">{{ transaction.from }}</span>
+        <div class="detail-row">
+          <span class="detail-label">To</span>
+          <span
+            class="detail-value mono"
+            :class="isClickableAddr(transaction.to) ? 'accent-text clickable' : 'text2'"
+            @click="isClickableAddr(transaction.to) && $router.push(`/address/${transaction.to}`)"
+          >{{ transaction.to }}</span>
         </div>
-        <div class="detail-item">
-          <span class="label">To Address</span>
-          <span 
-            class="value"
-            :class="{ 'address-link': !transaction.to.includes('recipients') && !transaction.to.includes('outputs') }"
-            @click="!transaction.to.includes('recipients') && !transaction.to.includes('outputs') ? goToAddress(transaction.to) : null"
-          >
-            {{ transaction.to }}
-          </span>
+        <div class="detail-row">
+          <span class="detail-label">{{ isCoinbase ? 'Reward Amount' : 'Amount' }}</span>
+          <span class="detail-value green-text bold">{{ formatAmount(transaction.amount) }} ASRM</span>
         </div>
-        <div class="detail-item">
-          <span class="label">{{ isCoinbase ? 'Reward Amount' : 'Transfer Amount' }}</span>
-          <span class="value amount"
-            >{{ formatAmount(transaction.amount) }} ASRM</span
-          >
-        </div>
-        <div class="detail-item" v-if="!isCoinbase">
-          <span class="label">Fee</span>
-          <span class="value fee">
+        <div v-if="!isCoinbase" class="detail-row">
+          <span class="detail-label">Fee</span>
+          <span class="detail-value yellow-text">
             {{ formatAmount(transaction.fee) }} ASRM
-            <span class="ram-info">({{ formatRam(transaction.fee) }} ram)</span>
+            <span class="sub-text">({{ formatRam(transaction.fee) }} ram)</span>
           </span>
         </div>
-        <div class="detail-item" v-if="!isCoinbase">
-          <span class="label">Total Amount</span>
-          <span class="value total"
-            >{{ formatTotal(transaction.amount, transaction.fee) }} ASRM</span
-          >
+        <div v-if="!isCoinbase" class="detail-row">
+          <span class="detail-label">Total</span>
+          <span class="detail-value accent-text bold">{{ formatTotal(transaction.amount, transaction.fee) }} ASRM</span>
         </div>
-        <div class="detail-item">
-          <span class="label">Status</span>
-          <span class="value status" :class="transaction.status">
-            {{ transaction.status }}
+        <div class="detail-row">
+          <span class="detail-label">Block</span>
+          <span
+            class="detail-value accent-text clickable bold"
+            @click="transaction.block_height && $router.push(`/blocks/${transaction.block_height}`)"
+          >{{ transaction.block_height ? '#' + transaction.block_height : 'Pending' }}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Confirmations</span>
+          <span class="detail-value" :class="getConfirmClass(transaction.confirmations)">
+            {{ getConfirmText(transaction.confirmations) }}
           </span>
         </div>
-        <div class="detail-item">
-          <span class="label">Confirmations</span>
-          <span class="value" :class="getConfirmationClass(transaction.confirmations)">
-            {{ getConfirmationText(transaction.confirmations) }}
-          </span>
+        <div class="detail-row">
+          <span class="detail-label">Timestamp</span>
+          <span class="detail-value text2">{{ formatTime(transaction.timestamp) }}</span>
         </div>
-        <div class="detail-item">
-          <span class="label">Block Height</span>
-          <span class="value">
-            {{
-              transaction.block_height
-                ? "#" + transaction.block_height
-                : "Pending"
-            }}
-          </span>
-        </div>
-        <div class="detail-item">
-          <span class="label">Timestamp</span>
-          <span class="value">{{ formatTime(transaction.timestamp) }}</span>
-        </div>
-      </div>
-
-      <div class="actions">
-        <button @click="goToTransactions" class="btn btn-primary">
-          View All Transactions
-        </button>
       </div>
     </div>
   </div>
@@ -108,356 +79,197 @@
 
 <script>
 import { explorerAPI } from "../api/explorer";
-
 export default {
   name: "TransactionDetail",
-  data() {
-    return {
-      transaction: null,
-      loading: false,
-      error: null,
-      searchHash: "",
-      isEthHash: false,
-    };
-  },
+  data() { return { transaction: null, loading: false, error: null, searchHash: "" }; },
   computed: {
-    isCoinbase() {
-      return this.transaction && this.transaction.from === "Block_Reward";
-    },
+    isCoinbase() { return this.transaction?.from === "Block_Reward"; },
   },
-  mounted() {
-    this.fetchTransaction();
-  },
+  mounted() { this.fetch(); },
   methods: {
-    async fetchTransaction() {
-      this.loading = true;
-      this.error = null;
-
+    async fetch() {
+      this.loading = true; this.error = null;
       try {
         const hash = this.$route.params.hash;
         this.searchHash = hash;
-        this.isEthHash = hash.startsWith("0x");
-
-        console.log("Fetching transaction:", hash);
         const res = await explorerAPI.getTransactionByHash(hash);
         this.transaction = res.data;
-        console.log("Transaction loaded:", this.transaction);
-      } catch (error) {
-        console.error("Failed to load transaction:", error);
-        this.error =
-          error.response?.data?.error || "Transaction not found.";
-      } finally {
-        this.loading = false;
-      }
+      } catch (e) {
+        this.error = e.response?.data?.error || "Transaction not found.";
+      } finally { this.loading = false; }
     },
-    formatTime(timestamp) {
-      const date = new Date(timestamp);
-      return date.toLocaleString("ko-KR");
-    },
+    isClickableAddr(addr) { return addr && !addr.includes("recipients") && !addr.includes("outputs"); },
+    formatTime(ts) { return new Date(ts).toLocaleString("ko-KR"); },
     formatAmount(value) {
-      // Handle hex string (0x...), decimal string, number, and U256 array format
-      let num;
-
-      if (Array.isArray(value)) {
-        num =
-          BigInt(value[0]) +
-          (BigInt(value[1]) << BigInt(64)) +
-          (BigInt(value[2]) << BigInt(128)) +
-          (BigInt(value[3]) << BigInt(192));
-      } else if (typeof value === "string") {
-        if (value.startsWith("0x")) {
-          num = BigInt(value);
-        } else {
-          num = BigInt(value);
-        }
-      } else {
-        num = BigInt(value || 0);
-      }
-
-      const divisor = BigInt("1000000000000000000"); // 10^18
-      const ASRM = Number(num) / Number(divisor);
-
-      return ASRM.toLocaleString("en-US", {
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 6,
-      });
+      try {
+        let n;
+        if (Array.isArray(value)) n = BigInt(value[0]) + (BigInt(value[1]) << 64n) + (BigInt(value[2]) << 128n) + (BigInt(value[3]) << 192n);
+        else n = BigInt(value || 0);
+        return (Number(n) / 1e18).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+      } catch { return "0"; }
     },
     formatTotal(amount, fee) {
-      // Convert both values using the same logic as formatAmount
-      let numAmount, numFee;
-
-      // Parse amount
-      if (Array.isArray(amount)) {
-        numAmount =
-          BigInt(amount[0]) +
-          (BigInt(amount[1]) << BigInt(64)) +
-          (BigInt(amount[2]) << BigInt(128)) +
-          (BigInt(amount[3]) << BigInt(192));
-      } else if (typeof amount === "string" && amount.startsWith("0x")) {
-        numAmount = BigInt(amount);
-      } else {
-        numAmount = BigInt(amount || 0);
-      }
-
-      // Parse fee
-      if (Array.isArray(fee)) {
-        numFee =
-          BigInt(fee[0]) +
-          (BigInt(fee[1]) << BigInt(64)) +
-          (BigInt(fee[2]) << BigInt(128)) +
-          (BigInt(fee[3]) << BigInt(192));
-      } else if (typeof fee === "string" && fee.startsWith("0x")) {
-        numFee = BigInt(fee);
-      } else {
-        numFee = BigInt(fee || 0);
-      }
-
-      const total = numAmount + numFee;
-      const divisor = BigInt("1000000000000000000"); // 10^18
-      const ASRM = Number(total) / Number(divisor);
-
-      return ASRM.toLocaleString("en-US", {
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 6,
-      });
+      try {
+        const a = BigInt(amount || 0);
+        const f = BigInt(fee || 0);
+        return (Number(a + f) / 1e18).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+      } catch { return "0"; }
     },
     formatRam(value) {
-      // Return the raw ram value as a formatted string
-      let num;
-
-      if (Array.isArray(value)) {
-        num =
-          BigInt(value[0]) +
-          (BigInt(value[1]) << BigInt(64)) +
-          (BigInt(value[2]) << BigInt(128)) +
-          (BigInt(value[3]) << BigInt(192));
-      } else if (typeof value === "string") {
-        if (value.startsWith("0x")) {
-          num = BigInt(value);
-        } else {
-          num = BigInt(value);
-        }
-      } else {
-        num = BigInt(value || 0);
-      }
-
-      return num.toLocaleString("en-US");
+      try { return BigInt(value || 0).toLocaleString("en-US"); } catch { return "0"; }
     },
-    getConfirmationClass(confirmations) {
-      if (confirmations === null || confirmations === undefined) return 'status-unconfirmed';
-      if (confirmations === 0) return 'status-unconfirmed';
-      if (confirmations < 6) return 'status-pending';
-      return 'status-confirmed';
+    getConfirmClass(c) {
+      if (c == null) return "text2";
+      return c >= 6 ? "green-text" : c > 0 ? "yellow-text" : "red-text";
     },
-    getConfirmationText(confirmations) {
-      if (confirmations === null || confirmations === undefined) return 'Pending (0 confirmations)';
-      if (confirmations === 0) return '0 (Unconfirmed)';
-      if (confirmations < 6) return `${confirmations} (Low Confidence)`;
-      return `${confirmations} (Confirmed)`;
-    },
-    goToTransactions() {
-      this.$router.push("/transactions");
-    },
-    goToAddress(address) {
-      this.$router.push(`/address/${address}`);
+    getConfirmText(c) {
+      if (c == null) return "Pending";
+      if (c === 0) return "0 — Unconfirmed";
+      if (c < 6) return `${c} — Low Confidence`;
+      return `${c} — Confirmed`;
     },
   },
 };
 </script>
 
 <style scoped>
-.transaction-detail-page {
-  background: white;
-  padding: 2rem;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+.page { width: 100%; }
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
 }
 
-h1 {
-  margin-bottom: 2rem;
-  color: #667eea;
+h1 { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+
+.back-btn {
+  padding: 0.35rem 0.9rem;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
 }
+.back-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.type-tag {
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.type-tag.mining { background: rgba(245,158,11,.12); color: var(--yellow); }
+.type-tag.transfer { background: rgba(139,92,246,.12); color: #a78bfa; }
+
+.status-badge {
+  padding: 3px 10px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.status-badge.confirmed { background: rgba(16,185,129,.12); color: var(--green); }
+.status-badge.pending { background: rgba(245,158,11,.12); color: var(--yellow); }
 
 .detail-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 2rem;
-  margin-bottom: 2rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
 }
 
-.detail-item {
+.detail-row {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  padding: 0.875rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  align-items: start;
+  gap: 1rem;
+}
+.detail-row:last-child { border-bottom: none; }
+
+.detail-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text2);
+  padding-top: 2px;
+}
+
+.detail-value {
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.sub-text { font-size: 11px; color: var(--muted); display: block; margin-top: 2px; }
+
+.mono { font-family: var(--mono); font-size: 12px; }
+.text2 { color: var(--text2); }
+.accent-text { color: var(--accent); }
+.green-text { color: var(--green); }
+.yellow-text { color: var(--yellow); }
+.red-text { color: var(--red); }
+.bold { font-weight: 600; }
+.clickable { cursor: pointer; }
+.clickable:hover { text-decoration: underline; }
+
+.error-card {
+  background: var(--surface);
+  border: 1px solid rgba(239,68,68,.3);
+  border-radius: var(--radius-lg);
+  padding: 3rem;
+  text-align: center;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  padding: 1rem;
-  background-color: #f8f9ff;
-  border-radius: 8px;
-  border-left: 4px solid #667eea;
-}
-
-.label {
-  font-size: 0.9rem;
-  color: #666;
-  font-weight: bold;
-}
-
-.value {
-  word-break: break-all;
-  color: #333;
-}
-
-.monospace {
-  font-family: "Courier New", monospace;
-  font-size: 0.85rem;
-}
-
-.address-link {
-  cursor: pointer;
-  color: #667eea;
-  text-decoration: underline;
-  transition: color 0.3s;
-}
-
-.address-link:hover {
-  color: #764ba2;
-}
-
-.amount {
-  color: #10b981;
-  font-weight: bold;
-}
-
-.fee {
-  color: #f59e0b;
-  font-weight: bold;
-}
-
-.ram-info {
-  display: block;
-  font-size: 0.75rem;
-  color: #999;
-  font-weight: normal;
-  margin-top: 0.25rem;
-}
-
-.total {
-  color: #667eea;
-  font-weight: bold;
-}
-
-.status {
-  font-weight: bold;
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  display: inline-block;
-}
-
-.status.confirmed {
-  color: #10b981;
-  background-color: #d1fae5;
-}
-
-.status.pending {
-  color: #f59e0b;
-  background-color: #fef3c7;
-}
-
-.actions {
-  display: flex;
+  align-items: center;
   gap: 1rem;
 }
 
-.btn {
-  padding: 0.75rem 1.5rem;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  font-weight: bold;
-  transition: all 0.3s;
+.error-icon {
+  width: 48px; height: 48px;
+  background: rgba(239,68,68,.12);
+  color: var(--red);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: 700;
 }
 
-.btn-primary {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-}
+.error-card h2 { color: var(--red); font-size: 1.2rem; }
+.error-card p { color: var(--text2); font-size: 13px; }
 
-.btn-primary:hover {
-  transform: scale(1.05);
-}
-
-.loading {
-  text-align: center;
-  padding: 3rem;
-  color: #999;
-}
-
-.loading .info-text {
-  margin-top: 1rem;
-  color: #667eea;
-  font-size: 0.9rem;
-}
-
-.error-container {
-  padding: 2rem;
-  text-align: center;
-}
-
-.error-container h2 {
-  color: #ef4444;
-  margin-bottom: 1rem;
-}
-
-.error-message {
-  color: #666;
-  margin-bottom: 1rem;
-}
-
-.hash-display {
-  background-color: #f8f9ff;
-  padding: 1rem;
-  border-radius: 8px;
-  margin: 1rem 0;
+.error-hash {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  color: var(--text2);
   word-break: break-all;
+  max-width: 100%;
 }
 
-.hash-display code {
-  font-family: "Courier New", monospace;
-  color: #667eea;
-  font-size: 0.9rem;
-}
-
-.info-banner {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  padding: 1rem;
-  border-radius: 8px;
-  margin-bottom: 2rem;
+.empty {
+  padding: 4rem;
   text-align: center;
-  font-weight: bold;
+  color: var(--muted);
+  font-size: 13px;
 }
 
-.coinbase-banner {
-  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-}
+.spin { display: inline-block; animation: spin 1.5s linear infinite; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-.coinbase-from {
-  color: #f59e0b;
-  font-weight: bold;
-}
-
-.status-unconfirmed {
-  color: #e74c3c;
-  font-weight: bold;
-}
-
-.status-pending {
-  color: #f39c12;
-  font-weight: bold;
-}
-
-.status-confirmed {
-  color: #27ae60;
-  font-weight: bold;
+@media (max-width: 640px) {
+  .detail-row { grid-template-columns: 1fr; gap: 0.25rem; }
 }
 </style>
-

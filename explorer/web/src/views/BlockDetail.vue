@@ -1,186 +1,185 @@
 <template>
-  <div class="block-detail-page">
-    <div v-if="block" class="detail-container">
-      <h1>Block #{{ block.height }}</h1>
+  <div class="page">
+    <div v-if="block">
+      <div class="page-header">
+        <button class="back-btn" @click="$router.push('/blocks')">← Blocks</button>
+        <h1>Block <span class="accent-text">#{{ block.height }}</span></h1>
+        <span
+          class="confirm-badge"
+          :class="block.confirmations >= 6 ? 'confirmed' : block.confirmations > 0 ? 'low' : 'unconfirmed'"
+        >
+          {{ block.confirmations >= 6 ? '✔ Confirmed' : block.confirmations > 0 ? '⏳ Low Confidence' : '⚠ Unconfirmed' }}
+        </span>
+      </div>
 
       <div class="detail-grid">
-        <div class="detail-item">
-          <span class="label">Hash</span>
-          <span class="value monospace">{{ block.hash }}</span>
+        <div class="detail-row">
+          <span class="detail-label">Block Hash</span>
+          <span class="detail-value mono">{{ block.hash }}</span>
         </div>
-        <div class="detail-item">
-          <span class="label">Confirmations</span>
-          <span class="value" :class="getConfirmationClass(block.confirmations)">
-            {{ block.confirmations }} {{ getConfirmationStatus(block.confirmations) }}
-          </span>
+        <div class="detail-row">
+          <span class="detail-label">Previous Hash</span>
+          <span class="detail-value mono text2">{{ block.previous_hash }}</span>
         </div>
-        <div class="detail-item">
-          <span class="label">Previous Hash</span>
-          <span class="value monospace">{{ block.previous_hash }}</span>
+        <div class="detail-row">
+          <span class="detail-label">Miner</span>
+          <span
+            class="detail-value mono accent-text clickable"
+            @click="$router.push(`/address/${block.miner}`)"
+          >{{ block.miner }}</span>
         </div>
-        <div class="detail-item">
-          <span class="label">Miner</span>
-          <span class="value">{{ block.miner }}</span>
+        <div class="detail-row">
+          <span class="detail-label">Timestamp</span>
+          <span class="detail-value">{{ formatTime(block.timestamp) }}</span>
         </div>
-        <div class="detail-item">
-          <span class="label">Timestamp</span>
-          <span class="value">{{ formatTime(block.timestamp) }}</span>
+        <div class="detail-row">
+          <span class="detail-label">Transactions</span>
+          <span class="detail-value"><span class="badge-count">{{ block.transactions }}</span></span>
         </div>
-        <div class="detail-item">
-          <span class="label">Transactions</span>
-          <span class="value">{{ block.transactions }}</span>
+        <div class="detail-row">
+          <span class="detail-label">Difficulty</span>
+          <span class="detail-value"><span class="diff-badge">{{ block.difficulty }}</span></span>
         </div>
-        <div class="detail-item">
-          <span class="label">Difficulty</span>
-          <span class="value">{{ block.difficulty }}</span>
+        <div class="detail-row">
+          <span class="detail-label">Nonce</span>
+          <span class="detail-value mono text2">{{ block.nonce }}</span>
         </div>
-        <div class="detail-item">
-          <span class="label">Nonce</span>
-          <span class="value">{{ block.nonce }}</span>
+        <div class="detail-row">
+          <span class="detail-label">Confirmations</span>
+          <span class="detail-value">{{ block.confirmations }}</span>
         </div>
-      </div>
-
-      <div class="actions">
-        <button @click="goToBlocks" class="btn btn-primary">
-          View All Blocks
-        </button>
       </div>
     </div>
-    <div v-else class="loading">Loading...</div>
+    <div v-else class="empty"><span class="spin">⟳</span> Loading block...</div>
   </div>
 </template>
 
 <script>
 import { explorerAPI } from "../api/explorer";
-
 export default {
   name: "BlockDetail",
-  data() {
-    return {
-      block: null,
-    };
-  },
-  mounted() {
-    this.fetchBlock();
-  },
+  data() { return { block: null }; },
+  mounted() { this.fetch(); },
   methods: {
-    async fetchBlock() {
+    async fetch() {
       try {
-        const height = this.$route.params.height;
-        const res = await explorerAPI.getBlockByHeight(height);
+        const h = this.$route.params.height;
+        const res = /^[A-Fa-f0-9]{60,}$/.test(h)
+          ? await explorerAPI.getBlockByHash(h)
+          : await explorerAPI.getBlockByHeight(h);
         this.block = res.data;
-      } catch (error) {
-        console.error("Failed to load block:", error);
-      }
+      } catch (e) { console.error(e); }
     },
-    formatTime(timestamp) {
-      const date = new Date(timestamp);
-      return date.toLocaleString("ko-KR");
-    },
-    getConfirmationClass(confirmations) {
-      if (confirmations === 0) return 'status-unconfirmed';
-      if (confirmations < 6) return 'status-pending';
-      return 'status-confirmed';
-    },
-    getConfirmationStatus(confirmations) {
-      if (confirmations === 0) return '(Unconfirmed)';
-      if (confirmations < 6) return '(Low Confidence)';
-      return '(Confirmed)';
-    },
-    goToBlocks() {
-      this.$router.push("/blocks");
-    },
+    formatTime(ts) { return new Date(ts).toLocaleString("ko-KR"); },
   },
 };
 </script>
 
 <style scoped>
-.block-detail-page {
-  background: white;
-  padding: 2rem;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+.page { width: 100%; }
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
 }
 
-h1 {
-  margin-bottom: 2rem;
-  color: #667eea;
+h1 { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+.accent-text { color: var(--accent); }
+
+.back-btn {
+  padding: 0.35rem 0.9rem;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  color: var(--text2);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
 }
+.back-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.confirm-badge {
+  padding: 4px 12px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.confirm-badge.confirmed { background: rgba(16,185,129,.12); color: var(--green); }
+.confirm-badge.low { background: rgba(245,158,11,.12); color: var(--yellow); }
+.confirm-badge.unconfirmed { background: rgba(239,68,68,.12); color: var(--red); }
 
 .detail-grid {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.detail-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 2rem;
-  margin-bottom: 2rem;
-}
-
-.detail-item {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 1rem;
-  background-color: #f8f9ff;
-  border-radius: 8px;
-  border-left: 4px solid #667eea;
-}
-
-.label {
-  font-size: 0.9rem;
-  color: #666;
-  font-weight: bold;
-}
-
-.value {
-  word-break: break-all;
-  color: #333;
-}
-
-.monospace {
-  font-family: "Courier New", monospace;
-  font-size: 0.85rem;
-}
-
-.status-unconfirmed {
-  color: #e74c3c;
-  font-weight: bold;
-}
-
-.status-pending {
-  color: #f39c12;
-  font-weight: bold;
-}
-
-.status-confirmed {
-  color: #27ae60;
-  font-weight: bold;
-}
-
-.actions {
-  display: flex;
+  grid-template-columns: 200px 1fr;
+  padding: 0.875rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  align-items: start;
   gap: 1rem;
 }
+.detail-row:last-child { border-bottom: none; }
 
-.btn {
-  padding: 0.75rem 1.5rem;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  font-weight: bold;
-  transition: all 0.3s;
+.detail-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding-top: 2px;
 }
 
-.btn-primary {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
+.detail-value {
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-all;
 }
 
-.btn-primary:hover {
-  transform: scale(1.05);
+.mono { font-family: var(--mono); font-size: 12px; }
+.text2 { color: var(--text2); }
+.clickable { cursor: pointer; }
+.clickable:hover { text-decoration: underline; }
+
+.badge-count {
+  background: rgba(59,130,246,.1);
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
 }
 
-.loading {
+.diff-badge {
+  background: rgba(139,92,246,.1);
+  color: #a78bfa;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.empty {
+  padding: 4rem;
   text-align: center;
-  padding: 3rem;
-  color: #999;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.spin {
+  display: inline-block;
+  animation: spin 1.5s linear infinite;
+  margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 640px) {
+  .detail-row { grid-template-columns: 1fr; gap: 0.25rem; }
 }
 </style>

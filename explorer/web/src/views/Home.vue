@@ -1,100 +1,128 @@
 <template>
-  <div class="home-page">
+  <div class="home">
+    <!-- Hero -->
     <div class="hero">
-      <h1>Astram Blockchain Explorer</h1>
-      <p>Real-time blockchain monitoring</p>
+      <div class="hero-bg"></div>
+      <div class="hero-grid"></div>
+      <div class="hero-content">
+        <div class="hero-badge">
+          <span class="badge-dot"></span>
+          Astram Blockchain — Blake3-DAG Proof of Work
+        </div>
+        <h1>Astram <span class="hero-accent">Explorer</span></h1>
+        <p class="hero-sub">Real-time blockchain monitoring for the Astram network</p>
+        <div class="search-box">
+          <input
+            v-model="searchQuery"
+            type="text"
+            placeholder="Search block height, tx hash, or address..."
+            @keyup.enter="handleSearch"
+          />
+          <button @click="handleSearch">Search</button>
+        </div>
+      </div>
     </div>
 
-    <div class="search-box">
-      <input
-        v-model="searchQuery"
-        type="text"
-        placeholder="Search by block height, transaction hash, or address..."
-        @keyup.enter="handleSearch"
-      />
-      <button @click="handleSearch">Search</button>
-    </div>
-
+    <!-- Stats Grid -->
     <div v-if="stats" class="stats-grid">
       <div class="stat-card">
-        <div class="stat-icon">&#x25A0;</div>
         <div class="stat-label">Total Blocks</div>
         <div class="stat-value">{{ stats.total_blocks.toLocaleString() }}</div>
+        <div class="stat-sub">confirmed blocks</div>
       </div>
       <div class="stat-card">
-        <div class="stat-icon">&#x21C6;</div>
-        <div class="stat-label">Total Transactions</div>
+        <div class="stat-label">Transactions</div>
         <div class="stat-value">{{ stats.total_transactions.toLocaleString() }}</div>
+        <div class="stat-sub">all time</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-icon">&#x25CB;</div>
-        <div class="stat-label">Total Volume</div>
-        <div class="stat-value">{{ formatVolumeAmount(stats.total_volume) }} <span class="stat-unit">ASRM</span></div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-icon">&#x26A1;</div>
+      <div class="stat-card accent-card">
         <div class="stat-label">Network Hashrate</div>
         <div class="stat-value">{{ stats.network_hashrate }}</div>
+        <div class="stat-sub">current pool</div>
       </div>
       <div class="stat-card">
-        <div class="stat-icon">&#x1F464;</div>
+        <div class="stat-label">Difficulty</div>
+        <div class="stat-value">{{ stats.current_difficulty }}</div>
+        <div class="stat-sub">leading zeros</div>
+      </div>
+      <div class="stat-card">
         <div class="stat-label">Total Addresses</div>
         <div class="stat-value">{{ stats.total_addresses.toLocaleString() }}</div>
+        <div class="stat-sub">unique wallets</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-icon">&#x1FA99;</div>
+      <div class="stat-card green-card">
         <div class="stat-label">Circulating Supply</div>
-        <div class="stat-value">{{ formatVolumeAmount(stats.circulating_supply) }} <span class="stat-unit">ASRM</span></div>
+        <div class="stat-value">{{ formatVolumeAmount(stats.circulating_supply) }}</div>
+        <div class="stat-sub">ASRM mined</div>
       </div>
     </div>
+    <div v-else class="stats-placeholder">
+      <div class="stat-skeleton" v-for="i in 6" :key="i"></div>
+    </div>
 
-    <div class="recent-section">
-      <div class="section">
-        <h2>Recent Blocks</h2>
-        <div v-if="recentBlocks.length" class="blocks-list">
+    <!-- Recent Blocks & Transactions -->
+    <div class="recent-grid">
+      <!-- Recent Blocks -->
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Recent Blocks</h2>
+          <router-link to="/blocks" class="panel-link">View all →</router-link>
+        </div>
+        <div v-if="recentBlocks.length" class="list">
           <div
-            v-for="block in recentBlocks.slice(0, 5)"
+            v-for="block in recentBlocks.slice(0, 6)"
             :key="block.hash"
-            class="list-item"
-            @click="goToBlock(block.height)"
+            class="list-row"
+            @click="$router.push(`/blocks/${block.height}`)"
           >
-            <div class="item-header">
-              <span class="block-height">#{{ block.height }}</span>
-              <span class="timestamp">{{ formatTime(block.timestamp) }}</span>
+            <div class="row-icon block-icon">⬛</div>
+            <div class="row-main">
+              <span class="row-title accent-text">#{{ block.height }}</span>
+              <span class="row-sub">{{ truncateHash(block.hash) }}</span>
             </div>
-            <div class="item-detail">
-              <span class="txs">{{ block.transactions }} txs</span>
-              <span class="miner">{{ truncateAddress(block.miner) }}</span>
+            <div class="row-right">
+              <span class="row-badge">{{ block.transactions }} txs</span>
+              <span class="row-time">{{ timeAgo(block.timestamp) }}</span>
             </div>
           </div>
         </div>
-        <div v-else class="loading">Loading data...</div>
+        <div v-else class="panel-empty">
+          <span class="spin">⟳</span> Loading blocks...
+        </div>
       </div>
 
-      <div class="section">
-        <h2>Recent Transactions</h2>
-        <div v-if="recentTransactions.length" class="transactions-list">
+      <!-- Recent Transactions -->
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Recent Transactions</h2>
+          <router-link to="/transactions" class="panel-link">View all →</router-link>
+        </div>
+        <div v-if="recentTransactions.length" class="list">
           <div
-            v-for="tx in recentTransactions.slice(0, 5)"
+            v-for="tx in recentTransactions.slice(0, 6)"
             :key="tx.hash"
-            class="list-item"
-            @click="goToTransaction(tx.hash)"
+            class="list-row"
+            @click="$router.push(`/transactions/${tx.hash}`)"
           >
-            <div class="item-header">
-              <span class="tx-hash">
-                <span v-if="tx.from === 'Block_Reward'" class="tx-type-badge coinbase">Mining</span>
-                <span v-else class="tx-type-badge transfer">Transfer</span>
-                {{ truncateHash(tx.hash) }}
-              </span>
-              <span class="timestamp">{{ formatTime(tx.timestamp) }}</span>
+            <div class="row-icon" :class="tx.from === 'Block_Reward' ? 'mining-icon' : 'tx-icon'">
+              {{ tx.from === 'Block_Reward' ? '⛏' : '⇄' }}
             </div>
-            <div class="item-detail">
-              <span class="amount">{{ formatAmount(tx.amount) }} ASRM</span>
-              <span class="status" :class="tx.status">{{ tx.status }}</span>
+            <div class="row-main">
+              <span class="row-title accent-text">{{ truncateHash(tx.hash) }}</span>
+              <span class="row-sub">
+                <span v-if="tx.from === 'Block_Reward'" class="badge-mining">Mining Reward</span>
+                <span v-else>{{ truncateAddr(tx.from) }} → {{ truncateAddr(tx.to) }}</span>
+              </span>
+            </div>
+            <div class="row-right">
+              <span class="row-amount green-text">{{ formatAmount(tx.amount) }} ASRM</span>
+              <span class="row-time">{{ timeAgo(tx.timestamp) }}</span>
             </div>
           </div>
         </div>
-        <div v-else class="loading">Loading data...</div>
+        <div v-else class="panel-empty">
+          <span class="spin">⟳</span> Loading transactions...
+        </div>
       </div>
     </div>
   </div>
@@ -115,7 +143,6 @@ export default {
   },
   mounted() {
     this.fetchData();
-    // Auto-refresh every 10 seconds
     setInterval(() => this.fetchData(), 10000);
   },
   methods: {
@@ -126,367 +153,398 @@ export default {
           explorerAPI.getBlocks(1, 10),
           explorerAPI.getTransactions(1, 10),
         ]);
-
         this.stats = statsRes.data;
         this.recentBlocks = blocksRes.data.blocks || [];
         this.recentTransactions = txsRes.data.transactions || [];
-      } catch (error) {
-        console.error("Failed to load data:", error);
+      } catch (e) {
+        console.error("Failed to load data:", e);
       }
     },
     async handleSearch() {
-      if (!this.searchQuery.trim()) return;
-
       const query = this.searchQuery.trim();
-
-      // Block height search (numeric)
-      if (/^\d+$/.test(query)) {
-        this.$router.push(`/blocks/${query}`);
-        return;
-      }
-
-      // 64-char hex (with optional 0x) can be block hash or tx hash
-      const normalized = query.startsWith("0x") ? query.slice(2) : query;
-      const isHex64 = /^[A-Fa-f0-9]{64}$/.test(normalized);
-
+      if (!query) return;
+      if (/^\d+$/.test(query)) { this.$router.push(`/blocks/${query}`); return; }
+      const norm = query.startsWith("0x") ? query.slice(2) : query;
+      const isHex64 = /^[A-Fa-f0-9]{64}$/.test(norm);
       if (isHex64) {
-        // Use query as-is (backend handles 0x normalization)
-        const hashQuery = query;
-
-        try {
-          await explorerAPI.getBlockByHash(hashQuery);
-          this.$router.push(`/blocks/${hashQuery}`);
-          return;
-        } catch (error) {
-          if (error?.response?.status !== 404) {
-            console.error("Block hash lookup failed:", error);
-          }
-        }
-
-        try {
-          await explorerAPI.getTransactionByHash(hashQuery);
-          this.$router.push(`/transactions/${hashQuery}`);
-          return;
-        } catch (error) {
-          if (error?.response?.status !== 404) {
-            console.error("Transaction hash lookup failed:", error);
-          }
-        }
-
-        // If hash-shaped but not found as block/tx, show tx detail (not found message handled there)
-        this.$router.push(`/transactions/${hashQuery}`);
-        return;
+        try { await explorerAPI.getBlockByHash(query); this.$router.push(`/blocks/${query}`); return; } catch {}
+        try { await explorerAPI.getTransactionByHash(query); this.$router.push(`/transactions/${query}`); return; } catch {}
+        this.$router.push(`/transactions/${query}`); return;
       }
-
-      // Fallback to address search
       this.$router.push(`/address/${query}`);
-      return;
-
-    },
-    goToBlock(height) {
-      this.$router.push(`/blocks/${height}`);
-    },
-    goToTransaction(hash) {
-      this.$router.push(`/transactions/${hash}`);
-    },
-    formatTime(timestamp) {
-      const date = new Date(timestamp);
-      return date.toLocaleString("ko-KR");
     },
     formatAmount(value) {
-      // Handle hex string (0x...), decimal string, number, and U256 array format
-      let num;
-      
-      if (Array.isArray(value)) {
-        num = BigInt(value[0]) + (BigInt(value[1]) << BigInt(64)) +
-              (BigInt(value[2]) << BigInt(128)) + (BigInt(value[3]) << BigInt(192));
-      } else if (typeof value === "string") {
-        if (value.startsWith("0x")) {
-          num = BigInt(value);
-        } else {
-          num = BigInt(value);
-        }
-      } else {
-        num = BigInt(value || 0);
-      }
-
-      const divisor = BigInt("1000000000000000000"); // 10^18
-      const ASRM = Number(num) / Number(divisor);
-
-      return ASRM.toLocaleString("en-US", {
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 6,
-      });
+      try {
+        let num = typeof value === "string" ? BigInt(value) : BigInt(value || 0);
+        const d = BigInt("1000000000000000000");
+        return (Number(num) / Number(d)).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 });
+      } catch { return "0"; }
     },
     formatVolumeAmount(value) {
-      // Display total volume (integer units)
-      let num;
-      
-      if (Array.isArray(value)) {
-        num = BigInt(value[0]) + (BigInt(value[1]) << BigInt(64)) +
-              (BigInt(value[2]) << BigInt(128)) + (BigInt(value[3]) << BigInt(192));
-      } else if (typeof value === "string") {
-        if (value.startsWith("0x")) {
-          num = BigInt(value);
-        } else {
-          num = BigInt(value);
-        }
-      } else {
-        num = BigInt(value || 0);
-      }
-
-      const divisor = BigInt("1000000000000000000"); // 10^18
-      const ASRM = Math.floor(Number(num) / Number(divisor));
-
-      return ASRM.toLocaleString("en-US");
+      try {
+        let num = typeof value === "string" ? BigInt(value) : BigInt(value || 0);
+        const d = BigInt("1000000000000000000");
+        return Math.floor(Number(num) / Number(d)).toLocaleString("en-US");
+      } catch { return "0"; }
     },
     truncateHash(hash) {
-      return hash.substring(0, 8) + "..." + hash.substring(hash.length - 8);
+      if (!hash) return "";
+      return hash.slice(0, 8) + "…" + hash.slice(-6);
     },
-    truncateAddress(address) {
-      return (
-        address.substring(0, 8) + "..." + address.substring(address.length - 8)
-      );
+    truncateAddr(addr) {
+      if (!addr) return "";
+      if (addr === "Block_Reward") return addr;
+      return addr.slice(0, 8) + "…" + addr.slice(-4);
+    },
+    timeAgo(ts) {
+      const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+      if (diff < 60) return diff + "s ago";
+      if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+      if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+      return Math.floor(diff / 86400) + "d ago";
     },
   },
 };
 </script>
 
 <style scoped>
-.home-page {
-  width: 100%;
+/* ── Hero ── */
+.hero {
+  position: relative;
+  text-align: center;
+  padding: 5rem 1rem 4rem;
+  margin: -2rem -2rem 2rem;
+  overflow: hidden;
 }
 
-.hero {
-  text-align: center;
-  margin-bottom: 3rem;
-  color: #333;
+.hero-bg {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% -10%, rgba(59,130,246,.16) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 40% at 80% 80%, rgba(139,92,246,.1) 0%, transparent 60%);
+}
+
+.hero-grid {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(59,130,246,.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(59,130,246,.04) 1px, transparent 1px);
+  background-size: 50px 50px;
+}
+
+.hero-content {
+  position: relative;
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(59,130,246,.1);
+  border: 1px solid rgba(59,130,246,.25);
+  border-radius: 100px;
+  padding: 5px 16px;
+  font-size: 12px;
+  color: var(--accent);
+  margin-bottom: 1.5rem;
+}
+
+.badge-dot {
+  width: 6px; height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--accent);
+  animation: pulse-dot 2s infinite;
+}
+
+@keyframes pulse-dot {
+  0%,100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .hero h1 {
-  font-size: 2.5rem;
-  margin-bottom: 0.5rem;
-  color: #667eea;
+  font-size: 3rem;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.15;
+  margin-bottom: 0.75rem;
 }
 
-.hero p {
-  font-size: 1.1rem;
-  color: #666;
+.hero-accent { color: var(--accent); }
+
+.hero-sub {
+  color: var(--text2);
+  font-size: 1rem;
+  margin-bottom: 2rem;
 }
 
 .search-box {
   display: flex;
-  gap: 1rem;
-  margin-bottom: 3rem;
+  gap: 0;
+  max-width: 580px;
+  margin: 0 auto;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
 }
 
 .search-box input {
   flex: 1;
-  padding: 0.75rem 1rem;
-  border: 2px solid #ddd;
-  border-radius: 8px;
-  font-size: 1rem;
-  transition: border-color 0.3s;
+  padding: 0.75rem 1.25rem;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
 }
 
-.search-box input:focus {
-  outline: none;
-  border-color: #667eea;
-}
+.search-box input::placeholder { color: var(--muted); }
 
 .search-box button {
-  padding: 0.75rem 2rem;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
+  padding: 0.75rem 1.5rem;
+  background: var(--accent);
+  color: #fff;
   border: none;
-  border-radius: 8px;
   cursor: pointer;
-  font-weight: bold;
-  transition: transform 0.2s;
+  font-weight: 600;
+  font-size: 14px;
+  transition: background 0.2s;
 }
 
-.search-box button:hover {
-  transform: scale(1.05);
-}
+.search-box button:hover { background: #2563eb; }
 
+/* ── Stats ── */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 1.25rem;
-  margin-bottom: 3rem;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  margin-bottom: 2rem;
 }
 
 .stat-card {
-  background: white;
-  padding: 1.5rem;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  background: var(--surface);
+  padding: 1.5rem 1.25rem;
   text-align: center;
-  transition: transform 0.2s, box-shadow 0.2s;
+  transition: background 0.2s;
 }
 
-.stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.2);
-}
+.stat-card:hover { background: var(--surface2); }
 
-.stat-icon {
-  font-size: 1.5rem;
-  margin-bottom: 0.5rem;
-}
+.accent-card { background: rgba(59,130,246,.07); }
+.accent-card:hover { background: rgba(59,130,246,.12); }
+.green-card { background: rgba(16,185,129,.06); }
+.green-card:hover { background: rgba(16,185,129,.1); }
 
 .stat-label {
-  color: #666;
-  font-size: 0.85rem;
-  margin-bottom: 0.4rem;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
+  color: var(--text2);
+  margin-bottom: 0.4rem;
 }
 
 .stat-value {
-  font-size: 1.6rem;
-  font-weight: bold;
-  color: #667eea;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
   word-break: break-word;
 }
 
-.stat-unit {
-  font-size: 0.8rem;
-  font-weight: normal;
-  color: #999;
+.accent-card .stat-value { color: var(--accent); }
+.green-card .stat-value { color: var(--green); }
+
+.stat-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 0.25rem;
 }
 
-.recent-section {
+.stats-placeholder {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-  gap: 2rem;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  margin-bottom: 2rem;
 }
 
-.section {
-  background: white;
-  padding: 2rem;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+.stat-skeleton {
+  background: var(--surface);
+  height: 90px;
+  animation: shimmer 1.5s infinite;
 }
 
-.section h2 {
-  margin-bottom: 1.5rem;
-  color: #333;
-  border-bottom: 2px solid #667eea;
-  padding-bottom: 0.5rem;
+@keyframes shimmer {
+  0%,100% { opacity: 0.6; }
+  50% { opacity: 1; }
 }
 
-.blocks-list,
-.transactions-list {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+/* ── Recent Grid ── */
+.recent-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
 }
 
-.list-item {
-  padding: 1rem;
-  border: 1px solid #eee;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.3s;
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
 }
 
-.list-item:hover {
-  background-color: #f8f9ff;
-  border-color: #667eea;
-  transform: translateX(4px);
-}
-
-.item-header {
+.panel-header {
   display: flex;
   justify-content: space-between;
-  margin-bottom: 0.5rem;
-  font-weight: bold;
+  align-items: center;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
 }
 
-.block-height,
-.tx-hash {
-  color: #667eea;
+.panel-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.panel-link {
+  font-size: 12px;
+  color: var(--text2);
+  transition: color 0.2s;
+}
+
+.panel-link:hover { color: var(--accent); }
+
+.list { display: flex; flex-direction: column; }
+
+.list-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.75rem;
+  padding: 0.875rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.15s;
 }
 
-.tx-type-badge {
-  font-size: 0.75rem;
-  padding: 0.2rem 0.5rem;
-  border-radius: 4px;
-  font-weight: bold;
-}
+.list-row:last-child { border-bottom: none; }
+.list-row:hover { background: var(--surface2); }
 
-.tx-type-badge.coinbase {
-  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-  color: white;
-}
-
-.tx-type-badge.transfer {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-}
-
-.timestamp {
-  color: #999;
-  font-size: 0.9rem;
-}
-
-.item-detail {
+.row-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   display: flex;
-  justify-content: space-between;
-  font-size: 0.9rem;
-  color: #666;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
 }
 
-.txs,
-.amount {
-  color: #764ba2;
+.block-icon { background: rgba(59,130,246,.12); }
+.mining-icon { background: rgba(245,158,11,.12); }
+.tx-icon { background: rgba(139,92,246,.12); }
+
+.row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.miner,
-.status {
-  color: #999;
+.row-title {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--mono);
 }
 
-.status.confirmed {
-  color: #10b981;
-  font-weight: bold;
+.row-sub {
+  font-size: 11px;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.status.pending {
-  color: #f59e0b;
-  font-weight: bold;
+.row-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
 }
 
-.loading {
+.row-badge {
+  font-size: 11px;
+  background: rgba(59,130,246,.12);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.row-amount {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.row-time {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.badge-mining {
+  background: rgba(245,158,11,.15);
+  color: var(--yellow);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.accent-text { color: var(--accent); }
+.green-text { color: var(--green); }
+
+.panel-empty {
+  padding: 3rem;
   text-align: center;
-  padding: 2rem;
-  color: #999;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.spin {
+  display: inline-block;
+  animation: spin 1.5s linear infinite;
+  margin-right: 6px;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@media (max-width: 1200px) {
+  .stats-grid, .stats-placeholder {
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
 
 @media (max-width: 768px) {
-  .hero h1 {
-    font-size: 1.8rem;
-  }
+  .hero { padding: 3rem 1rem 2.5rem; margin: -1rem -1rem 1.5rem; }
+  .hero h1 { font-size: 2rem; }
+  .stats-grid, .stats-placeholder { grid-template-columns: repeat(2, 1fr); }
+  .recent-grid { grid-template-columns: 1fr; }
+}
 
-  .search-box {
-    flex-direction: column;
-  }
-
-  .search-box button {
-    width: 100%;
-  }
-
-  .stats-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .recent-section {
-    grid-template-columns: 1fr;
-  }
+@media (max-width: 480px) {
+  .stats-grid, .stats-placeholder { grid-template-columns: 1fr 1fr; }
 }
 </style>
-
