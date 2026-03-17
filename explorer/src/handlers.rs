@@ -169,20 +169,28 @@ pub async fn get_blockchain_stats(
     match db.get_stats() {
         Ok((total_blocks, total_transactions, total_volume)) => {
             let average_block_time = db.compute_avg_block_time(50).unwrap_or(0.0);
-            let current_difficulty = db
-                .get_latest_block()
-                .ok()
-                .flatten()
-                .map(|b| b.difficulty)
-                .unwrap_or(1);
+            let latest_block = db.get_latest_block().ok().flatten();
+            let current_difficulty = latest_block.as_ref().map(|b| b.difficulty).unwrap_or(1);
+
+            // 선행 0 nibble 수를 블록 해시 문자열에서 직접 카운트
+            // block.header.difficulty 는 compact bits 값이어서 직접 사용 불가
+            let nibble_difficulty = latest_block
+                .as_ref()
+                .map(|b| {
+                    let hash = b.hash.trim_start_matches("0x");
+                    hash.chars().take_while(|c| *c == '0').count() as u32
+                })
+                .unwrap_or(1)
+                .max(1);
+
             let total_addresses = db.get_address_count().unwrap_or(0);
             let circulating_supply = db.get_circulating_supply().unwrap_or_default();
 
             // 네트워크 전체 해시레이트 추정 (블록체인 데이터 기반)
-            // 공식: 16^difficulty / 평균_블록_시간(초)
-            // difficulty = 선행 0 nibble 수 → 유효 해시 확률 = 1/16^difficulty
+            // 공식: 16^nibbles / 평균_블록_시간(초)
+            // nibble 선행 0 개수 n → 유효 해시 확률 = 1/16^n
             let network_hashrate = if average_block_time > 0.0 {
-                let expected_hashes = 16f64.powi(current_difficulty as i32);
+                let expected_hashes = 16f64.powi(nibble_difficulty as i32);
                 format_hashrate(expected_hashes / average_block_time)
             } else {
                 "—".to_string()
