@@ -1,4 +1,4 @@
-use crate::state::{AddressInfo, BlockInfo, TransactionInfo};
+use crate::state::{AddressInfo, BlockInfo, RichListEntry, TransactionInfo};
 use anyhow::Result;
 use log::info;
 use primitive_types::U256;
@@ -145,6 +145,51 @@ impl ExplorerDB {
                 self.db.write(batch)?;
                 info!("🔧 Migration: set last_height={}, corrected block_count={}", max_height, actual_count);
             }
+        }
+
+        // One-time migration: build meta:circulating_supply from existing coinbase TXs
+        if self.db.get(b"meta:supply_migrated")?.is_none() {
+            info!("🔧 Migrating circulating supply from coinbase transactions...");
+            let mut supply = U256::zero();
+            let mut iter = self.db.raw_iterator();
+            iter.seek(b"t:");
+            while iter.valid() {
+                if let Some(key) = iter.key() {
+                    if !key.starts_with(b"t:") { break; }
+                    if let Some(value) = iter.value() {
+                        if let Ok(tx) = serde_json::from_slice::<TransactionInfo>(value) {
+                            if tx.from == "Block_Reward" {
+                                supply += tx.amount;
+                            }
+                        }
+                    }
+                }
+                iter.next();
+            }
+            let mut batch = WriteBatch::default();
+            batch.put(b"meta:circulating_supply", supply.to_string().as_bytes());
+            batch.put(b"meta:supply_migrated", b"1");
+            self.db.write(batch)?;
+            info!("🔧 Migration complete: circulating_supply={}", supply);
+        }
+
+        // One-time migration: build meta:address_count from existing addr: records
+        if self.db.get(b"meta:addr_count_migrated")?.is_none() {
+            let mut count = 0u64;
+            let mut iter = self.db.raw_iterator();
+            iter.seek(b"addr:");
+            while iter.valid() {
+                if let Some(key) = iter.key() {
+                    if !key.starts_with(b"addr:") { break; }
+                    count += 1;
+                }
+                iter.next();
+            }
+            let mut batch = WriteBatch::default();
+            batch.put(b"meta:address_count", count.to_string().as_bytes());
+            batch.put(b"meta:addr_count_migrated", b"1");
+            self.db.write(batch)?;
+            info!("🔧 Migration complete: address_count={}", count);
         }
 
         // One-time migration: build ti: time-index and meta:total_volume from existing t: records
@@ -369,6 +414,12 @@ impl ExplorerDB {
             let current_volume = self.get_total_volume().unwrap_or(U256::zero());
             let new_volume = current_volume + tx.amount;
             batch.put(b"meta:total_volume", new_volume.to_string().as_bytes());
+
+            // meta:circulating_supply 누적 (coinbase TX만)
+            if tx.from == "Block_Reward" {
+                let current_supply = self.get_circulating_supply().unwrap_or(U256::zero());
+                batch.put(b"meta:circulating_supply", (current_supply + tx.amount).to_string().as_bytes());
+            }
         }
 
         self.db.write(batch)?;
@@ -485,8 +536,15 @@ impl ExplorerDB {
     /// Key: addr:<address> -> AddressInfo
     pub fn save_address_info(&self, info: &AddressInfo) -> Result<()> {
         let key = format!("addr:{}", info.address);
+        let is_new = self.db.get(key.as_bytes())?.is_none();
+        let mut batch = WriteBatch::default();
         let json = serde_json::to_string(info)?;
-        self.db.put(key.as_bytes(), json.as_bytes())?;
+        batch.put(key.as_bytes(), json.as_bytes());
+        if is_new {
+            let current_count = self.get_address_count().unwrap_or(0);
+            batch.put(b"meta:address_count", (current_count + 1).to_string().as_bytes());
+        }
+        self.db.write(batch)?;
         Ok(())
     }
 
@@ -622,6 +680,75 @@ impl ExplorerDB {
         let tx_count = self.get_transaction_count()?;
         let total_volume = self.get_total_volume()?;
         Ok((block_count, tx_count, total_volume))
+    }
+
+    /// 총 주소 수 조회
+    pub fn get_address_count(&self) -> Result<u64> {
+        match self.db.get(b"meta:address_count")? {
+            Some(data) => Ok(String::from_utf8(data.to_vec())?.parse()?),
+            None => Ok(0),
+        }
+    }
+
+    /// 발행된 총 코인 공급량 조회
+    pub fn get_circulating_supply(&self) -> Result<U256> {
+        match self.db.get(b"meta:circulating_supply")? {
+            Some(data) => {
+                let s = String::from_utf8(data.to_vec())?;
+                Ok(U256::from_dec_str(&s).unwrap_or(U256::zero()))
+            }
+            None => Ok(U256::zero()),
+        }
+    }
+
+    /// 부자 리스트 조회: 잔액 기준 상위 N개 주소
+    pub fn get_richlist(&self, limit: usize) -> Result<Vec<RichListEntry>> {
+        let total_supply = self.get_circulating_supply().unwrap_or(U256::zero());
+
+        // Scan all addr: keys
+        let mut entries: Vec<(String, U256)> = Vec::new();
+        let mut iter = self.db.raw_iterator();
+        iter.seek(b"addr:");
+        while iter.valid() {
+            if let Some(key) = iter.key() {
+                if !key.starts_with(b"addr:") { break; }
+                if let Some(value) = iter.value() {
+                    if let Ok(info) = serde_json::from_slice::<AddressInfo>(value) {
+                        if info.balance > U256::zero() {
+                            entries.push((info.address, info.balance));
+                        }
+                    }
+                }
+            }
+            iter.next();
+        }
+
+        // Sort by balance descending
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.truncate(limit);
+
+        let supply_f64 = if total_supply.is_zero() {
+            1.0f64
+        } else {
+            // Use u128 for precision (supply fits within u128 for practical amounts)
+            total_supply.low_u128() as f64
+        };
+
+        let result = entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, (address, balance))| {
+                let pct = balance.low_u128() as f64 / supply_f64 * 100.0;
+                RichListEntry {
+                    rank: i + 1,
+                    address,
+                    balance,
+                    percentage: (pct * 100.0).round() / 100.0,
+                }
+            })
+            .collect();
+
+        Ok(result)
     }
 
     /// 데이터베이스 초기화 (재동기화용)

@@ -99,6 +99,7 @@ async fn main() -> std::io::Result<()> {
                         web::get().to(handlers::get_transaction_by_hash),
                     )
                     .route("/stats", web::get().to(handlers::get_blockchain_stats))
+                    .route("/richlist", web::get().to(handlers::get_richlist))
                     .route(
                         "/address/{address}",
                         web::get().to(handlers::get_address_info),

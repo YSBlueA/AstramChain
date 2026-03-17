@@ -69,4 +69,16 @@ pub struct BlockchainStats {
     pub average_block_size: usize,
     pub current_difficulty: u32,
     pub network_hashrate: String,
+    pub total_addresses: u64,
+    #[serde(serialize_with = "serialize_u256_as_hex")]
+    pub circulating_supply: U256,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RichListEntry {
+    pub rank: usize,
+    pub address: String,
+    #[serde(serialize_with = "serialize_u256_as_hex")]
+    pub balance: U256,
+    pub percentage: f64,
 }

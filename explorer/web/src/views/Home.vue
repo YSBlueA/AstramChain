@@ -17,18 +17,34 @@
 
     <div v-if="stats" class="stats-grid">
       <div class="stat-card">
+        <div class="stat-icon">&#x25A0;</div>
         <div class="stat-label">Total Blocks</div>
-        <div class="stat-value">{{ stats.total_blocks }}</div>
+        <div class="stat-value">{{ stats.total_blocks.toLocaleString() }}</div>
       </div>
       <div class="stat-card">
+        <div class="stat-icon">&#x21C6;</div>
         <div class="stat-label">Total Transactions</div>
-        <div class="stat-value">{{ stats.total_transactions }}</div>
+        <div class="stat-value">{{ stats.total_transactions.toLocaleString() }}</div>
       </div>
       <div class="stat-card">
+        <div class="stat-icon">&#x25CB;</div>
         <div class="stat-label">Total Volume</div>
-        <div class="stat-value">
-          {{ formatVolumeAmount(stats.total_volume) }}
-        </div>
+        <div class="stat-value">{{ formatVolumeAmount(stats.total_volume) }} <span class="stat-unit">ASRM</span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">&#x26A1;</div>
+        <div class="stat-label">Network Hashrate</div>
+        <div class="stat-value">{{ stats.network_hashrate }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">&#x1F464;</div>
+        <div class="stat-label">Total Addresses</div>
+        <div class="stat-value">{{ stats.total_addresses.toLocaleString() }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">&#x1FA99;</div>
+        <div class="stat-label">Circulating Supply</div>
+        <div class="stat-value">{{ formatVolumeAmount(stats.circulating_supply) }} <span class="stat-unit">ASRM</span></div>
       </div>
     </div>
 
@@ -295,29 +311,49 @@ export default {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1.25rem;
   margin-bottom: 3rem;
 }
 
 .stat-card {
   background: white;
-  padding: 2rem;
+  padding: 1.5rem;
   border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   text-align: center;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.2);
+}
+
+.stat-icon {
+  font-size: 1.5rem;
+  margin-bottom: 0.5rem;
 }
 
 .stat-label {
   color: #666;
-  font-size: 0.9rem;
-  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  margin-bottom: 0.4rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .stat-value {
-  font-size: 2rem;
+  font-size: 1.6rem;
   font-weight: bold;
   color: #667eea;
+  word-break: break-word;
+}
+
+.stat-unit {
+  font-size: 0.8rem;
+  font-weight: normal;
+  color: #999;
 }
 
 .recent-section {

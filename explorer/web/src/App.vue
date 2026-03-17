@@ -7,6 +7,7 @@
           <li><router-link to="/">Home</router-link></li>
           <li><router-link to="/blocks">Blocks</router-link></li>
           <li><router-link to="/transactions">Transactions</router-link></li>
+          <li><router-link to="/richlist">Rich List</router-link></li>
         </ul>
       </div>
     </nav>

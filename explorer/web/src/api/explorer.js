@@ -56,4 +56,9 @@ export const explorerAPI = {
   getNodeStatus() {
     return axios.get(`${API_BASE_URL}/node/status`)
   },
+
+  // Rich list
+  getRichlist(limit = 50) {
+    return axios.get(`${API_BASE_URL}/richlist`, { params: { limit } })
+  },
 }

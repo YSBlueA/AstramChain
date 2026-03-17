@@ -163,7 +163,10 @@ pub async fn get_transaction_by_hash(
 }
 
 // 블록체인 통계 조회
-pub async fn get_blockchain_stats(db: web::Data<Arc<ExplorerDB>>) -> HttpResponse {
+pub async fn get_blockchain_stats(
+    db: web::Data<Arc<ExplorerDB>>,
+    rpc: web::Data<Arc<NodeRpcClient>>,
+) -> HttpResponse {
     match db.get_stats() {
         Ok((total_blocks, total_transactions, total_volume)) => {
             let average_block_time = db.compute_avg_block_time(50).unwrap_or(0.0);
@@ -173,6 +176,12 @@ pub async fn get_blockchain_stats(db: web::Data<Arc<ExplorerDB>>) -> HttpRespons
                 .flatten()
                 .map(|b| b.difficulty)
                 .unwrap_or(1);
+            let total_addresses = db.get_address_count().unwrap_or(0);
+            let circulating_supply = db.get_circulating_supply().unwrap_or_default();
+
+            // Fetch real hashrate from node
+            let hashrate_raw = rpc.fetch_hashrate().await.unwrap_or(0.0);
+            let network_hashrate = format_hashrate(hashrate_raw);
 
             let stats = BlockchainStats {
                 total_blocks,
@@ -181,13 +190,56 @@ pub async fn get_blockchain_stats(db: web::Data<Arc<ExplorerDB>>) -> HttpRespons
                 average_block_time,
                 average_block_size: 250,
                 current_difficulty,
-                network_hashrate: "0.00 TH/s".to_string(),
+                network_hashrate,
+                total_addresses,
+                circulating_supply,
             };
 
             HttpResponse::Ok().json(stats)
         }
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
             "error": format!("Failed to fetch stats: {}", e)
+        })),
+    }
+}
+
+fn format_hashrate(h: f64) -> String {
+    if h >= 1e12 {
+        format!("{:.2} TH/s", h / 1e12)
+    } else if h >= 1e9 {
+        format!("{:.2} GH/s", h / 1e9)
+    } else if h >= 1e6 {
+        format!("{:.2} MH/s", h / 1e6)
+    } else if h >= 1e3 {
+        format!("{:.2} KH/s", h / 1e3)
+    } else {
+        format!("{:.2} H/s", h)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RichlistParams {
+    pub limit: Option<usize>,
+}
+
+// 부자 리스트 조회
+pub async fn get_richlist(
+    db: web::Data<Arc<ExplorerDB>>,
+    query: web::Query<RichlistParams>,
+) -> HttpResponse {
+    let limit = query.limit.unwrap_or(50).min(200);
+    match db.get_richlist(limit) {
+        Ok(entries) => {
+            let total_supply = db.get_circulating_supply().unwrap_or_default();
+            let count = entries.len();
+            HttpResponse::Ok().json(serde_json::json!({
+                "entries": entries,
+                "total_supply": format!("0x{:x}", total_supply),
+                "count": count,
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to fetch richlist: {}", e)
         })),
     }
 }

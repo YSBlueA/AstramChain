@@ -49,6 +49,21 @@ impl NodeRpcClient {
         }
     }
 
+    /// Fetch network hashrate from node status (H/s as f64)
+    pub async fn fetch_hashrate(&self) -> Result<f64, String> {
+        match self.fetch_status().await {
+            Ok(status) => {
+                let hashrate = status
+                    .get("mining")
+                    .and_then(|m| m.get("hashrate"))
+                    .and_then(|h| h.as_f64())
+                    .unwrap_or(0.0);
+                Ok(hashrate)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Lightweight counts endpoint
     #[allow(dead_code)]
     pub async fn fetch_counts(&self) -> Result<(u64, u64), String> {
