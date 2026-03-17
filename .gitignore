@@ -64,6 +64,7 @@ explorer/web/.env.*.local
 # === etc ===
 /out/
 /build/
+/dist/
 
 # == data ===
 explorer/explorer_data/
