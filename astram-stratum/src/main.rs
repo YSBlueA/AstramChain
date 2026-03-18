@@ -275,11 +275,21 @@ async fn build_template(
         .map(|p| p.tx.clone())
         .collect();
 
+    // Include pending transactions from the node mempool.
+    let mempool_txs = match client.fetch_mempool().await {
+        Ok(snapshot) => snapshot.txs,
+        Err(e) => {
+            log::warn!("[POOL] Failed to fetch mempool: {}", e);
+            Vec::new()
+        }
+    };
+
     let coinbase_value = base_reward;
     let coinbase = Transaction::coinbase(pool_address, coinbase_value).with_hashes();
 
     let mut all_txs = vec![coinbase];
     all_txs.extend(payout_txs);
+    all_txs.extend(mempool_txs);
 
     let txids: Vec<String> = all_txs.iter().map(|t| t.txid.clone()).collect();
     let merkle_root = compute_merkle_root(&txids);
