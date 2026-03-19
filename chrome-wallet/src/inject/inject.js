@@ -47,4 +47,4 @@ window.astramWallet = {
   },
 }
 
-console.log('Astram Wallet injected to page')
+console.log('AstramX Wallet injected to page')

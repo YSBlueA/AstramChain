@@ -1,6 +1,6 @@
 // Background Service Worker
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('Astram Wallet extension installed')
+  console.log('AstramX Wallet extension installed')
 })
 
 // Open side panel when extension icon is clicked

@@ -2,8 +2,7 @@ import React, { useState } from 'react'
 import { useWalletStore } from '@/store/wallet'
 import { decryptPrivateKey } from '@/utils/crypto'
 import '../styles/GetStarted.css'
-import astramLogo from '../../../assets/astram_logo.png'
-import chromeWalletLogo from '../../../assets/chrome_wallet_logo.png'
+import walletBg from '@/assets/chrome_wallet_logo_1024_1536.png'
 
 interface GetStartedProps {
   onCreateWallet: () => void
@@ -17,9 +16,7 @@ export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps)
   const [error, setError] = useState('')
 
   const handleUnlock = async () => {
-    if (!password || loading) {
-      return
-    }
+    if (!password || loading) return
 
     setError('')
     setLoading(true)
@@ -35,41 +32,34 @@ export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps)
       const { address, encryptedPrivateKey, salt, iv } = result.encryptedWallet
       const privateKey = decryptPrivateKey(encryptedPrivateKey, password, salt, iv)
 
-      initWallet({
-        address,
-        privateKey,
-        balance: '0',
-      })
-
+      initWallet({ address, privateKey, balance: '0' })
       onUnlockSuccess()
-    } catch (unlockError) {
+    } catch {
       setError('Invalid password')
     } finally {
       setLoading(false)
     }
   }
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') {
-      handleUnlock()
-    }
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') handleUnlock()
   }
 
   return (
-    <div className="get-started-container">
-      <div className="get-started-content">
-        <div className="logos">
-          <img src={astramLogo} alt="Astram" className="astram-logo" />
-          <img src={chromeWalletLogo} alt="Chrome Wallet" className="wallet-logo" />
-        </div>
+    <div
+      className="get-started-container"
+      style={{ backgroundImage: `url(${walletBg})` }}
+    >
+      <div className="get-started-overlay">
+        {error && <div className="gs-error">{error}</div>}
 
-        <div className="input-group">
+        <div className="gs-input-group">
           <input
             type="password"
             placeholder="Enter password"
             value={password}
-            onChange={(event) => {
-              setPassword(event.target.value)
+            onChange={(e) => {
+              setPassword(e.target.value)
               setError('')
             }}
             onKeyDown={handleKeyDown}
@@ -78,17 +68,19 @@ export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps)
           />
         </div>
 
-        {error && <div className="error-message">{error}</div>}
-
         <button
+          className="gs-btn-unlock"
           onClick={handleUnlock}
-          className="btn-unlock"
           disabled={loading || !password}
         >
           {loading ? 'Unlocking...' : 'Unlock Wallet'}
         </button>
 
-        <button onClick={onCreateWallet} className="create-wallet-link" type="button">
+        <button
+          className="gs-btn-create"
+          onClick={onCreateWallet}
+          type="button"
+        >
           Create New Wallet
         </button>
       </div>

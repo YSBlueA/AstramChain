@@ -1,97 +1,154 @@
+/* ===== WalletHome - Dark Theme ===== */
 .wallet-container {
   padding: 20px;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
 
+/* Header */
 .wallet-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 30px;
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
 }
 
 .wallet-header h2 {
   margin: 0;
-  font-size: 24px;
-  font-weight: 600;
+  font-size: 18px;
+  font-weight: 700;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .btn-logout {
-  padding: 8px 16px;
-  background: rgba(255, 255, 255, 0.2);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 6px;
-  color: white;
+  padding: 7px 14px;
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
   cursor: pointer;
-  font-size: 14px;
-  transition: all 0.3s ease;
+  font-size: 13px;
+  transition: all 0.2s;
 }
 
 .btn-logout:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: var(--error);
 }
 
+/* Main card */
 .wallet-card {
-  background: rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
-  border-radius: 16px;
-  padding: 30px;
-  box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+  box-shadow: var(--shadow-md);
+  position: relative;
+  overflow: hidden;
 }
 
+.wallet-card::before {
+  content: '';
+  position: absolute;
+  top: -60px;
+  right: -60px;
+  width: 200px;
+  height: 200px;
+  background: radial-gradient(circle, rgba(124, 92, 252, 0.08) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* Balance section */
 .balance-section {
   text-align: center;
-  margin-bottom: 30px;
-  padding-bottom: 30px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  margin-bottom: 28px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid var(--border);
 }
 
 .balance-label {
-  font-size: 14px;
-  opacity: 0.8;
+  font-size: 12px;
+  color: var(--text-tertiary);
   margin-bottom: 10px;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 1.5px;
+  font-weight: 500;
 }
 
 .balance-amount {
-  font-size: 42px;
-  font-weight: 700;
+  font-size: 40px;
+  font-weight: 800;
   margin: 0;
-  color: #fff;
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  color: var(--text-primary);
+  letter-spacing: -0.5px;
 }
 
+.balance-amount span {
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-left: 6px;
+}
+
+/* Network badge */
+.network-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent-dim);
+  border: 1px solid rgba(124, 92, 252, 0.25);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #A78BFA;
+  margin-top: 10px;
+  font-weight: 500;
+}
+
+.network-dot {
+  width: 7px;
+  height: 7px;
+  background: var(--success);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--success);
+}
+
+/* Address section */
 .address-section {
-  margin-bottom: 30px;
+  margin-bottom: 24px;
 }
 
 .address-label {
-  font-size: 14px;
-  opacity: 0.8;
+  font-size: 12px;
+  color: var(--text-tertiary);
   margin-bottom: 10px;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 1.5px;
+  font-weight: 500;
 }
 
 .address-display {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--bg-tertiary);
   padding: 12px 16px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
 }
 
 .address-display code {
   flex: 1;
   font-family: 'Courier New', monospace;
-  font-size: 13px;
-  color: #fff;
+  font-size: 12px;
+  color: var(--text-secondary);
   word-break: break-all;
   background: none;
   border: none;
@@ -99,41 +156,49 @@
 }
 
 .btn-copy {
-  padding: 6px 12px;
-  background: rgba(255, 255, 255, 0.2);
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  padding: 6px 14px;
+  background: var(--accent-dim);
+  border: 1px solid rgba(124, 92, 252, 0.3);
   border-radius: 6px;
-  color: white;
+  color: #A78BFA;
   cursor: pointer;
   font-size: 12px;
+  font-weight: 600;
   white-space: nowrap;
-  transition: all 0.3s ease;
+  transition: all 0.2s;
 }
 
 .btn-copy:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: rgba(124, 92, 252, 0.25);
+  border-color: rgba(124, 92, 252, 0.5);
 }
 
+/* Refresh button */
 .btn-refresh {
   width: 100%;
-  padding: 14px;
-  background: rgba(255, 255, 255, 0.2);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 8px;
+  padding: 13px;
+  background: var(--accent-gradient);
+  border: none;
+  border-radius: var(--radius-sm);
   color: white;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: all 0.2s;
+  letter-spacing: 0.3px;
 }
 
 .btn-refresh:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.3);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(124, 92, 252, 0.4);
+}
+
+.btn-refresh:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .btn-refresh:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  transform: none;
 }
