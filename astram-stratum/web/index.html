@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';" />
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+  <meta http-equiv="X-Frame-Options" content="SAMEORIGIN" />
   <title>Astram Mining Pool</title>
   <style>
     :root {
@@ -326,6 +329,17 @@
 </footer>
 
 <script>
+  // ── HTML escape helper (prevents XSS from miner-supplied data) ──────────────
+  function esc(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   // ── Config ──────────────────────────────────────────────────────────────────
   const API = '';   // same origin — stats server serves this page
 
@@ -412,10 +426,10 @@
       const status = m.connected
         ? `<span class="badge badge-green">online</span>`
         : `<span class="muted">offline</span>`;
-      const worker = m.worker_name ? `${m.worker_name} ${status}` : status;
-      const diff = m.difficulty > 0 ? m.difficulty : '<span class="muted">—</span>';
+      const worker = m.worker_name ? `${esc(m.worker_name)} ${status}` : status;
+      const diff = m.difficulty > 0 ? esc(m.difficulty) : '<span class="muted">—</span>';
       return `<tr>
-        <td class="mono accent">${m.address}</td>
+        <td class="mono accent">${esc(m.address)}</td>
         <td>${worker}</td>
         <td>${diff}</td>
         <td class="green">${fmt(m.shares_accepted)}</td>
@@ -439,9 +453,9 @@
       const asrm = weiToAsrm(b.reward);
       return `<tr>
         <td class="accent">#${fmt(b.height)}</td>
-        <td class="mono muted">${shortHash(b.hash)}</td>
-        <td class="yellow">${asrm} ASRM</td>
-        <td class="mono muted">${shortHash(b.finder)}</td>
+        <td class="mono muted">${esc(shortHash(b.hash))}</td>
+        <td class="yellow">${esc(asrm)} ASRM</td>
+        <td class="mono muted">${esc(shortHash(b.finder))}</td>
         <td><span class="badge badge-yellow">${fmt(b.shares_in_window)}</span></td>
         <td class="muted">${timeAgo(b.timestamp)}</td>
       </tr>`;
@@ -464,9 +478,9 @@
       const asrm = weiToAsrm(wei);
       const positive = parseFloat(asrm) > 0;
       return `<tr>
-        <td class="mono accent">${addr}</td>
-        <td class="${positive ? 'yellow' : 'muted'}">${asrm} ASRM</td>
-        <td class="mono muted">${wei}</td>
+        <td class="mono accent">${esc(addr)}</td>
+        <td class="${positive ? 'yellow' : 'muted'}">${esc(asrm)} ASRM</td>
+        <td class="mono muted">${esc(wei)}</td>
       </tr>`;
     }).join('');
   }
