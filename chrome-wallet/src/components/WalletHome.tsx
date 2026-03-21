@@ -50,7 +50,7 @@ export function WalletHome() {
   return (
     <div className="wallet-container">
       <div className="wallet-header">
-        <h2>Astram Wallet</h2>
+        <h2>AstramX Wallet</h2>
         <button onClick={() => clearWallet()} className="btn-logout">
           Logout
         </button>
@@ -59,7 +59,11 @@ export function WalletHome() {
       <div className="wallet-card">
         <div className="balance-section">
           <p className="balance-label">Balance</p>
-          <h1 className="balance-amount">{balance} ASRM</h1>
+          <h1 className="balance-amount">{balance} <span>ASRM</span></h1>
+          <div className="network-badge">
+            <span className="network-dot" />
+            Astram Network
+          </div>
         </div>
 
         <div className="address-section">

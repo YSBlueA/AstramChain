@@ -1,5 +1,5 @@
 // Content Script - Runs on web pages
-console.log('Astram Wallet content script loaded')
+console.log('AstramX Wallet content script loaded')
 
 window.addEventListener('message', (event) => {
   // Only accept messages from the same frame

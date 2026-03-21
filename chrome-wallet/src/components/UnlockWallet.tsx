@@ -59,7 +59,7 @@ export function UnlockWallet({ onSuccess, onCancel }: UnlockWalletProps) {
     <div className="unlock-wrapper">
       <div className="unlock-container">
         <div className="unlock-header">
-          <h1>🔐 Astram Wallet</h1>
+          <h1>🔐 AstramX Wallet</h1>
           <p>Enter your password to unlock</p>
         </div>
 
