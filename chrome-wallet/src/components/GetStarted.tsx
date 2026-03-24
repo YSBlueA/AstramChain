@@ -1,16 +1,19 @@
 import React, { useState } from 'react'
 import { useWalletStore } from '@/store/wallet'
 import { decryptPrivateKey } from '@/utils/crypto'
+import { useTranslation } from 'react-i18next'
 import '../styles/GetStarted.css'
 import walletBg from '@/assets/chrome_wallet_logo_1024_1536.png'
 
 interface GetStartedProps {
   onCreateWallet: () => void
   onUnlockSuccess: () => void
+  onRestoreWallet: () => void
 }
 
-export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps) {
+export function GetStarted({ onCreateWallet, onUnlockSuccess, onRestoreWallet }: GetStartedProps) {
   const { initWallet } = useWalletStore()
+  const { t } = useTranslation()
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -25,7 +28,7 @@ export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps)
       const result = await chrome.storage.local.get(['encryptedWallet'])
 
       if (!result.encryptedWallet) {
-        setError('No saved wallet found')
+        setError(t('getStarted.noWalletFound'))
         return
       }
 
@@ -35,7 +38,7 @@ export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps)
       initWallet({ address, privateKey, balance: '0' })
       onUnlockSuccess()
     } catch {
-      setError('Invalid password')
+      setError(t('getStarted.invalidPassword'))
     } finally {
       setLoading(false)
     }
@@ -56,7 +59,7 @@ export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps)
         <div className="gs-input-group">
           <input
             type="password"
-            placeholder="Enter password"
+            placeholder={t('getStarted.enterPassword')}
             value={password}
             onChange={(e) => {
               setPassword(e.target.value)
@@ -73,7 +76,7 @@ export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps)
           onClick={handleUnlock}
           disabled={loading || !password}
         >
-          {loading ? 'Unlocking...' : 'Unlock Wallet'}
+          {loading ? t('getStarted.unlocking') : t('getStarted.unlockWallet')}
         </button>
 
         <button
@@ -81,7 +84,15 @@ export function GetStarted({ onCreateWallet, onUnlockSuccess }: GetStartedProps)
           onClick={onCreateWallet}
           type="button"
         >
-          Create New Wallet
+          {t('getStarted.createNewWallet')}
+        </button>
+
+        <button
+          className="gs-btn-restore"
+          onClick={onRestoreWallet}
+          type="button"
+        >
+          {t('getStarted.restoreWithKey')}
         </button>
       </div>
     </div>

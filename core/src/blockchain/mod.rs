@@ -1007,6 +1007,84 @@ impl Blockchain {
         Ok(total)
     }
 
+    /// Get transaction history for address (newest first)
+    /// Returns: (txid, block_height, timestamp, direction, amount_wei, counterpart)
+    pub fn get_address_transactions_from_db(
+        &self,
+        address: &str,
+    ) -> Result<Vec<(String, u64, i64, String, U256, String)>> {
+        let blocks = self.get_all_blocks_cached()?;
+        let mut results: Vec<(String, u64, i64, String, U256, String)> = Vec::new();
+        let mut seen_txids = std::collections::HashSet::new();
+
+        for block in blocks {
+            let height = block.header.index;
+            for tx in block.transactions {
+                let is_receiver = tx.outputs.iter().any(|o| o.to == address);
+                let is_sender = tx.inputs.iter().any(|i| i.pubkey == address);
+
+                if !is_receiver && !is_sender {
+                    continue;
+                }
+                if !seen_txids.insert(tx.txid.clone()) {
+                    continue;
+                }
+
+                if is_sender {
+                    // One entry per unique recipient (excluding change back to self)
+                    for output in &tx.outputs {
+                        if output.to != address {
+                            results.push((
+                                tx.txid.clone(),
+                                height,
+                                tx.timestamp,
+                                "send".to_string(),
+                                output.amount(),
+                                output.to.clone(),
+                            ));
+                        }
+                    }
+                    // If all outputs go back to self (edge case), record as self-send
+                    if tx.outputs.iter().all(|o| o.to == address) {
+                        let total: U256 = tx.outputs.iter().fold(U256::zero(), |acc, o| acc + o.amount());
+                        results.push((
+                            tx.txid.clone(),
+                            height,
+                            tx.timestamp,
+                            "send".to_string(),
+                            total,
+                            address.to_string(),
+                        ));
+                    }
+                } else {
+                    // Pure receiver
+                    let received: U256 = tx
+                        .outputs
+                        .iter()
+                        .filter(|o| o.to == address)
+                        .fold(U256::zero(), |acc, o| acc + o.amount());
+                    let sender = tx
+                        .inputs
+                        .first()
+                        .map(|i| i.pubkey.clone())
+                        .unwrap_or_else(|| "coinbase".to_string());
+                    results.push((
+                        tx.txid.clone(),
+                        height,
+                        tx.timestamp,
+                        "receive".to_string(),
+                        received,
+                        sender,
+                    ));
+                }
+            }
+        }
+
+        // Newest first
+        results.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+        Ok(results)
+    }
+
     /// Get transaction count for address
     pub fn get_address_transaction_count_from_db(&self, address: &str) -> Result<usize> {
         let blocks = self.get_all_blocks_cached()?;

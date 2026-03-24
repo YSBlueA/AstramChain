@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { useWalletStore } from '@/store/wallet'
 import { createWalletFromEd25519Mnemonic, validateMnemonic } from '@/utils/ed25519-mnemonic'
 import { encryptPrivateKey } from '@/utils/crypto'
+import { useTranslation } from 'react-i18next'
 import '../styles/ImportWallet.css'
 
 interface ImportWalletProps {
@@ -11,6 +12,7 @@ interface ImportWalletProps {
 
 export function ImportWallet({ onSuccess, onCancel }: ImportWalletProps) {
   const { initWallet } = useWalletStore()
+  const { t } = useTranslation()
   const [step, setStep] = useState<'mnemonic' | 'password'>('mnemonic')
   const [mnemonic, setMnemonic] = useState('')
   const [password, setPassword] = useState('')
@@ -24,28 +26,19 @@ export function ImportWallet({ onSuccess, onCancel }: ImportWalletProps) {
     setLoading(true)
 
     try {
-      const normalizedMnemonic = mnemonic
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, ' ')
+      const normalizedMnemonic = mnemonic.trim().toLowerCase().replace(/\s+/g, ' ')
 
-      // Mnemonic 유효성 검증
       if (!validateMnemonic(normalizedMnemonic)) {
-        setError('Invalid recovery phrase. Please check and try again.')
+        setError(t('import.invalidPhrase'))
         setLoading(false)
         return
       }
 
-      // Mnemonic으로부터 Ed25519 지갑 생성
       const recoveredWallet = createWalletFromEd25519Mnemonic(normalizedMnemonic)
-      
-      setWallet({
-        ...recoveredWallet,
-        mnemonic: normalizedMnemonic,
-      })
+      setWallet({ ...recoveredWallet, mnemonic: normalizedMnemonic })
       setStep('password')
     } catch (err: any) {
-      setError(err.message || 'Failed to import wallet')
+      setError(err.message || t('import.failedImport'))
     } finally {
       setLoading(false)
     }
@@ -55,58 +48,40 @@ export function ImportWallet({ onSuccess, onCancel }: ImportWalletProps) {
     setError('')
 
     if (!password || !confirmPassword) {
-      setError('Please fill in all fields')
+      setError(t('import.fillAllFields'))
       return
     }
-
     if (password.length < 8) {
-      setError('Password must be at least 8 characters')
+      setError(t('import.passwordTooShort'))
       return
     }
-
     if (password !== confirmPassword) {
-      setError('Passwords do not match')
+      setError(t('import.passwordMismatch'))
       return
     }
-
     if (!wallet) {
-      setError('Wallet not found')
+      setError(t('import.walletNotFound'))
       return
     }
 
     try {
       const { encryptedPrivateKey, salt, iv } = encryptPrivateKey(wallet.privateKey, password)
 
-      const encryptedWallet = {
-        address: wallet.address,
-        encryptedPrivateKey,
-        salt,
-        iv,
-        mnemonic: wallet.mnemonic,
-      }
+      await chrome.storage.local.set({
+        encryptedWallet: { address: wallet.address, encryptedPrivateKey, salt, iv, mnemonic: wallet.mnemonic },
+      })
 
-      await chrome.storage.local.set({ encryptedWallet })
-
-      const walletData = {
-        address: wallet.address,
-        privateKey: wallet.privateKey,
-        balance: '0'
-      }
-
-      initWallet(walletData)
+      initWallet({ address: wallet.address, privateKey: wallet.privateKey, balance: '0' })
       onSuccess()
     } catch (err) {
-      setError('Failed to save wallet')
+      setError(t('import.failedSave'))
     }
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !loading) {
-      if (step === 'mnemonic' && mnemonic.trim()) {
-        handleVerifyMnemonic()
-      } else if (step === 'password' && password && confirmPassword) {
-        handleSetPassword()
-      }
+      if (step === 'mnemonic' && mnemonic.trim()) handleVerifyMnemonic()
+      else if (step === 'password' && password && confirmPassword) handleSetPassword()
     }
   }
 
@@ -115,23 +90,20 @@ export function ImportWallet({ onSuccess, onCancel }: ImportWalletProps) {
       <div className="import-container">
         {step === 'mnemonic' && (
           <>
-            <h2>Import Wallet</h2>
-            <p className="import-subtitle">Paste your 24-word recovery phrase (Ed25519)</p>
+            <h2>{t('import.title')}</h2>
+            <p className="import-subtitle">{t('import.subtitle')}</p>
 
             <div className="form-group">
-              <label>Recovery Phrase</label>
+              <label>{t('import.phraseLabel')}</label>
               <textarea
-                placeholder="Enter your 24 words separated by spaces..."
+                placeholder={t('import.phrasePlaceholder')}
                 value={mnemonic}
-                onChange={(e) => {
-                  setMnemonic(e.target.value)
-                  setError('')
-                }}
+                onChange={(e) => { setMnemonic(e.target.value); setError('') }}
                 onKeyPress={handleKeyPress}
                 disabled={loading}
                 rows={6}
               />
-              <p className="helper-text">Enter all 24 words in order, separated by spaces</p>
+              <p className="helper-text">{t('import.phraseHelper')}</p>
             </div>
 
             {error && <div className="error-message">{error}</div>}
@@ -142,11 +114,11 @@ export function ImportWallet({ onSuccess, onCancel }: ImportWalletProps) {
                 className="btn-primary"
                 disabled={loading || !mnemonic.trim()}
               >
-                {loading ? 'Verifying...' : 'Next'}
+                {loading ? t('import.verifying') : t('next')}
               </button>
               {onCancel && (
                 <button onClick={onCancel} className="btn-secondary" disabled={loading}>
-                  Cancel
+                  {t('cancel')}
                 </button>
               )}
             </div>
@@ -155,33 +127,29 @@ export function ImportWallet({ onSuccess, onCancel }: ImportWalletProps) {
 
         {step === 'password' && wallet && (
           <>
-            <h2>Set Password</h2>
-            <p className="import-subtitle">✅ Wallet recovered: {wallet.address.slice(0, 10)}...</p>
+            <h2>{t('import.setPasswordTitle')}</h2>
+            <p className="import-subtitle">
+              {t('import.walletRecovered', { addr: wallet.address.slice(0, 10) })}
+            </p>
 
             <div className="form-group">
-              <label>Password</label>
+              <label>{t('password')}</label>
               <input
                 type="password"
-                placeholder="Enter password (min 8 characters)"
+                placeholder={t('import.passwordPlaceholder')}
                 value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value)
-                  setError('')
-                }}
+                onChange={(e) => { setPassword(e.target.value); setError('') }}
                 onKeyPress={handleKeyPress}
               />
             </div>
 
             <div className="form-group">
-              <label>Confirm Password</label>
+              <label>{t('confirmPassword')}</label>
               <input
                 type="password"
-                placeholder="Confirm password"
+                placeholder={t('import.confirmPasswordPlaceholder')}
                 value={confirmPassword}
-                onChange={(e) => {
-                  setConfirmPassword(e.target.value)
-                  setError('')
-                }}
+                onChange={(e) => { setConfirmPassword(e.target.value); setError('') }}
                 onKeyPress={handleKeyPress}
               />
             </div>
@@ -194,13 +162,10 @@ export function ImportWallet({ onSuccess, onCancel }: ImportWalletProps) {
                 className="btn-primary"
                 disabled={!password || !confirmPassword}
               >
-                Save Wallet
+                {t('import.saveWallet')}
               </button>
-              <button 
-                onClick={() => setStep('mnemonic')} 
-                className="btn-secondary"
-              >
-                Back
+              <button onClick={() => setStep('mnemonic')} className="btn-secondary">
+                {t('back')}
               </button>
             </div>
           </>

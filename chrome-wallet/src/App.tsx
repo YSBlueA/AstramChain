@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import './App.css'
+import '@/i18n'
+import { loadSavedLanguage } from '@/i18n'
 import { WalletHome } from '@/components/WalletHome'
 import { ImportWallet } from '@/components/ImportWallet'
 import { CreateWallet } from '@/components/CreateWallet'
@@ -12,6 +14,7 @@ export function App() {
   const [step, setStep] = useState<'getstarted' | 'creating' | 'importing' | 'unlocking' | 'wallet'>('getstarted')
 
   useEffect(() => {
+    loadSavedLanguage()
     const checkWallet = async () => {
       try {
         // 아니면 기존 지갑 확인
@@ -50,6 +53,7 @@ export function App() {
         <GetStarted
           onCreateWallet={() => setStep('creating')}
           onUnlockSuccess={handleUnlockSuccess}
+          onRestoreWallet={() => setStep('importing')}
         />
       )}
 
@@ -66,7 +70,13 @@ export function App() {
           onCancel={() => setStep('getstarted')}
         />
       )}
-      {step === 'wallet' && hasWallet && <WalletHome />}
+      {step === 'wallet' && hasWallet && (
+        <WalletHome
+          onLogout={() => { setHasWallet(false); setStep('getstarted') }}
+          onCreateWallet={() => setStep('creating')}
+          onImportWallet={() => setStep('importing')}
+        />
+      )}
     </>
   )
 }

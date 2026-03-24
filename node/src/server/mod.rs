@@ -940,6 +940,50 @@ pub async fn run_server(
             })))
         });
 
+    // GET /address/{address}/transactions
+    let get_address_transactions = warp::path!("address" / String / "transactions")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|address: String, node: NodeHandle| async move {
+            let address = address.to_lowercase();
+            let bc_arc = node.bc.clone();
+            let addr = address.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                bc_arc.lock().unwrap().get_address_transactions_from_db(&addr)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+
+            match result {
+                Ok(txs) => {
+                    let list: Vec<_> = txs
+                        .into_iter()
+                        .map(|(txid, height, timestamp, direction, amount, counterpart)| {
+                            serde_json::json!({
+                                "txid": txid,
+                                "block_height": height,
+                                "timestamp": timestamp,
+                                "direction": direction,
+                                "amount": amount.to_string(),
+                                "counterpart": counterpart,
+                            })
+                        })
+                        .collect();
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "address": address,
+                        "transactions": list,
+                    })))
+                }
+                Err(e) => {
+                    log::warn!("Transaction history lookup failed for {}: {:?}", address, e);
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "address": address,
+                        "transactions": [],
+                    })))
+                }
+            }
+        });
+
     // GET /tx/{txid}
     let get_tx = warp::path!("tx" / String)
         .and(warp::get())
@@ -1006,6 +1050,7 @@ pub async fn run_server(
         .or(status)
         .or(get_balance)
         .or(get_address_info)
+        .or(get_address_transactions)
         .or(get_utxos)
         .or(get_tx)
         .with(warp::log("Astram::http"))
@@ -1279,6 +1324,47 @@ pub async fn run_public_server(
             })))
         });
 
+    // GET /address/{address}/transactions
+    let get_address_transactions_pub = warp::path!("address" / String / "transactions")
+        .and(warp::get())
+        .and(node_filter.clone())
+        .and_then(|address: String, node: NodeHandle| async move {
+            let address = address.to_lowercase();
+            let bc_arc = node.bc.clone();
+            let addr = address.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                bc_arc.lock().unwrap().get_address_transactions_from_db(&addr)
+            })
+            .await
+            .expect("spawn_blocking panicked");
+
+            match result {
+                Ok(txs) => {
+                    let list: Vec<_> = txs
+                        .into_iter()
+                        .map(|(txid, height, timestamp, direction, amount, counterpart)| {
+                            serde_json::json!({
+                                "txid": txid,
+                                "block_height": height,
+                                "timestamp": timestamp,
+                                "direction": direction,
+                                "amount": amount.to_string(),
+                                "counterpart": counterpart,
+                            })
+                        })
+                        .collect();
+                    Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                        "address": address,
+                        "transactions": list,
+                    })))
+                }
+                Err(_) => Ok::<_, warp::Rejection>(warp::reply::json(&serde_json::json!({
+                    "address": address,
+                    "transactions": [],
+                }))),
+            }
+        });
+
     // GET /blockchain/range?from=0&to=10
     let get_chain_range = warp::path!("blockchain" / "range")
         .and(warp::get())
@@ -1403,6 +1489,7 @@ pub async fn run_public_server(
         .or(get_chain_range)
         .or(get_balance)
         .or(get_address_info)
+        .or(get_address_transactions_pub)
         .or(get_utxos)
         .or(get_tx)
         .or(post_tx)

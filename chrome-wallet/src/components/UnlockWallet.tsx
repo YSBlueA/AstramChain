@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useWalletStore } from '@/store/wallet'
 import { decryptPrivateKey } from '@/utils/crypto'
+import { useTranslation } from 'react-i18next'
 import '../styles/UnlockWallet.css'
 
 interface UnlockWalletProps {
@@ -10,6 +11,7 @@ interface UnlockWalletProps {
 
 export function UnlockWallet({ onSuccess, onCancel }: UnlockWalletProps) {
   const { initWallet } = useWalletStore()
+  const { t } = useTranslation()
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -19,31 +21,21 @@ export function UnlockWallet({ onSuccess, onCancel }: UnlockWalletProps) {
     setLoading(true)
 
     try {
-      // Chrome storage에서 암호화된 지갑 정보 로드
       const result = await chrome.storage.local.get(['encryptedWallet'])
 
       if (!result.encryptedWallet) {
-        setError('No saved wallet found')
+        setError(t('unlock.noWalletFound'))
         setLoading(false)
         return
       }
 
       const { address, encryptedPrivateKey, salt, iv } = result.encryptedWallet
-
-      // 암호로 복호화 시도
       const privateKey = decryptPrivateKey(encryptedPrivateKey, password, salt, iv)
 
-      // 성공하면 메모리에 로드
-      const wallet = {
-        address,
-        privateKey,
-        balance: '0',
-      }
-
-      initWallet(wallet)
+      initWallet({ address, privateKey, balance: '0' })
       onSuccess()
     } catch (err) {
-      setError('Invalid password')
+      setError(t('unlock.invalidPassword'))
     } finally {
       setLoading(false)
     }
@@ -59,15 +51,15 @@ export function UnlockWallet({ onSuccess, onCancel }: UnlockWalletProps) {
     <div className="unlock-wrapper">
       <div className="unlock-container">
         <div className="unlock-header">
-          <h1>🔐 AstramX Wallet</h1>
-          <p>Enter your password to unlock</p>
+          <h1>{t('unlock.title')}</h1>
+          <p>{t('unlock.subtitle')}</p>
         </div>
 
         <div className="form-group">
-          <label>Password</label>
+          <label>{t('password')}</label>
           <input
             type="password"
-            placeholder="Enter your password"
+            placeholder={t('unlock.enterPassword')}
             value={password}
             onChange={(e) => {
               setPassword(e.target.value)
@@ -87,16 +79,14 @@ export function UnlockWallet({ onSuccess, onCancel }: UnlockWalletProps) {
             className="btn-primary"
             disabled={loading || !password}
           >
-            {loading ? 'Unlocking...' : 'Unlock Wallet'}
+            {loading ? t('unlock.unlocking') : t('unlock.unlockWallet')}
           </button>
           <button onClick={onCancel} className="btn-secondary" disabled={loading}>
-            Use Different Account
+            {t('unlock.useDifferentAccount')}
           </button>
         </div>
 
-        <p className="security-note">
-          🔒 Your password is only used locally to decrypt your private key
-        </p>
+        <p className="security-note">{t('unlock.securityNote')}</p>
       </div>
     </div>
   )
