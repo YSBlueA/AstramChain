@@ -114,8 +114,17 @@ async fn main() -> std::io::Result<()> {
 
 /// Fetch blockchain data from the node and index into the database
 async fn sync_blockchain(db: &ExplorerDB, rpc_client: &NodeRpcClient) -> anyhow::Result<()> {
-    // Load last synced height
-    let last_synced = db.get_last_synced_height()?;
+    // UTXO 데이터가 없으면 전체 재동기화 필요 (이전 버전 DB 마이그레이션)
+    let last_synced = {
+        let height = db.get_last_synced_height()?;
+        if height > 0 && !db.has_utxo_data() {
+            log::info!("⚠️  UTXO data missing in Explorer DB (old format). Resetting to full re-sync...");
+            db.set_last_synced_height(0)?;
+            0
+        } else {
+            height
+        }
+    };
 
     let mut utxo_map = std::collections::HashMap::new();
     let (blocks, transactions, created_utxos, spent_utxos) = if last_synced == 0 {
@@ -156,16 +165,9 @@ async fn sync_blockchain(db: &ExplorerDB, rpc_client: &NodeRpcClient) -> anyhow:
         new_blocks += 1;
     }
 
-    // UTXO DB 업데이트: 소비된 UTXO 삭제 후 새 UTXO 저장
-    for (txid, vout) in &spent_utxos {
-        if let Err(e) = db.remove_utxo(txid, *vout) {
-            log::warn!("Failed to remove UTXO {}:{}: {}", txid, vout, e);
-        }
-    }
-    for (txid, vout, address, amount) in &created_utxos {
-        if let Err(e) = db.save_utxo(txid, *vout, address, *amount) {
-            log::warn!("Failed to save UTXO {}:{}: {}", txid, vout, e);
-        }
+    // UTXO DB 업데이트: WriteBatch로 한 번에 처리
+    if let Err(e) = db.apply_utxo_changes(&created_utxos, &spent_utxos) {
+        error!("Failed to apply UTXO changes: {}", e);
     }
 
     // Collect unique addresses touched in this batch to avoid N+1 per-tx updates

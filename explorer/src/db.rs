@@ -703,37 +703,86 @@ impl ExplorerDB {
     // UTXO 저장소: eu:{txid}:{vout} -> "{address}:{amount_hex}"
     // ----------------------------------------------------------------
 
-    /// UTXO 저장
+    /// UTXO DB가 초기화되었는지 확인
+    pub fn has_utxo_data(&self) -> bool {
+        let mut iter = self.db.raw_iterator();
+        iter.seek(b"eu:");
+        iter.valid() && iter.key().map_or(false, |k| k.starts_with(b"eu:"))
+    }
+
+    /// (내부용) 단일 UTXO 저장 - apply_utxo_changes 사용 권장
+    #[allow(dead_code)]
     pub fn save_utxo(&self, txid: &str, vout: u32, address: &str, amount: U256) -> Result<()> {
-        let key = format!("eu:{}:{}", txid, vout);
-        let value = format!("{}:{:x}", address, amount);
+        let key = format!("eu:{}:{}:{}", address, txid, vout);
+        let value = format!("{:x}", amount);
         self.db.put(key.as_bytes(), value.as_bytes())?;
         Ok(())
     }
 
-    /// UTXO 삭제 (소비됨)
-    pub fn remove_utxo(&self, txid: &str, vout: u32) -> Result<()> {
-        let key = format!("eu:{}:{}", txid, vout);
+    /// (내부용) 단일 UTXO 삭제 - apply_utxo_changes 사용 권장
+    #[allow(dead_code)]
+    pub fn remove_utxo(&self, txid: &str, vout: u32, address: &str) -> Result<()> {
+        let key = format!("eu:{}:{}:{}", address, txid, vout);
         self.db.delete(key.as_bytes())?;
         Ok(())
     }
 
-    /// 특정 주소의 UTXO 합계로 잔액 계산
+    /// UTXO 저장/삭제를 WriteBatch로 한 번에 처리
+    /// - created: (txid, vout, address, amount)
+    /// - spent:   (txid, vout, address)  ← address가 ""이면 역방향 인덱스로 조회
+    pub fn apply_utxo_changes(
+        &self,
+        created: &[(String, u32, String, U256)],
+        spent: &[(String, u32, String)],
+    ) -> Result<()> {
+        let mut batch = WriteBatch::default();
+
+        // 생성: 정방향(eu:) + 역방향(eur:) 인덱스 함께 저장
+        for (txid, vout, address, amount) in created {
+            let key = format!("eu:{}:{}:{}", address, txid, vout);
+            batch.put(key.as_bytes(), format!("{:x}", amount).as_bytes());
+            // 역방향 인덱스: eur:{txid}:{vout} → address
+            let rev_key = format!("eur:{}:{}", txid, vout);
+            batch.put(rev_key.as_bytes(), address.as_bytes());
+        }
+
+        // 소비: 역방향 인덱스로 주소 확인 후 두 키 모두 삭제
+        for (txid, vout, address) in spent {
+            let rev_key = format!("eur:{}:{}", txid, vout);
+
+            // 주소가 없으면(증분 sync) 역방향 인덱스에서 조회
+            let real_address = if !address.is_empty() {
+                address.clone()
+            } else {
+                self.db.get(rev_key.as_bytes())?
+                    .and_then(|v| String::from_utf8(v.to_vec()).ok())
+                    .unwrap_or_default()
+            };
+
+            if !real_address.is_empty() {
+                let key = format!("eu:{}:{}:{}", real_address, txid, vout);
+                batch.delete(key.as_bytes());
+            }
+            batch.delete(rev_key.as_bytes());
+        }
+
+        self.db.write(batch)?;
+        Ok(())
+    }
+
+    /// 특정 주소의 UTXO 합계로 잔액 계산 (주소 prefix seek으로 빠름)
     pub fn get_balance_from_utxos(&self, address: &str) -> Result<U256> {
         let mut balance = U256::zero();
+        let prefix = format!("eu:{}:", address);
         let mut iter = self.db.raw_iterator();
-        iter.seek(b"eu:");
+        iter.seek(prefix.as_bytes());
         while iter.valid() {
             if let Some(key) = iter.key() {
-                if !key.starts_with(b"eu:") { break; }
+                if !key.starts_with(prefix.as_bytes()) { break; }
                 if let Some(value) = iter.value() {
                     if let Ok(s) = std::str::from_utf8(value) {
-                        if let Some((addr, amount_hex)) = s.split_once(':') {
-                            if addr == address {
-                                if let Ok(amount) = U256::from_str_radix(amount_hex, 16) {
-                                    balance += amount;
-                                }
-                            }
+                        if let Ok(amount) = U256::from_str_radix(s, 16) {
+                            balance += amount;
                         }
                     }
                 }
@@ -751,11 +800,17 @@ impl ExplorerDB {
         while iter.valid() {
             if let Some(key) = iter.key() {
                 if !key.starts_with(b"eu:") { break; }
-                if let Some(value) = iter.value() {
-                    if let Ok(s) = std::str::from_utf8(value) {
-                        if let Some((addr, amount_hex)) = s.split_once(':') {
-                            if let Ok(amount) = U256::from_str_radix(amount_hex, 16) {
-                                *map.entry(addr.to_string()).or_insert_with(U256::zero) += amount;
+                // 키: eu:{address}:{txid}:{vout}
+                if let Ok(key_str) = std::str::from_utf8(key) {
+                    let parts: Vec<&str> = key_str.splitn(4, ':').collect();
+                    // parts[0]="eu", parts[1]=address, parts[2]=txid, parts[3]=vout
+                    if parts.len() == 4 {
+                        let address = parts[1];
+                        if let Some(value) = iter.value() {
+                            if let Ok(s) = std::str::from_utf8(value) {
+                                if let Ok(amount) = U256::from_str_radix(s, 16) {
+                                    *map.entry(address.to_string()).or_insert_with(U256::zero) += amount;
+                                }
                             }
                         }
                     }

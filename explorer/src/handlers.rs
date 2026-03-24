@@ -241,9 +241,14 @@ pub async fn get_richlist(
     query: web::Query<RichlistParams>,
 ) -> HttpResponse {
     let limit = query.limit.unwrap_or(50).min(200);
-    match db.get_richlist(limit) {
-        Ok(entries) => {
-            let total_supply = db.get_circulating_supply().unwrap_or_default();
+    let result = web::block(move || {
+        let entries = db.get_richlist(limit)?;
+        let total_supply = db.get_circulating_supply().unwrap_or_default();
+        Ok::<_, anyhow::Error>((entries, total_supply))
+    }).await;
+
+    match result {
+        Ok(Ok((entries, total_supply))) => {
             let count = entries.len();
             HttpResponse::Ok().json(serde_json::json!({
                 "entries": entries,
@@ -251,8 +256,11 @@ pub async fn get_richlist(
                 "count": count,
             }))
         }
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({
             "error": format!("Failed to fetch richlist: {}", e)
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Internal error: {}", e)
         })),
     }
 }
@@ -265,18 +273,20 @@ pub async fn get_address_info(
     let address = path.into_inner();
     log::info!("📍 Explorer handler: Fetching address info for {}", address);
 
-    match db.get_address_info(&address) {
-        Ok(Some(info)) => HttpResponse::Ok().json(info),
-        Ok(None) => {
-            match db.update_address_info(&address) {
-                Ok(info) => HttpResponse::Ok().json(info),
-                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Failed to calculate address info: {}", e)
-                })),
-            }
+    let result = web::block(move || {
+        match db.get_address_info(&address)? {
+            Some(info) => Ok::<_, anyhow::Error>(info),
+            None => db.update_address_info(&address).map_err(Into::into),
         }
+    }).await;
+
+    match result {
+        Ok(Ok(info)) => HttpResponse::Ok().json(info),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": format!("Failed to get address info: {}", e)
+        })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": format!("Database error: {}", e)
+            "error": format!("Internal error: {}", e)
         })),
     }
 }

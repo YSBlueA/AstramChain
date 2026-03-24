@@ -213,8 +213,8 @@ impl NodeRpcClient {
     pub async fn fetch_blocks_range(
         &self,
         from_height: u64,
-        existing_utxo_map: &mut std::collections::HashMap<(String, u32), primitive_types::U256>,
-    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32)>), String> {
+        existing_utxo_map: &mut std::collections::HashMap<(String, u32), (String, U256)>,
+    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32, String)>), String> {
         let url = format!("{}/blockchain/range?from={}", self.node_url, from_height);
 
         match reqwest::get(&url).await {
@@ -263,8 +263,8 @@ impl NodeRpcClient {
     /// Fetch full blockchain (direct DB, blocks + transactions)
     pub async fn fetch_blockchain_with_transactions(
         &self,
-        existing_utxo_map: &mut std::collections::HashMap<(String, u32), primitive_types::U256>,
-    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32)>), String> {
+        existing_utxo_map: &mut std::collections::HashMap<(String, u32), (String, U256)>,
+    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32, String)>), String> {
         let url = format!("{}/blockchain/db", self.node_url);
 
         info!("Fetching blockchain from: {}", url);
@@ -383,11 +383,12 @@ impl NodeRpcClient {
     pub fn extract_transactions(
         &self,
         blocks: &[Block],
-        existing_utxo_map: &mut std::collections::HashMap<(String, u32), U256>,
-    ) -> (Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32)>) {
+        // (txid, vout) -> (address, amount)
+        existing_utxo_map: &mut std::collections::HashMap<(String, u32), (String, U256)>,
+    ) -> (Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32, String)>) {
         let mut transactions = Vec::new();
         let mut created_utxos: Vec<(String, u32, String, U256)> = Vec::new();
-        let mut spent_utxos: Vec<(String, u32)> = Vec::new();
+        let mut spent_utxos: Vec<(String, u32, String)> = Vec::new();
 
         // Sort by height (important)
         let mut sorted_blocks = blocks.to_vec();
@@ -436,7 +437,7 @@ impl NodeRpcClient {
                     // Insert coinbase outputs into UTXO map + track for DB
                     for (vout, output) in tx.outputs.iter().enumerate() {
                         let amount = output.amount();
-                        existing_utxo_map.insert((tx.txid.clone(), vout as u32), amount);
+                        existing_utxo_map.insert((tx.txid.clone(), vout as u32), (output.to.clone(), amount));
                         created_utxos.push((tx.txid.clone(), vout as u32, output.to.clone(), amount));
                     }
                 } else {
@@ -459,7 +460,7 @@ impl NodeRpcClient {
                     let mut input_sum = U256::zero();
                     let mut missing_inputs = 0;
                     for (idx, input) in tx.inputs.iter().enumerate() {
-                        if let Some(amount) =
+                        if let Some((_addr, amount)) =
                             existing_utxo_map.get(&(input.txid.clone(), input.vout))
                         {
                             input_sum += *amount;
@@ -591,14 +592,17 @@ impl NodeRpcClient {
 
                     // Remove spent inputs from UTXO map + track for DB
                     for input in &tx.inputs {
-                        existing_utxo_map.remove(&(input.txid.clone(), input.vout));
-                        spent_utxos.push((input.txid.clone(), input.vout));
+                        let address = existing_utxo_map
+                            .remove(&(input.txid.clone(), input.vout))
+                            .map(|(addr, _)| addr)
+                            .unwrap_or_default();
+                        spent_utxos.push((input.txid.clone(), input.vout, address));
                     }
 
                     // Add new outputs to UTXO map + track for DB
                     for (vout, output) in tx.outputs.iter().enumerate() {
                         let amount = output.amount();
-                        existing_utxo_map.insert((tx.txid.clone(), vout as u32), amount);
+                        existing_utxo_map.insert((tx.txid.clone(), vout as u32), (output.to.clone(), amount));
                         created_utxos.push((tx.txid.clone(), vout as u32, output.to.clone(), amount));
                     }
                 }
