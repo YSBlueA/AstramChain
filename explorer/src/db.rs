@@ -565,7 +565,7 @@ impl ExplorerDB {
         }
     }
 
-    /// 주소 정보 계산 및 저장
+    /// 주소 정보 계산 및 저장 (UTXO 기반 잔액 + 트랜잭션 통계)
     pub fn update_address_info(&self, address: &str) -> Result<AddressInfo> {
         let transactions = self.get_transactions_by_address(address)?;
 
@@ -580,17 +580,15 @@ impl ExplorerDB {
             if tx.to == address {
                 received += tx.amount;
             }
-
             if last_transaction.is_none() || tx.timestamp > last_transaction.unwrap() {
                 last_transaction = Some(tx.timestamp);
             }
         }
 
-        let balance = if received > sent {
-            received - sent
-        } else {
-            U256::zero()
-        };
+        // UTXO DB에서 정확한 잔액 계산 (트랜잭션 집계의 누락 문제를 보완)
+        let balance = self.get_balance_from_utxos(address).unwrap_or_else(|_| {
+            if received > sent { received - sent } else { U256::zero() }
+        });
 
         let info = AddressInfo {
             address: address.to_string(),
@@ -701,30 +699,83 @@ impl ExplorerDB {
         }
     }
 
-    /// 부자 리스트 조회: 잔액 기준 상위 N개 주소
-    pub fn get_richlist(&self, limit: usize) -> Result<Vec<RichListEntry>> {
-        let total_supply = self.get_circulating_supply().unwrap_or(U256::zero());
+    // ----------------------------------------------------------------
+    // UTXO 저장소: eu:{txid}:{vout} -> "{address}:{amount_hex}"
+    // ----------------------------------------------------------------
 
-        // Scan all addr: keys
-        let mut entries: Vec<(String, U256)> = Vec::new();
+    /// UTXO 저장
+    pub fn save_utxo(&self, txid: &str, vout: u32, address: &str, amount: U256) -> Result<()> {
+        let key = format!("eu:{}:{}", txid, vout);
+        let value = format!("{}:{:x}", address, amount);
+        self.db.put(key.as_bytes(), value.as_bytes())?;
+        Ok(())
+    }
+
+    /// UTXO 삭제 (소비됨)
+    pub fn remove_utxo(&self, txid: &str, vout: u32) -> Result<()> {
+        let key = format!("eu:{}:{}", txid, vout);
+        self.db.delete(key.as_bytes())?;
+        Ok(())
+    }
+
+    /// 특정 주소의 UTXO 합계로 잔액 계산
+    pub fn get_balance_from_utxos(&self, address: &str) -> Result<U256> {
+        let mut balance = U256::zero();
         let mut iter = self.db.raw_iterator();
-        iter.seek(b"addr:");
+        iter.seek(b"eu:");
         while iter.valid() {
             if let Some(key) = iter.key() {
-                if !key.starts_with(b"addr:") { break; }
+                if !key.starts_with(b"eu:") { break; }
                 if let Some(value) = iter.value() {
-                    if let Ok(info) = serde_json::from_slice::<AddressInfo>(value) {
-                        if info.balance > U256::zero() {
-                            entries.push((info.address, info.balance));
+                    if let Ok(s) = std::str::from_utf8(value) {
+                        if let Some((addr, amount_hex)) = s.split_once(':') {
+                            if addr == address {
+                                if let Ok(amount) = U256::from_str_radix(amount_hex, 16) {
+                                    balance += amount;
+                                }
+                            }
                         }
                     }
                 }
             }
             iter.next();
         }
+        Ok(balance)
+    }
 
-        // Sort by balance descending
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+    /// 전체 주소별 UTXO 잔액 집계 (richlist용)
+    pub fn get_all_balances_from_utxos(&self) -> Result<Vec<(String, U256)>> {
+        let mut map: std::collections::HashMap<String, U256> = std::collections::HashMap::new();
+        let mut iter = self.db.raw_iterator();
+        iter.seek(b"eu:");
+        while iter.valid() {
+            if let Some(key) = iter.key() {
+                if !key.starts_with(b"eu:") { break; }
+                if let Some(value) = iter.value() {
+                    if let Ok(s) = std::str::from_utf8(value) {
+                        if let Some((addr, amount_hex)) = s.split_once(':') {
+                            if let Ok(amount) = U256::from_str_radix(amount_hex, 16) {
+                                *map.entry(addr.to_string()).or_insert_with(U256::zero) += amount;
+                            }
+                        }
+                    }
+                }
+            }
+            iter.next();
+        }
+        let mut result: Vec<_> = map.into_iter().filter(|(_, b)| !b.is_zero()).collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(result)
+    }
+
+    // ----------------------------------------------------------------
+
+    /// 부자 리스트 조회: 잔액 기준 상위 N개 주소 (UTXO 기반)
+    pub fn get_richlist(&self, limit: usize) -> Result<Vec<RichListEntry>> {
+        let total_supply = self.get_circulating_supply().unwrap_or(U256::zero());
+
+        // UTXO DB에서 주소별 잔액 집계 (정확한 값)
+        let mut entries = self.get_all_balances_from_utxos()?;
         entries.truncate(limit);
 
         let supply_f64 = if total_supply.is_zero() {

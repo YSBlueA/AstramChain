@@ -155,6 +155,16 @@ impl NodeRpcClient {
         }
     }
 
+    /// Fetch richlist from Node (UTXO-based, accurate balances)
+    pub async fn fetch_richlist(&self, limit: usize) -> Result<serde_json::Value, String> {
+        let url = format!("{}/richlist?limit={}", self.node_url, limit);
+        match reqwest::get(&url).await {
+            Ok(resp) => resp.json::<serde_json::Value>().await
+                .map_err(|e| format!("Failed to parse richlist response: {}", e)),
+            Err(e) => Err(format!("Network error fetching richlist: {}", e)),
+        }
+    }
+
     /// Query blockchain data from Node /blockchain/db (direct DB)
     #[allow(dead_code)]
     pub async fn fetch_blocks(&self) -> Result<Vec<BlockInfo>, String> {
@@ -204,7 +214,7 @@ impl NodeRpcClient {
         &self,
         from_height: u64,
         existing_utxo_map: &mut std::collections::HashMap<(String, u32), primitive_types::U256>,
-    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>), String> {
+    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32)>), String> {
         let url = format!("{}/blockchain/range?from={}", self.node_url, from_height);
 
         match reqwest::get(&url).await {
@@ -215,7 +225,7 @@ impl NodeRpcClient {
                     {
                         match self.decode_blockchain(encoded_blockchain) {
                             Ok((blocks, raw_blocks)) => {
-                                let transactions =
+                                let (transactions, created, spent) =
                                     self.extract_transactions(&raw_blocks, existing_utxo_map);
                                 info!(
                                     "Fetched {} blocks (from height {}) and {} transactions from Node",
@@ -223,7 +233,7 @@ impl NodeRpcClient {
                                     from_height,
                                     transactions.len()
                                 );
-                                Ok((blocks, transactions))
+                                Ok((blocks, transactions, created, spent))
                             }
                             Err(e) => {
                                 error!("Failed to decode blockchain: {}", e);
@@ -232,7 +242,7 @@ impl NodeRpcClient {
                         }
                     } else {
                         // No data: return empty result (normal)
-                        Ok((vec![], vec![]))
+                        Ok((vec![], vec![], vec![], vec![]))
                     }
                 }
                 Err(e) => {
@@ -254,7 +264,7 @@ impl NodeRpcClient {
     pub async fn fetch_blockchain_with_transactions(
         &self,
         existing_utxo_map: &mut std::collections::HashMap<(String, u32), primitive_types::U256>,
-    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>), String> {
+    ) -> Result<(Vec<BlockInfo>, Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32)>), String> {
         let url = format!("{}/blockchain/db", self.node_url);
 
         info!("Fetching blockchain from: {}", url);
@@ -282,19 +292,19 @@ impl NodeRpcClient {
 
                             if encoded_blockchain.is_empty() {
                                 info!("Blockchain data is empty");
-                                return Ok((vec![], vec![]));
+                                return Ok((vec![], vec![], vec![], vec![]));
                             }
 
                             match self.decode_blockchain(encoded_blockchain) {
                                 Ok((blocks, raw_blocks)) => {
-                                    let transactions =
+                                    let (transactions, created, spent) =
                                         self.extract_transactions(&raw_blocks, existing_utxo_map);
                                     info!(
                                         "Fetched {} blocks and {} transactions from Node",
                                         blocks.len(),
                                         transactions.len()
                                     );
-                                    Ok((blocks, transactions))
+                                    Ok((blocks, transactions, created, spent))
                                 }
                                 Err(e) => {
                                     error!("Failed to decode blockchain: {}", e);
@@ -367,13 +377,17 @@ impl NodeRpcClient {
     }
 
     /// Extract transaction info from blocks
-    /// Track UTXO state to calculate accurate fees
+    /// Returns (transactions, created_utxos, spent_utxo_keys)
+    /// - created_utxos: (txid, vout, address, amount)
+    /// - spent_utxo_keys: (txid, vout)
     pub fn extract_transactions(
         &self,
         blocks: &[Block],
         existing_utxo_map: &mut std::collections::HashMap<(String, u32), U256>,
-    ) -> Vec<TransactionInfo> {
+    ) -> (Vec<TransactionInfo>, Vec<(String, u32, String, U256)>, Vec<(String, u32)>) {
         let mut transactions = Vec::new();
+        let mut created_utxos: Vec<(String, u32, String, U256)> = Vec::new();
+        let mut spent_utxos: Vec<(String, u32)> = Vec::new();
 
         // Sort by height (important)
         let mut sorted_blocks = blocks.to_vec();
@@ -419,9 +433,11 @@ impl NodeRpcClient {
                         confirmations: Some(0), // Will be calculated when queried
                     });
 
-                    // Insert coinbase outputs into UTXO map
+                    // Insert coinbase outputs into UTXO map + track for DB
                     for (vout, output) in tx.outputs.iter().enumerate() {
-                        existing_utxo_map.insert((tx.txid.clone(), vout as u32), output.amount());
+                        let amount = output.amount();
+                        existing_utxo_map.insert((tx.txid.clone(), vout as u32), amount);
+                        created_utxos.push((tx.txid.clone(), vout as u32, output.to.clone(), amount));
                     }
                 } else {
                     // Standard tx: compute input/output sums and fee
@@ -573,25 +589,30 @@ impl NodeRpcClient {
                         confirmations: Some(0), // Will be calculated when queried
                     });
 
-                    // Remove spent inputs from UTXO map
+                    // Remove spent inputs from UTXO map + track for DB
                     for input in &tx.inputs {
                         existing_utxo_map.remove(&(input.txid.clone(), input.vout));
+                        spent_utxos.push((input.txid.clone(), input.vout));
                     }
 
-                    // Add new outputs to UTXO map
+                    // Add new outputs to UTXO map + track for DB
                     for (vout, output) in tx.outputs.iter().enumerate() {
-                        existing_utxo_map.insert((tx.txid.clone(), vout as u32), output.amount());
+                        let amount = output.amount();
+                        existing_utxo_map.insert((tx.txid.clone(), vout as u32), amount);
+                        created_utxos.push((tx.txid.clone(), vout as u32, output.to.clone(), amount));
                     }
                 }
             }
         }
 
         log::info!(
-            "Processed {} transactions, UTXO map contains {} entries",
+            "Processed {} transactions, UTXO map contains {} entries ({} created, {} spent)",
             transactions.len(),
-            existing_utxo_map.len()
+            existing_utxo_map.len(),
+            created_utxos.len(),
+            spent_utxos.len(),
         );
 
-        transactions
+        (transactions, created_utxos, spent_utxos)
     }
 }

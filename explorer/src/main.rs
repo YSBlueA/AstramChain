@@ -118,7 +118,7 @@ async fn sync_blockchain(db: &ExplorerDB, rpc_client: &NodeRpcClient) -> anyhow:
     let last_synced = db.get_last_synced_height()?;
 
     let mut utxo_map = std::collections::HashMap::new();
-    let (blocks, transactions) = if last_synced == 0 {
+    let (blocks, transactions, created_utxos, spent_utxos) = if last_synced == 0 {
         // Full sync: fetch entire blockchain
         log::info!("Initial sync: fetching entire blockchain from Node");
         rpc_client
@@ -154,6 +154,18 @@ async fn sync_blockchain(db: &ExplorerDB, rpc_client: &NodeRpcClient) -> anyhow:
         log::debug!("💾 ExplorerSync: Persisting block height={} to local DB", block.height);
         db.save_block(block)?;
         new_blocks += 1;
+    }
+
+    // UTXO DB 업데이트: 소비된 UTXO 삭제 후 새 UTXO 저장
+    for (txid, vout) in &spent_utxos {
+        if let Err(e) = db.remove_utxo(txid, *vout) {
+            log::warn!("Failed to remove UTXO {}:{}: {}", txid, vout, e);
+        }
+    }
+    for (txid, vout, address, amount) in &created_utxos {
+        if let Err(e) = db.save_utxo(txid, *vout, address, *amount) {
+            log::warn!("Failed to save UTXO {}:{}: {}", txid, vout, e);
+        }
     }
 
     // Collect unique addresses touched in this batch to avoid N+1 per-tx updates

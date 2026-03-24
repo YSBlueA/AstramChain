@@ -260,37 +260,25 @@ pub async fn get_richlist(
 // 주소별 정보 조회
 pub async fn get_address_info(
     db: web::Data<Arc<ExplorerDB>>,
-    rpc: web::Data<Arc<NodeRpcClient>>,
     path: web::Path<String>,
 ) -> HttpResponse {
     let address = path.into_inner();
     log::info!("📍 Explorer handler: Fetching address info for {}", address);
 
-    let mut info = match db.get_address_info(&address) {
-        Ok(Some(info)) => info,
+    match db.get_address_info(&address) {
+        Ok(Some(info)) => HttpResponse::Ok().json(info),
         Ok(None) => {
-            // 캐시되지 않은 경우, 새로 계산
             match db.update_address_info(&address) {
-                Ok(info) => info,
-                Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+                Ok(info) => HttpResponse::Ok().json(info),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": format!("Failed to calculate address info: {}", e)
                 })),
             }
         }
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
             "error": format!("Database error: {}", e)
         })),
-    };
-
-    // 노드 RPC에서 UTXO 기반 정확한 잔액으로 덮어씀
-    // (Explorer의 트랜잭션 인덱싱은 거스름돈/다중수취인 처리 누락으로 잔액이 부정확할 수 있음)
-    if let Ok((balance, received, sent, _)) = rpc.fetch_address_info(&address).await {
-        info.balance = balance;
-        info.received = received;
-        info.sent = sent;
     }
-
-    HttpResponse::Ok().json(info)
 }
 
 // Node status proxy

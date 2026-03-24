@@ -964,6 +964,33 @@ impl Blockchain {
         Ok(balance)
     }
 
+    /// Get all addresses with their UTXO balances (for richlist)
+    pub fn get_all_address_balances(&self) -> Result<Vec<(String, U256)>> {
+        let mut balances: std::collections::HashMap<String, U256> = std::collections::HashMap::new();
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+
+        for item in iter {
+            let (key, value) = item?;
+            let key_str = String::from_utf8_lossy(&key);
+
+            if key_str.starts_with("u:") {
+                match bincode::decode_from_slice::<Utxo, _>(&value, *BINCODE_CONFIG) {
+                    Ok((utxo, _)) => {
+                        let entry = balances.entry(utxo.to.clone()).or_insert_with(U256::zero);
+                        *entry = *entry + utxo.amount();
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to decode UTXO at {}: {}", key_str, e);
+                    }
+                }
+            }
+        }
+
+        let mut result: Vec<(String, U256)> = balances.into_iter().collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(result)
+    }
+
     /// Get total received amount for address (all outputs to this address)
     pub fn get_address_received_from_db(&self, address: &str) -> Result<U256> {
         let mut total = U256::zero();
