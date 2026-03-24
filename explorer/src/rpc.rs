@@ -101,7 +101,6 @@ impl NodeRpcClient {
     }
 
     /// Fetch address info from Node DB
-    #[allow(dead_code)]
     pub async fn fetch_address_info(
         &self,
         address: &str,
