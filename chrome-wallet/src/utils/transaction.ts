@@ -29,24 +29,42 @@ function calculateFee(sizeBytes: number): bigint {
 }
 
 // ─── Bincode writer ─────────────────────────────────────────────────────────
+// Implements bincode v2 `config::standard()` = varint integer encoding.
+// Varint thresholds: ≤250 → 1 byte; ≤0xFFFF → [251,lo,hi];
+//   ≤0xFFFFFFFF → [252,b0-b3]; else → [253,b0-b7]
 class BincodeWriter {
   private buf: number[] = []
 
   u8(v: number) { this.buf.push(v & 0xff) }
 
-  u32(v: number) {
-    this.buf.push(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff)
+  // Varint-encoded unsigned integer (bincode v2 standard)
+  private varUint(v: bigint) {
+    if (v <= 250n) {
+      this.buf.push(Number(v))
+    } else if (v <= 0xffffn) {
+      this.buf.push(251, Number(v & 0xffn), Number((v >> 8n) & 0xffn))
+    } else if (v <= 0xffff_ffffn) {
+      this.buf.push(252)
+      for (let i = 0; i < 4; i++) { this.buf.push(Number((v >> BigInt(i * 8)) & 0xffn)) }
+    } else {
+      this.buf.push(253)
+      for (let i = 0; i < 8; i++) { this.buf.push(Number((v >> BigInt(i * 8)) & 0xffn)) }
+    }
   }
 
-  u64(v: bigint) {
-    for (let i = 0; i < 8; i++) { this.buf.push(Number(v & 0xffn)); v >>= 8n }
-  }
+  u32(v: number) { this.varUint(BigInt(v)) }
+  u64(v: bigint) { this.varUint(v) }
 
-  i64(v: number) { this.u64(BigInt.asUintN(64, BigInt(v))) }
+  // i64 → zigzag encode → varUint  (bincode v2 standard for signed integers)
+  i64(v: number) {
+    const n = BigInt(v)
+    const zigzag = BigInt.asUintN(64, (n << 1n) ^ (n >> 63n))
+    this.varUint(zigzag)
+  }
 
   str(s: string) {
     const bytes = new TextEncoder().encode(s)
-    this.u64(BigInt(bytes.length))
+    this.varUint(BigInt(bytes.length))
     bytes.forEach(b => this.buf.push(b))
   }
 

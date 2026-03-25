@@ -1039,6 +1039,7 @@ impl Blockchain {
     pub fn get_address_transactions_from_db(
         &self,
         address: &str,
+        limit: Option<usize>,
     ) -> Result<Vec<(String, u64, i64, String, U256, String)>> {
         let blocks = self.get_all_blocks_cached()?;
         let mut results: Vec<(String, u64, i64, String, U256, String)> = Vec::new();
@@ -1109,6 +1110,9 @@ impl Blockchain {
 
         // Newest first
         results.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+        if let Some(n) = limit {
+            results.truncate(n);
+        }
         Ok(results)
     }
 

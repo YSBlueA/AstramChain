@@ -32,6 +32,27 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
   }
   const [txHistory, setTxHistory] = useState<TxEntry[]>([])
 
+  const txHistoryRendered = React.useMemo(() => txHistory.map((tx, i) => {
+    const amountAsrm = (Number(BigInt(tx.amount)) / 1e18).toFixed(6)
+    const date = new Date(tx.timestamp * 1000).toLocaleDateString(i18n.language, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+    })
+    const short = (addr: string) =>
+      addr.length > 12 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr
+    return (
+      <li key={`${tx.txid}-${i}`} className={`tx-item tx-item-${tx.direction}`}>
+        <span className="tx-direction-icon">{tx.direction === 'send' ? '↑' : '↓'}</span>
+        <div className="tx-info">
+          <span className="tx-counterpart">{short(tx.counterpart)}</span>
+          <span className="tx-date">{date} · #{tx.block_height}</span>
+        </div>
+        <span className={`tx-amount ${tx.direction === 'send' ? 'tx-amount-send' : 'tx-amount-receive'}`}>
+          {tx.direction === 'send' ? '-' : '+'}{amountAsrm} ASRM
+        </span>
+      </li>
+    )
+  }), [txHistory, i18n.language])
+
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -86,8 +107,9 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
   const fetchTxHistory = async () => {
     if (!wallet) return
     try {
-      const response = await axios.get(`${rpcUrl}/address/${wallet.address}/transactions`)
-      setTxHistory(response.data.transactions || [])
+      const response = await axios.get(`${rpcUrl}/address/${wallet.address}/transactions?limit=20`)
+      const txs: TxEntry[] = response.data.transactions || []
+      setTxHistory(txs.slice(0, 20))
     } catch (error) {
       console.error('Failed to fetch tx history:', error)
     }
@@ -97,11 +119,12 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
     if (!wallet?.address) return
     fetchBalance()
     fetchTxHistory()
-    const interval = setInterval(() => {
-      fetchBalance()
-      fetchTxHistory()
-    }, 10000)
-    return () => clearInterval(interval)
+    const balanceInterval = setInterval(fetchBalance, 10_000)
+    const txInterval = setInterval(fetchTxHistory, 30_000)
+    return () => {
+      clearInterval(balanceInterval)
+      clearInterval(txInterval)
+    }
   }, [wallet?.address, rpcUrl])
 
   const handleCopyAddress = () => {
@@ -254,26 +277,7 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
           <p className="tx-history-empty">{t('home.txHistoryEmpty')}</p>
         ) : (
           <ul className="tx-history-list">
-            {txHistory.map((tx, i) => {
-              const amountAsrm = (Number(BigInt(tx.amount)) / 1e18).toFixed(6)
-              const date = new Date(tx.timestamp * 1000).toLocaleDateString(i18n.language, {
-                month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-              })
-              const short = (addr: string) =>
-                addr.length > 12 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr
-              return (
-                <li key={`${tx.txid}-${i}`} className={`tx-item tx-item-${tx.direction}`}>
-                  <span className="tx-direction-icon">{tx.direction === 'send' ? '↑' : '↓'}</span>
-                  <div className="tx-info">
-                    <span className="tx-counterpart">{short(tx.counterpart)}</span>
-                    <span className="tx-date">{date} · #{tx.block_height}</span>
-                  </div>
-                  <span className={`tx-amount ${tx.direction === 'send' ? 'tx-amount-send' : 'tx-amount-receive'}`}>
-                    {tx.direction === 'send' ? '-' : '+'}{amountAsrm} ASRM
-                  </span>
-                </li>
-              )
-            })}
+            {txHistoryRendered}
           </ul>
         )}
       </div>

@@ -940,16 +940,20 @@ pub async fn run_server(
             })))
         });
 
-    // GET /address/{address}/transactions
+    // GET /address/{address}/transactions[?limit=N]
+    #[derive(Deserialize)]
+    struct TxLimitQuery { limit: Option<usize> }
     let get_address_transactions = warp::path!("address" / String / "transactions")
         .and(warp::get())
+        .and(warp::query::<TxLimitQuery>())
         .and(node_filter.clone())
-        .and_then(|address: String, node: NodeHandle| async move {
+        .and_then(|address: String, q: TxLimitQuery, node: NodeHandle| async move {
             let address = address.to_lowercase();
             let bc_arc = node.bc.clone();
             let addr = address.clone();
+            let limit = q.limit;
             let result = tokio::task::spawn_blocking(move || {
-                bc_arc.lock().unwrap().get_address_transactions_from_db(&addr)
+                bc_arc.lock().unwrap().get_address_transactions_from_db(&addr, limit)
             })
             .await
             .expect("spawn_blocking panicked");
@@ -1324,16 +1328,20 @@ pub async fn run_public_server(
             })))
         });
 
-    // GET /address/{address}/transactions
+    // GET /address/{address}/transactions[?limit=N]
+    #[derive(Deserialize)]
+    struct TxLimitQueryPub { limit: Option<usize> }
     let get_address_transactions_pub = warp::path!("address" / String / "transactions")
         .and(warp::get())
+        .and(warp::query::<TxLimitQueryPub>())
         .and(node_filter.clone())
-        .and_then(|address: String, node: NodeHandle| async move {
+        .and_then(|address: String, q: TxLimitQueryPub, node: NodeHandle| async move {
             let address = address.to_lowercase();
             let bc_arc = node.bc.clone();
             let addr = address.clone();
+            let limit = q.limit;
             let result = tokio::task::spawn_blocking(move || {
-                bc_arc.lock().unwrap().get_address_transactions_from_db(&addr)
+                bc_arc.lock().unwrap().get_address_transactions_from_db(&addr, limit)
             })
             .await
             .expect("spawn_blocking panicked");
