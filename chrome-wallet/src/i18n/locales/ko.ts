@@ -118,6 +118,11 @@ export default {
     txHistoryTitle: '거래 내역',
     txHistoryEmpty: '거래 내역이 없습니다.',
 
+    receiveTitle: '수신',
+    receiveHint: '이 주소로 ASRM을 받을 수 있습니다',
+    receiveCopyBtn: '주소 복사',
+    receiveCopied: '✓ 복사됨',
+
     sendTitle: '전송',
     sendToLabel: '받는 주소',
     sendAmountLabel: '수량 (ASRM)',

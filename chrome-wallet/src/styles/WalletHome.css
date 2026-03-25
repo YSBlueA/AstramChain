@@ -717,7 +717,7 @@
   color: #4ade80;
 }
 
-/* Send button */
+/* Action buttons (Send / Receive) */
 .action-buttons {
   display: flex;
   gap: 10px;
@@ -726,6 +726,7 @@
   border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
 
+.btn-receive,
 .btn-send {
   flex: 1;
   display: flex;
@@ -735,13 +736,29 @@
   padding: 12px;
   border-radius: 12px;
   border: none;
-  background: linear-gradient(135deg, #7c5cfc, #a78bfa);
-  color: #fff;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
   letter-spacing: 0.3px;
+  color: #fff;
+}
+
+.btn-receive {
+  background: linear-gradient(135deg, #059669, #34d399);
+}
+
+.btn-receive:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(5, 150, 105, 0.45);
+}
+
+.btn-receive:active {
+  transform: translateY(0);
+}
+
+.btn-send {
+  background: linear-gradient(135deg, #7c5cfc, #a78bfa);
 }
 
 .btn-send:hover {
@@ -753,9 +770,81 @@
   transform: translateY(0);
 }
 
-.btn-send-icon {
+.btn-action-icon {
   font-size: 16px;
   font-weight: 700;
+}
+
+/* Receive modal */
+.receive-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin: 0 0 16px;
+  text-align: center;
+}
+
+.receive-address-card {
+  background: var(--bg-tertiary);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  border-radius: 12px;
+  padding: 20px 16px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.receive-address-chunks {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.receive-address-chunk {
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: #34d399;
+  letter-spacing: 0.5px;
+}
+
+.receive-address-full {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  word-break: break-all;
+  line-height: 1.6;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 12px;
+}
+
+.btn-copy-address {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.1);
+  color: #34d399;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 4px;
+}
+
+.btn-copy-address:hover {
+  background: rgba(52, 211, 153, 0.18);
+  border-color: rgba(52, 211, 153, 0.55);
+}
+
+.btn-copy-address--copied {
+  background: rgba(52, 211, 153, 0.2);
+  border-color: #34d399;
+  color: #34d399;
 }
 
 /* Send modal extras */

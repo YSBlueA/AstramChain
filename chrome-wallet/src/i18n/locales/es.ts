@@ -118,6 +118,11 @@ export default {
     txHistoryTitle: 'Historial de transacciones',
     txHistoryEmpty: 'Aún no hay transacciones.',
 
+    receiveTitle: 'Recibir',
+    receiveHint: 'Comparte esta dirección para recibir ASRM',
+    receiveCopyBtn: 'Copiar Dirección',
+    receiveCopied: '✓ Copiado',
+
     sendTitle: 'Enviar',
     sendToLabel: 'Dirección del destinatario',
     sendAmountLabel: 'Cantidad (ASRM)',

@@ -124,6 +124,11 @@ export default {
     txHistoryTitle: 'Transaction History',
     txHistoryEmpty: 'No transactions yet.',
 
+    receiveTitle: 'Receive',
+    receiveHint: 'Share this address to receive ASRM',
+    receiveCopyBtn: 'Copy Address',
+    receiveCopied: '✓ Copied',
+
     sendTitle: 'Send',
     sendToLabel: 'Recipient Address',
     sendAmountLabel: 'Amount (ASRM)',

@@ -118,6 +118,11 @@ export default {
     txHistoryTitle: '取引履歴',
     txHistoryEmpty: '取引履歴はありません。',
 
+    receiveTitle: '受取',
+    receiveHint: 'このアドレスでASRMを受け取れます',
+    receiveCopyBtn: 'アドレスをコピー',
+    receiveCopied: '✓ コピー済み',
+
     sendTitle: '送金',
     sendToLabel: '受取アドレス',
     sendAmountLabel: '金額 (ASRM)',

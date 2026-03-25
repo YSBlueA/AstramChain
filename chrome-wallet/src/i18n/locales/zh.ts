@@ -118,6 +118,11 @@ export default {
     txHistoryTitle: '交易记录',
     txHistoryEmpty: '暂无交易记录。',
 
+    receiveTitle: '接收',
+    receiveHint: '分享此地址以接收 ASRM',
+    receiveCopyBtn: '复制地址',
+    receiveCopied: '✓ 已复制',
+
     sendTitle: '发送',
     sendToLabel: '收款地址',
     sendAmountLabel: '金额 (ASRM)',

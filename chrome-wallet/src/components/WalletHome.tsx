@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useTransition } from 'react'
 import { useWalletStore } from '@/store/wallet'
 import axios from 'axios'
 import { sendTransaction } from '@/utils/transaction'
@@ -6,17 +6,18 @@ import { useTranslation } from 'react-i18next'
 import i18n, { LANGUAGES } from '@/i18n'
 import '../styles/WalletHome.css'
 
+const RPC_TIMEOUT_MS = 8_000
+
 const DEFAULT_RPC = 'https://rpc.astramchain.com'
 
 interface WalletHomeProps {
   onLogout: () => void
-  onCreateWallet: () => void
-  onImportWallet: () => void
 }
 
-export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletHomeProps) {
+export function WalletHome({ onLogout }: WalletHomeProps) {
   const { wallet, updateBalance, clearWallet } = useWalletStore()
   const { t } = useTranslation()
+  const [, startTransition] = useTransition()
 
   const [balance, setBalance] = useState('0')
   const [rpcOnline, setRpcOnline] = useState<boolean | null>(null)
@@ -56,8 +57,10 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
-  type ModalType = 'recovery' | 'privatekey' | 'rpc' | 'addwallet' | 'send' | 'language' | null
+  type ModalType = 'recovery' | 'privatekey' | 'rpc' | 'addwallet' | 'send' | 'receive' | 'language' | null
   const [modal, setModal] = useState<ModalType>(null)
+  const [addrCopied, setAddrCopied] = useState(false)
+  const addrCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showSecret, setShowSecret] = useState(false)
   const [mnemonic, setMnemonic] = useState('')
   const [newRpc, setNewRpc] = useState('')
@@ -71,8 +74,8 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
 
   // Load saved RPC
   useEffect(() => {
-    chrome.storage.local.get('rpcUrl').then((data) => {
-      if (data.rpcUrl) setRpcUrl(data.rpcUrl)
+    chrome.storage.local.get('rpcUrl').then((data: Record<string, any>) => {
+      if (data.rpcUrl) setRpcUrl(data.rpcUrl as string)
     })
   }, [])
 
@@ -87,17 +90,28 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
+  // AbortController refs — cancel in-flight requests before issuing new ones
+  const balanceAbortRef = useRef<AbortController | null>(null)
+  const txAbortRef = useRef<AbortController | null>(null)
+
   const fetchBalance = async () => {
     if (!wallet) return
+    balanceAbortRef.current?.abort()
+    const controller = new AbortController()
+    balanceAbortRef.current = controller
     try {
-      const response = await axios.get(`${rpcUrl}/address/${wallet.address}/balance`)
+      const response = await axios.get(`${rpcUrl}/address/${wallet.address}/balance`, {
+        signal: controller.signal,
+        timeout: RPC_TIMEOUT_MS,
+      })
       const balanceStr = response.data.balance?.toString() || '0'
       const balanceRam = BigInt(balanceStr)
       const balanceAsrm = Number(balanceRam) / 1e18
       setBalance(balanceAsrm.toFixed(6))
       updateBalance(balanceStr)
       setRpcOnline(true)
-    } catch (error) {
+    } catch (error: any) {
+      if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') return
       console.error('Failed to fetch balance:', error)
       setBalance('0.000000')
       setRpcOnline(false)
@@ -106,11 +120,20 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
 
   const fetchTxHistory = async () => {
     if (!wallet) return
+    txAbortRef.current?.abort()
+    const controller = new AbortController()
+    txAbortRef.current = controller
     try {
-      const response = await axios.get(`${rpcUrl}/address/${wallet.address}/transactions?limit=20`)
+      const response = await axios.get(
+        `${rpcUrl}/address/${wallet.address}/transactions?limit=20`,
+        { signal: controller.signal, timeout: RPC_TIMEOUT_MS },
+      )
       const txs: TxEntry[] = response.data.transactions || []
-      setTxHistory(txs.slice(0, 20))
-    } catch (error) {
+      // startTransition: 거래내역 업데이트는 긴급하지 않은 렌더링으로 처리
+      // → React가 다른 입력 이벤트에 먼저 응답하고 여유 있을 때 렌더링
+      startTransition(() => setTxHistory(txs.slice(0, 20)))
+    } catch (error: any) {
+      if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') return
       console.error('Failed to fetch tx history:', error)
     }
   }
@@ -124,15 +147,10 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
     return () => {
       clearInterval(balanceInterval)
       clearInterval(txInterval)
+      balanceAbortRef.current?.abort()
+      txAbortRef.current?.abort()
     }
   }, [wallet?.address, rpcUrl])
-
-  const handleCopyAddress = () => {
-    if (wallet) {
-      navigator.clipboard.writeText(wallet.address)
-      alert(t('home.addressCopied'))
-    }
-  }
 
   const openMenu = (item: ModalType) => {
     setMenuOpen(false)
@@ -141,9 +159,16 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
   }
 
   const handleViewRecovery = async () => {
-    const data = await chrome.storage.local.get('encryptedWallet')
+    const data = await chrome.storage.local.get('encryptedWallet') as Record<string, any>
     setMnemonic(data.encryptedWallet?.mnemonic || '')
     openMenu('recovery')
+  }
+
+  const handleCopyReceive = () => {
+    navigator.clipboard.writeText(wallet?.address || '')
+    setAddrCopied(true)
+    if (addrCopyTimerRef.current) clearTimeout(addrCopyTimerRef.current)
+    addrCopyTimerRef.current = setTimeout(() => setAddrCopied(false), 2000)
   }
 
   const handleOpenRpc = () => {
@@ -224,10 +249,7 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
               <button className="menu-item" onClick={handleOpenRpc}>
                 <span className="menu-icon">🌐</span> {t('home.menuRpc')}
               </button>
-              <button className="menu-item" onClick={() => openMenu('addwallet')}>
-                <span className="menu-icon">➕</span> {t('home.menuAddWallet')}
-              </button>
-              <button className="menu-item" onClick={() => openMenu('language')}>
+<button className="menu-item" onClick={() => openMenu('language')}>
                 <span className="menu-icon">🌍</span> {t('language')}
               </button>
               <div className="menu-divider" />
@@ -252,19 +274,13 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
           </div>
         </div>
 
-        <div className="address-section">
-          <p className="address-label">{t('address')}</p>
-          <div className="address-display">
-            <code>{wallet?.address}</code>
-            <button onClick={handleCopyAddress} className="btn-copy">
-              {t('copy')}
-            </button>
-          </div>
-        </div>
-
         <div className="action-buttons">
+          <button className="btn-receive" onClick={() => setModal('receive')}>
+            <span className="btn-action-icon">↓</span>
+            {t('home.receiveTitle')}
+          </button>
           <button className="btn-send" onClick={() => { setModal('send'); setSendResult(null) }}>
-            <span className="btn-send-icon">↑</span>
+            <span className="btn-action-icon">↑</span>
             {t('home.sendTitle')}
           </button>
         </div>
@@ -353,6 +369,28 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
               </>
             )}
 
+            {modal === 'receive' && (
+              <>
+                <h3 className="modal-title">{t('home.receiveTitle')}</h3>
+                <p className="receive-hint">{t('home.receiveHint')}</p>
+                <div className="receive-address-card">
+                  <div className="receive-address-chunks">
+                    {wallet?.address.match(/.{1,6}/g)?.map((chunk, i) => (
+                      <span key={i} className="receive-address-chunk">{chunk}</span>
+                    ))}
+                  </div>
+                  <div className="receive-address-full">{wallet?.address}</div>
+                </div>
+                <button
+                  className={`btn-copy-address${addrCopied ? ' btn-copy-address--copied' : ''}`}
+                  onClick={handleCopyReceive}
+                >
+                  {addrCopied ? t('home.receiveCopied') : t('home.receiveCopyBtn')}
+                </button>
+                <button className="btn-modal-close" onClick={closeModal}>{t('close')}</button>
+              </>
+            )}
+
             {modal === 'send' && (
               <>
                 <h3 className="modal-title">{t('home.sendTitle')}</h3>
@@ -428,25 +466,6 @@ export function WalletHome({ onLogout, onCreateWallet, onImportWallet }: WalletH
               </>
             )}
 
-            {modal === 'addwallet' && (
-              <>
-                <h3 className="modal-title">{t('home.addWalletTitle')}</h3>
-                <p className="modal-desc">{t('home.addWalletDesc')}</p>
-                <div className="addwallet-buttons">
-                  <button className="btn-addwallet" onClick={() => { closeModal(); onCreateWallet() }}>
-                    <span className="addwallet-icon">✨</span>
-                    <span className="addwallet-label">{t('home.createWalletLabel')}</span>
-                    <span className="addwallet-desc">{t('home.createWalletDesc')}</span>
-                  </button>
-                  <button className="btn-addwallet" onClick={() => { closeModal(); onImportWallet() }}>
-                    <span className="addwallet-icon">📥</span>
-                    <span className="addwallet-label">{t('home.importWalletLabel')}</span>
-                    <span className="addwallet-desc">{t('home.importWalletDesc')}</span>
-                  </button>
-                </div>
-                <button className="btn-modal-close" onClick={closeModal}>{t('cancel')}</button>
-              </>
-            )}
 
           </div>
         </div>
