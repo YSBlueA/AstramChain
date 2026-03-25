@@ -1049,7 +1049,11 @@ impl Blockchain {
             let height = block.header.index;
             for tx in block.transactions {
                 let is_receiver = tx.outputs.iter().any(|o| o.to == address);
-                let is_sender = tx.inputs.iter().any(|i| i.pubkey == address);
+                let is_sender = tx.inputs.iter().any(|i| {
+                    crate::crypto::address_from_pubkey_hex(&i.pubkey)
+                        .map(|a| a.to_lowercase() == address)
+                        .unwrap_or(false)
+                });
 
                 if !is_receiver && !is_sender {
                     continue;
@@ -1094,7 +1098,10 @@ impl Blockchain {
                     let sender = tx
                         .inputs
                         .first()
-                        .map(|i| i.pubkey.clone())
+                        .map(|i| {
+                            crate::crypto::address_from_pubkey_hex(&i.pubkey)
+                                .unwrap_or_else(|_| i.pubkey.clone())
+                        })
                         .unwrap_or_else(|| "coinbase".to_string());
                     results.push((
                         tx.txid.clone(),
