@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useWalletStore } from '@/store/wallet'
-import { decryptPrivateKey } from '@/utils/crypto'
+import { decryptPrivateKey, encryptMnemonic } from '@/utils/crypto'
 import { useTranslation } from 'react-i18next'
 import '../styles/UnlockWallet.css'
 
@@ -29,8 +29,17 @@ export function UnlockWallet({ onSuccess, onCancel }: UnlockWalletProps) {
         return
       }
 
-      const { address, encryptedPrivateKey, salt, iv } = result.encryptedWallet
+      const { address, encryptedPrivateKey, salt, iv, mnemonic, encryptedMnemonic } = result.encryptedWallet
       const privateKey = decryptPrivateKey(encryptedPrivateKey, password, salt, iv)
+
+      // 마이그레이션: 평문 mnemonic이 있으면 암호화해서 재저장
+      if (mnemonic && !encryptedMnemonic) {
+        const { encryptedMnemonic: em, mnemonicSalt, mnemonicIv } = encryptMnemonic(mnemonic, password)
+        const { mnemonic: _removed, ...rest } = result.encryptedWallet
+        await chrome.storage.local.set({
+          encryptedWallet: { ...rest, encryptedMnemonic: em, mnemonicSalt, mnemonicIv },
+        })
+      }
 
       initWallet({ address, privateKey, balance: '0' })
       onSuccess()

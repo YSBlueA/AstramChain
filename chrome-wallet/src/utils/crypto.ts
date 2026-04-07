@@ -37,6 +37,45 @@ export function encryptPrivateKey(privateKey: string, password: string): {
   }
 }
 
+// 니모닉 암호화
+export function encryptMnemonic(mnemonic: string, password: string): {
+  encryptedMnemonic: string
+  mnemonicSalt: string
+  mnemonicIv: string
+} {
+  const mnemonicSalt = CryptoJS.lib.WordArray.random(16).toString()
+  const mnemonicIv = CryptoJS.lib.WordArray.random(16).toString()
+  const key = deriveKey(password, mnemonicSalt)
+  const encrypted = CryptoJS.AES.encrypt(mnemonic, key, {
+    iv: CryptoJS.enc.Hex.parse(mnemonicIv),
+    mode: CryptoJS.mode.CBC,
+    padding: CryptoJS.pad.Pkcs7,
+  })
+  return { encryptedMnemonic: encrypted.toString(), mnemonicSalt, mnemonicIv }
+}
+
+// 니모닉 복호화
+export function decryptMnemonic(
+  encryptedMnemonic: string,
+  password: string,
+  mnemonicSalt: string,
+  mnemonicIv: string
+): string {
+  try {
+    const key = deriveKey(password, mnemonicSalt)
+    const decrypted = CryptoJS.AES.decrypt(encryptedMnemonic, key, {
+      iv: CryptoJS.enc.Hex.parse(mnemonicIv),
+      mode: CryptoJS.mode.CBC,
+      padding: CryptoJS.pad.Pkcs7,
+    })
+    const mnemonic = decrypted.toString(CryptoJS.enc.Utf8)
+    if (!mnemonic) throw new Error('Invalid password')
+    return mnemonic
+  } catch (err) {
+    throw new Error('Failed to decrypt mnemonic')
+  }
+}
+
 // 복호화
 export function decryptPrivateKey(
   encryptedPrivateKey: string,

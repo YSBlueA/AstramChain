@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useWalletStore } from '@/store/wallet'
-import { encryptPrivateKey } from '@/utils/crypto'
+import { encryptPrivateKey, encryptMnemonic } from '@/utils/crypto'
 import { generateEd25519Wallet, createWalletFromEd25519Mnemonic } from '@/utils/ed25519-mnemonic'
 import { useTranslation } from 'react-i18next'
 import '../styles/CreateWallet.css'
@@ -65,13 +65,16 @@ export function CreateWallet({ onSuccess, onCancel }: CreateWalletProps) {
 
     try {
       const { encryptedPrivateKey, salt, iv } = encryptPrivateKey(wallet.privateKey, password)
+      const { encryptedMnemonic, mnemonicSalt, mnemonicIv } = encryptMnemonic(wallet.mnemonic, password)
 
       const encryptedWallet = {
         address: wallet.address,
         encryptedPrivateKey,
         salt,
         iv,
-        mnemonic: wallet.mnemonic,
+        encryptedMnemonic,
+        mnemonicSalt,
+        mnemonicIv,
       }
 
       await chrome.storage.local.set({ encryptedWallet })
