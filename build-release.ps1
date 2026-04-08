@@ -11,14 +11,10 @@ function Write-Error { Write-Host "ERROR $args" -ForegroundColor Red }
 Write-Info "Astram Release Builder for Windows"
 Write-Host ""
 
-# GPU (CUDA) is the only supported miner backend
+# GPU (CUDA) is the only supported miner backend on Windows
 Write-Info "Build backend: GPU (CUDA)"
 $BuildBackend = "cuda"
 $env:MINER_BACKEND = $BuildBackend
-
-# Use default features (cuda-miner enabled by default)
-$NodeFeatureArgs = @()
-$ExplorerFeatureArgs = @()
 
 # Clean previous release
 $ReleaseDir = "release/windows"
@@ -34,15 +30,18 @@ New-Item -ItemType Directory -Force -Path "$ReleaseDir/config" | Out-Null
 
 # Build all components in release mode
 Write-Info "Building all components in release mode..."
-cargo build --release --workspace --exclude Astram-node --exclude Astram-explorer --exclude Astram-miner
-cargo build --release -p Astram-node @NodeFeatureArgs
-cargo build --release -p Astram-miner --features cuda-miner
-cargo build --release -p Astram-explorer @ExplorerFeatureArgs
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Build failed!"
-    exit 1
-}
+cargo build --release --workspace --exclude Astram-node --exclude Astram-explorer --exclude Astram-miner
+if ($LASTEXITCODE -ne 0) { Write-Error "Build failed (workspace)!"; exit 1 }
+
+cargo build --release -p Astram-node
+if ($LASTEXITCODE -ne 0) { Write-Error "Build failed (Astram-node)!"; exit 1 }
+
+cargo build --release -p Astram-miner --features cuda-miner
+if ($LASTEXITCODE -ne 0) { Write-Error "Build failed (Astram-miner)!"; exit 1 }
+
+cargo build --release -p Astram-explorer
+if ($LASTEXITCODE -ne 0) { Write-Error "Build failed (Astram-explorer)!"; exit 1 }
 
 Write-Success "Build completed successfully!"
 

@@ -48,11 +48,14 @@ mkdir -p "$RELEASE_DIR/config"
 echo -e "${INFO}Building components...${NC}"
 
 if [ "$PLATFORM" = "macos" ]; then
-    # macOS: pool server only — skip miner (no CUDA)
-    cargo build --release --workspace \
-        --exclude Astram-node \
-        --exclude Astram-explorer \
-        --exclude Astram-miner
+    # macOS: pool server only — miner is never mentioned to prevent
+    # any CUDA feature bleeding from miner's Cargo.toml into core
+    cargo build --release \
+        -p Astram-core \
+        -p astram-config \
+        -p Astram-stratum \
+        -p Astram-dns \
+        -p wallet-cli
 
     cargo build --release -p Astram-node
     cargo build --release -p Astram-explorer
