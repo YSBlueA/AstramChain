@@ -21,8 +21,13 @@ echo -e "${INFO}INFO  Detected platform: $PLATFORM${NC}"
 # GPU backend
 # ---------------------------
 
-echo -e "${INFO}INFO  Build backend: GPU (CUDA)${NC}"
-export MINER_BACKEND="cuda"
+if [ "$PLATFORM" = "macos" ]; then
+    echo -e "${INFO}INFO  Build backend: CPU only (macOS — no CUDA)${NC}"
+    export MINER_BACKEND="cpu"
+else
+    echo -e "${INFO}INFO  Build backend: GPU (CUDA)${NC}"
+    export MINER_BACKEND="cuda"
+fi
 
 NODE_BUILD_FLAGS=""
 EXPLORER_BUILD_FLAGS=""
@@ -42,14 +47,25 @@ mkdir -p "$RELEASE_DIR/config"
 
 echo -e "${INFO}Building components...${NC}"
 
-cargo build --release --workspace \
-    --exclude Astram-node \
-    --exclude Astram-explorer \
-    --exclude Astram-miner
+if [ "$PLATFORM" = "macos" ]; then
+    # macOS: pool server only — skip miner (no CUDA)
+    cargo build --release --workspace \
+        --exclude Astram-node \
+        --exclude Astram-explorer \
+        --exclude Astram-miner
 
-cargo build --release -p Astram-node
-cargo build --release -p Astram-miner --features cuda-miner
-cargo build --release -p Astram-explorer
+    cargo build --release -p Astram-node
+    cargo build --release -p Astram-explorer
+else
+    cargo build --release --workspace \
+        --exclude Astram-node \
+        --exclude Astram-explorer \
+        --exclude Astram-miner
+
+    cargo build --release -p Astram-node
+    cargo build --release -p Astram-miner --features cuda-miner
+    cargo build --release -p Astram-explorer
+fi
 
 echo -e "${SUCCESS}Build completed${NC}"
 
@@ -118,14 +134,25 @@ fi
 
 echo -e "${INFO}Copying executables${NC}"
 
-EXECUTABLES=(
-"Astram-node"
-"Astram-miner"
-"Astram-stratum"
-"Astram-dns"
-"Astram-explorer"
-"wallet-cli"
-)
+if [ "$PLATFORM" = "macos" ]; then
+    # macOS pool server: miner is excluded (no CUDA)
+    EXECUTABLES=(
+    "Astram-node"
+    "Astram-stratum"
+    "Astram-dns"
+    "Astram-explorer"
+    "wallet-cli"
+    )
+else
+    EXECUTABLES=(
+    "Astram-node"
+    "Astram-miner"
+    "Astram-stratum"
+    "Astram-dns"
+    "Astram-explorer"
+    "wallet-cli"
+    )
+fi
 
 for exe in "${EXECUTABLES[@]}"; do
 
@@ -538,7 +565,7 @@ README
 # ---------------------------
 
 cat > "$RELEASE_DIR/BUILD_INFO.conf" <<EOF
-MINER_BACKEND=cuda
+MINER_BACKEND=${MINER_BACKEND}
 EOF
 
 # ---------------------------
@@ -551,7 +578,7 @@ cat > "$RELEASE_DIR/VERSION.txt" <<EOF
 Astram v$VERSION
 Built: $(date "+%Y-%m-%d %H:%M:%S")
 Platform: $PLATFORM x64
-Miner Backend: cuda
+Miner Backend: ${MINER_BACKEND}
 EOF
 
 echo -e "${SUCCESS}Release package created successfully${NC}"
