@@ -1,0 +1,190 @@
+/* ===== TxApproval - Dark Theme ===== */
+.tx-approval-container {
+  padding: 24px 20px;
+  min-height: 100vh;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Header */
+.tx-approval-header {
+  text-align: center;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tx-approval-icon {
+  font-size: 36px;
+  margin-bottom: 12px;
+}
+
+.tx-approval-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.tx-approval-subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
+/* Detail card */
+.tx-detail-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  box-shadow: var(--shadow-md);
+}
+
+.tx-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  gap: 12px;
+}
+
+.tx-detail-label {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tx-detail-value {
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: right;
+  word-break: break-all;
+}
+
+.tx-detail-mono {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.tx-detail-amount {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.tx-detail-divider {
+  height: 1px;
+  background: var(--border);
+}
+
+/* No wallet state */
+.tx-approval-no-wallet {
+  background: var(--warning-dim);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  text-align: center;
+  color: var(--warning);
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Action buttons */
+.tx-action-buttons {
+  display: flex;
+  gap: 12px;
+  margin-top: auto;
+}
+
+.tx-btn-reject {
+  flex: 1;
+  padding: 14px;
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.tx-btn-reject:hover {
+  background: var(--error-dim);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: var(--error);
+}
+
+.tx-btn-approve {
+  flex: 1.5;
+  padding: 14px;
+  background: var(--accent-gradient);
+  border: none;
+  border-radius: var(--radius-md);
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  transition: opacity 0.2s;
+  box-shadow: var(--shadow-sm);
+}
+
+.tx-btn-approve:hover {
+  opacity: 0.88;
+}
+
+/* Status messages */
+.tx-status-msg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+}
+
+.tx-status-loading {
+  background: var(--info-dim);
+  color: var(--text-secondary);
+}
+
+.tx-status-success {
+  background: var(--success-dim);
+  color: var(--success);
+}
+
+.tx-status-error {
+  background: var(--error-dim);
+  color: var(--error);
+}
+
+/* Spinner */
+.tx-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-light);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: tx-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes tx-spin {
+  to { transform: rotate(360deg); }
+}

@@ -6,7 +6,14 @@ import { WalletHome } from '@/components/WalletHome'
 import { ImportWallet } from '@/components/ImportWallet'
 import { CreateWallet } from '@/components/CreateWallet'
 import { GetStarted } from '@/components/GetStarted'
+import { TxApproval } from '@/components/TxApproval'
 import { useWalletStore } from '@/store/wallet'
+
+interface PendingTx {
+  id: string
+  to: string
+  amount: number
+}
 
 // 패널이 닫힌 후 이 시간(ms)이 지나면 첫 페이지로 돌아감 (기본 5분)
 const AUTO_LOCK_MS = 5 * 60 * 1000
@@ -15,6 +22,21 @@ export function App() {
   const { wallet, initWallet } = useWalletStore()
   const [hasWallet, setHasWallet] = useState(false)
   const [step, setStep] = useState<'getstarted' | 'creating' | 'importing' | 'unlocking' | 'wallet'>('getstarted')
+  const [pendingTx, setPendingTx] = useState<PendingTx | null>(null)
+
+  // pendingTx 감지 — dApp에서 signTransaction 요청이 오면 TxApproval 표시
+  useEffect(() => {
+    chrome.storage.local.get('pendingTx', (data) => {
+      if (data.pendingTx) setPendingTx(data.pendingTx as PendingTx)
+    })
+    const listener = (changes: { [key: string]: chrome.storage.StorageChange }) => {
+      if ('pendingTx' in changes) {
+        setPendingTx((changes.pendingTx.newValue as PendingTx) ?? null)
+      }
+    }
+    chrome.storage.onChanged.addListener(listener)
+    return () => chrome.storage.onChanged.removeListener(listener)
+  }, [])
 
   // 패널이 숨겨질 때(닫힘/탭 전환) 타임스탬프 저장
   useEffect(() => {
@@ -64,6 +86,11 @@ export function App() {
   const handleUnlockSuccess = () => {
     setHasWallet(true)
     setStep('wallet')
+  }
+
+  // pendingTx가 있으면 현재 step에 관계없이 승인 UI 표시
+  if (pendingTx) {
+    return <TxApproval pendingTx={pendingTx} onDone={() => setPendingTx(null)} />
   }
 
   return (
