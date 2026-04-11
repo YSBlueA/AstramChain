@@ -67,7 +67,7 @@ else
 
     cargo build --release -p Astram-node
     cargo build --release -p Astram-miner --features cuda-miner
-    cargo build --release -p Astram-explorer
+    cargo build --release -p Astram-explorer --features cuda-miner
 fi
 
 echo -e "${SUCCESS}Build completed${NC}"

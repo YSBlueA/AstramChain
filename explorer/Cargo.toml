@@ -25,5 +25,5 @@ primitive-types = { version = "0.12", features = ["serde"] }
 rocksdb = "0.24.0"
 
 [features]
-default = ["cuda-miner"]
+default = []
 cuda-miner = ["Astram-node/cuda-miner"]

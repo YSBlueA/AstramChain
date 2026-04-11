@@ -40,7 +40,7 @@ if ($LASTEXITCODE -ne 0) { Write-Error "Build failed (Astram-node)!"; exit 1 }
 cargo build --release -p Astram-miner --features cuda-miner
 if ($LASTEXITCODE -ne 0) { Write-Error "Build failed (Astram-miner)!"; exit 1 }
 
-cargo build --release -p Astram-explorer
+cargo build --release -p Astram-explorer --features cuda-miner
 if ($LASTEXITCODE -ne 0) { Write-Error "Build failed (Astram-explorer)!"; exit 1 }
 
 Write-Success "Build completed successfully!"
