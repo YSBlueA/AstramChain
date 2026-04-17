@@ -9,6 +9,7 @@ use astram_node::NodeHandles;
 use astram_node::NodeMeta;
 use astram_node::p2p::service::P2PService;
 use astram_node::server::{run_server, run_public_server};
+use flexi_logger::{Age, Cleanup, Criterion, Duplicate, FileSpec, Logger, Naming, WriteMode};
 use log::{info, warn};
 use serde::Deserialize;
 use serde_json::Value;
@@ -201,34 +202,33 @@ fn to_socket_addr(addr: &str, port: u16, fallback: SocketAddr) -> SocketAddr {
 async fn main() {
     println!("[INFO] Astram node starting...");
 
-    let mut logger = env_logger::Builder::from_default_env();
+    // Load settings first so we can place log files inside data_dir/logs/
+    let node_settings = Arc::new(load_node_settings());
+
+    let log_dir = format!("{}/logs", node_settings.data_dir);
+    let _ = fs::create_dir_all(&log_dir);
 
     #[cfg(debug_assertions)]
-    {
-        logger
-            .filter_level(log::LevelFilter::Info)
-            .filter_module("warp", log::LevelFilter::Warn)
-            .filter_module("hyper", log::LevelFilter::Warn)
-            .filter_module("reqwest", log::LevelFilter::Warn)
-            .filter_module("Astram::http", log::LevelFilter::Warn);
-    }
+    let log_spec = "info, warp=warn, hyper=warn, reqwest=warn, Astram::http=warn";
 
     #[cfg(not(debug_assertions))]
-    {
-        // Release: keep operational logs, suppress verbose transport internals.
-        logger
-            .filter_level(log::LevelFilter::Info)
-            .filter_module("astram_node::p2p::manager", log::LevelFilter::Warn)
-            .filter_module("warp", log::LevelFilter::Warn)
-            .filter_module("hyper", log::LevelFilter::Warn)
-            .filter_module("reqwest", log::LevelFilter::Warn)
-            .filter_module("Astram::http", log::LevelFilter::Warn);
-    }
+    let log_spec =
+        "info, astram_node::p2p::manager=warn, warp=warn, hyper=warn, reqwest=warn, Astram::http=warn";
 
-    logger.init();
+    Logger::try_with_env_or_str(log_spec)
+        .expect("Failed to build logger")
+        .log_to_file(FileSpec::default().directory(&log_dir).basename("node"))
+        .duplicate_to_stderr(Duplicate::All)
+        .rotate(
+            Criterion::Age(Age::Day),
+            Naming::Timestamps,
+            Cleanup::KeepLogFiles(5),
+        )
+        .write_mode(WriteMode::BufferAndFlush)
+        .start()
+        .expect("Failed to start logger");
 
     let cfg = Config::load();
-    let node_settings = Arc::new(load_node_settings());
 
     // Read wallet address from file (expand paths configured via CLI)
     let wallet_path = cfg.wallet_path_resolved();

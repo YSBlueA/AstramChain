@@ -17,6 +17,7 @@
 compile_error!("Astram-miner requires CUDA. Build with `--features cuda-miner`.");
 
 use anyhow::{Result, anyhow};
+use flexi_logger::{Age, Cleanup, Criterion, Duplicate, FileSpec, Logger, Naming, WriteMode};
 use astram_config::config::Config;
 use base64::{Engine as _, engine::general_purpose};
 use Astram_core::block::{Block, BlockHeader};
@@ -720,9 +721,18 @@ async fn run_stratum_session(
 
 #[tokio::main]
 async fn main() {
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .init();
+    Logger::try_with_env_or_str("info")
+        .expect("Failed to build logger")
+        .log_to_file(FileSpec::default().directory("logs").basename("miner"))
+        .duplicate_to_stderr(Duplicate::All)
+        .rotate(
+            Criterion::Age(Age::Day),
+            Naming::Timestamps,
+            Cleanup::KeepLogFiles(5),
+        )
+        .write_mode(WriteMode::BufferAndFlush)
+        .start()
+        .expect("Failed to start logger");
 
     println!("[INFO] Astram miner starting...");
 
