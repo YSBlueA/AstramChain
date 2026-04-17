@@ -1,322 +1,301 @@
-# Mining Performance Testing Guide
+# Mining Performance Guide
+
+Astram uses the KawPow-Blake3 algorithm — a memory-hard PoW using a 4 GB DAG.  
+GPU mining requires an NVIDIA GPU with ≥ 4 GB VRAM and a working CUDA installation.
 
 ## Quick Start
 
-### 1. Build with CUDA
-```powershell
-cargo build --release --features cuda-miner
+### 1. Build the miner
+
+```bash
+# Linux (recommended — uses build script)
+./build-release.sh
+
+# Manual build
+cargo build --release -p Astram-miner --features cuda-miner
 ```
 
-### 2. Start Mining
-```powershell
-.\target\release\Astram-node.exe --miner --address 0xYOUR_ADDRESS_HERE
+### 2. Configure mining mode
+
+Edit `config/minerSettings.conf`:
+
+**Solo mining** (mine directly against your local node):
+```ini
+MINING_MODE=solo
+NODE_RPC_URL=http://127.0.0.1:19533
+STATUS_PORT=8090
+```
+
+**Pool mining** (connect to a Stratum pool):
+```ini
+MINING_MODE=pool
+POOL_HOST=127.0.0.1
+POOL_PORT=3333
+WORKER_NAME=worker1
+STATUS_PORT=8090
+```
+
+### 3. Start the node first (solo mode)
+
+```bash
+./release/linux/Astram.sh node
+```
+
+### 4. Start the miner
+
+```bash
+./release/linux/Astram.sh miner
+```
+
+Or run the binary directly:
+
+```bash
+./target/release/Astram-miner
 ```
 
 ### Expected Output
+
 ```
-[DAG] Generating 4GB DAG for epoch 0... (this takes several minutes)
-[DAG] Progress: 0%
+[INFO] Astram miner starting...
+[INFO] Mode: Solo
+[SOLO] Starting solo miner → node: http://127.0.0.1:19533
+[SOLO] Miner address: 0xabc123...
+[DAG] Generating 4 GB DAG for epoch 0... (this takes 3–5 minutes)
 [DAG] Progress: 10%
 ...
 [DAG] Progress: 100%
-[DAG] Generation complete!
 [CUDA] DAG uploaded to GPU, starting mining...
-[DEBUG] Mining: Entering memory-hard mining loop, difficulty=0x1e0fffff requires 4 leading zeros
-Mining hashrate: 85.2 MH/s  (example)
+[SOLO] Mining block #1234 | diff=0x1e0fffff | txs=3 | reward=8000000000000000000 wei
+Mining hashrate: 85.2 MH/s
 ```
+
+The miner status dashboard is available at `http://localhost:8090`.
+
+---
 
 ## Performance Benchmarking
 
-### Test 1: DAG Generation Speed
-Measures DAG generation speed before CUDA mining starts:
-```powershell
-cargo run --release --example bench-dag
-```
+### DAG Generation Speed
 
-**Expected**: 3-5 minutes on modern desktop systems
+DAG generation is parallelized with rayon. Expected time: **3–5 minutes** on a modern desktop.
 
-### Test 2: GPU Miner Startup
-Verify end-to-end startup on CUDA backend:
-```powershell
-cargo build --release --features cuda-miner
-.\target\release\Astram-node.exe --miner
-```
+Monitor progress via log output or the status dashboard.  
+The DAG regenerates once per epoch (every 7,500 blocks, ~10.4 days at 120 s/block).
 
-**Expected**: DAG upload succeeds and mining loop starts
+### Expected Hashrates
 
-### Test 3: GPU Miner Performance
-Full CUDA mining:
-```powershell
-cargo build --release --features cuda-miner
-.\target\release\Astram-node.exe --miner
-```
+| GPU | VRAM | Est. Hashrate |
+|-----|------|---------------|
+| GTX 1050 Ti | 4 GB | 50–100 MH/s |
+| GTX 1660 Super | 6 GB | 100–150 MH/s |
+| RTX 3060 Ti | 8 GB | 200–300 MH/s |
+| RTX 3070 | 8 GB | 250–400 MH/s |
+| RTX 4090 | 24 GB | 600–900 MH/s |
 
-**Expected on GTX 1050 Ti**: 50-150 MH/s
+*Estimated — actual performance will vary. Benchmarking results pending.*
 
-### Test 4: Memory Bandwidth Utilization
-Check GPU memory bandwidth usage:
-```powershell
-# In another terminal, run nvidia-smi
-nvidia-smi dmon -s u
-```
-
-Should see high memory utilization (>80%).
+---
 
 ## Optimization Tuning
 
 ### Environment Variables
 
-#### CUDA_BATCH_SIZE
-Number of hashes per GPU kernel call:
-```powershell
-$env:CUDA_BATCH_SIZE = "33554432"  # 32M hashes (default: 16M)
-.\target\release\Astram-node.exe --miner
+#### `CUDA_BATCH_SIZE`
+Number of hashes per GPU kernel call (default: 16 M):
+
+```bash
+CUDA_BATCH_SIZE=33554432 ./target/release/Astram-miner   # 32 M hashes
 ```
 
-**Effects**:
-- Larger: Better GPU utilization, slower cancel response
-- Smaller: Faster response, lower hashrate
+| GPU | Recommended |
+|-----|-------------|
+| GTX 1050 Ti | 16 M (default) |
+| RTX 3070 | 32 M |
+| RTX 4090 | 64 M |
 
-**Recommended**:
-- GTX 1050 Ti: 16M (default)
-- RTX 3070: 32M
-- RTX 4090: 64M
+Larger batch = better GPU utilization, slower cancel response.  
+Smaller batch = faster new-job response, slightly lower hashrate.
+
+#### `CUDA_VISIBLE_DEVICES`
+Select a specific GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ./target/release/Astram-miner
+```
 
 ### Code-Level Tuning
 
-#### 1. Threads Per Block ([cuda.rs](../core/src/consensus/cuda.rs#L16))
+These constants are in [core/src/consensus/cuda.rs](../core/src/consensus/cuda.rs):
+
+#### Threads Per Block (default: 512)
+
 ```rust
-const THREADS_PER_BLOCK: u32 = 512;  // Current
+const THREADS_PER_BLOCK: u32 = 512;
 ```
 
-Try different values for your GPU:
-- **128**: Older GPUs (compute capability < 3.0)
-- **256**: GTX 900/1000 series
-- **512**: GTX 1050 Ti to RTX 2000 series (recommended)
-- **1024**: RTX 3000/4000 series
+| Compute capability | Recommended |
+|--------------------|-------------|
+| < 3.0 (older GPUs) | 128 |
+| GTX 900–1000 series | 256 |
+| GTX 1050 Ti – RTX 2000 | 512 |
+| RTX 3000–4000 series | 1024 |
 
-#### 2. Max Blocks ([cuda.rs](../core/src/consensus/cuda.rs#L17))
+#### Max Blocks (default: 8192)
+
 ```rust
-const MAX_BLOCKS: u32 = 8192;  // Current
+const MAX_BLOCKS: u32 = 8192;
 ```
 
-Adjust based on GPU:
-- GTX 1050 Ti (768 cores): 4096-8192
-- RTX 3070 (5888 cores): 16384
-- RTX 4090 (16384 cores): 32768
+Formula: `MAX_BLOCKS = (CUDA_cores / THREADS_PER_BLOCK) × 4`
 
-Formula: `MAX_BLOCKS = (CUDA_cores / THREADS_PER_BLOCK) * 4`
+| GPU | Recommended |
+|-----|-------------|
+| GTX 1050 Ti (768 cores) | 4096–8192 |
+| RTX 3070 (5888 cores) | 16384 |
+| RTX 4090 (16384 cores) | 32768 |
 
-#### 3. Mix Iterations ([dag.rs](../core/src/consensus/dag.rs#L9))
+#### Mix Iterations (default: 64)
+
+Defined in [core/src/consensus/dag.rs](../core/src/consensus/dag.rs):
+
 ```rust
-pub const MIX_ITERATIONS: usize = 64;  // Current
+pub const MIX_ITERATIONS: usize = 64;
 ```
 
-**Trade-off**:
-- Higher: More memory-hard, slower mining, better ASIC resistance
-- Lower: Faster mining, less memory-hard
-
-Recommended: 64 (matching KawPow)
-
-#### 4. DAG Item Size ([dag.rs](../core/src/consensus/dag.rs#L8))
-```rust
-pub const DAG_ITEM_SIZE: usize = 128;  // Current
-```
-
-**Fixed at 128 bytes** - changing breaks consensus!
-
-## Troubleshooting
-
-### Problem: "Failed to upload DAG to GPU: out of memory"
-**Cause**: GPU has less than 4GB VRAM
-
-**Solutions**:
-1. Close other GPU applications (browsers, games)
-
-2. Reduce system reserved VRAM in BIOS/UEFI
-
-3. Use a GPU with at least 4GB VRAM
-
-### Problem: Low hashrate on GPU (<10 MH/s)
-**Possible causes**:
-1. Power limit throttling
-   ```powershell
-   nvidia-smi -pl 120  # Set power limit to 120W
-   ```
-
-2. Temperature throttling
-   - Check temperature: `nvidia-smi -q | Select-String "GPU Current Temp"`
-   - Improve cooling
-
-3. Wrong GPU selected
-   ```powershell
-   $env:CUDA_VISIBLE_DEVICES = "0"  # Use GPU 0
-   ```
-
-4. Background GPU usage
-   - Close Chrome/browsers (GPU acceleration)
-   - Close games, video players
-
-### Problem: DAG generation takes >10 minutes
-**Cause**: system bottleneck or insufficient free RAM
-
-**Solutions**:
-1. Close other applications (need 4GB+ free RAM)
-2. Wait for completion (only happens once per epoch)
-3. TODO: Enable DAG caching to disk
-
-### Problem: "GPU hash mismatch"
-**Cause**: CUDA kernel computation error
-
-**Debug**:
-1. Rebuild with debug symbols:
-   ```powershell
-   cargo clean
-   cargo build --release --features cuda-miner
-   ```
-
-2. Check GPU stability:
-   ```powershell
-   nvidia-smi -q -d MEMORY,CLOCK
-   ```
-
-3. Reduce overclock if any
-
-## Performance Comparison
-
-### GTX 1050 Ti (768 cores, 4GB GDDR5)
-
-| Algorithm | Hashrate | Power | Efficiency |
-|-----------|----------|-------|------------|
-| SHA256d (old) | 40 MH/s | 75W | 0.53 MH/J |
-| **Blake3-KawPow (new)** | **~100 MH/s** | 75W | **1.33 MH/J** |
-
-*Estimated - actual performance TBD*
-
-### Expected Scaling
-
-| GPU Model | VRAM | Cores | Est. Hashrate |
-|-----------|------|-------|---------------|
-| GTX 1050 Ti | 4GB | 768 | 50-100 MH/s |
-| GTX 1660 Super | 6GB | 1408 | 100-150 MH/s |
-| RTX 3060 Ti | 8GB | 4864 | 200-300 MH/s |
-| RTX 3070 | 8GB | 5888 | 250-400 MH/s |
-| RTX 4090 | 24GB | 16384 | 600-900 MH/s |
-
-## Profiling Tools
-
-### 1. Nsight Compute (NVIDIA)
-```powershell
-ncu --target-processes all .\target\release\Astram-node.exe --miner
-```
-
-Analyzes:
-- Memory bandwidth utilization
-- Compute throughput
-- Occupancy
-- Warp efficiency
-
-### 2. Nsight Systems (NVIDIA)
-```powershell
-nsys profile .\target\release\Astram-node.exe --miner
-```
-
-Shows:
-- Timeline of GPU/host activity
-- Kernel launch overhead
-- Memory copy operations
-
-### 3. Built-in Hashrate Monitor
-Enabled by default, prints every 5 seconds:
-```
-Mining hashrate: 85.2 MH/s
-Mining hashrate: 87.1 MH/s
-```
-
-## Advanced: DAG Caching (TODO)
-
-### Implementation Plan
-```rust
-// core/src/consensus/dag_cache.rs
-
-pub struct DagCache {
-    cache_dir: PathBuf,  // ~/.astram/dag/
-}
-
-impl DagCache {
-    pub fn load_or_generate(&self, epoch: u64) -> Result<Vec<u8>> {
-        let path = self.cache_dir.join(format!("epoch-{}.bin", epoch));
-        
-        if path.exists() {
-            // Load from disk (~1-2 seconds)
-            std::fs::read(&path)
-        } else {
-            // Generate and save
-            let dag = generate_full_dag(epoch)?;
-            std::fs::write(&path, &dag)?;
-            Ok(dag)
-        }
-    }
-}
-```
-
-**Benefits**:
-- Skip 3-5 minute DAG generation on restart
-- Disk space: 4GB per epoch (~20GB for 5 epochs)
-
-## Mining Pool Considerations
-
-### Work Distribution
-Pool server must:
-1. Generate DAG for current epoch
-2. Distribute work with current epoch number
-3. Miners verify epoch matches before starting
-
-### Share Submission
-```json
-{
-  "method": "submit",
-  "params": {
-    "worker": "miner1",
-    "job_id": "12345",
-    "nonce": "0x1234567890abcdef",
-    "hash": "0x0000abcd...",
-    "epoch": 0
-  }
-}
-```
-
-### Epoch Transitions
-When block 7500 is mined:
-1. All miners regenerate DAG (~3-5 min downtime)
-2. Pool updates epoch in work template
-3. Mining resumes with new DAG
-
-**Mitigation**: Pre-generate next epoch's DAG in background
-
-## Next Steps
-
-1. **Benchmark Real Performance**
-   - Test on GTX 1050 Ti
-   - Compare with estimates
-   - Publish results
-
-2. **Optimize CUDA Kernel**
-   - Shared memory for mix state
-   - Coalesced DAG accesses
-   - Reduce register usage
-
-3. **Implement DAG Caching**
-   - Persistent storage
-   - Integrity verification
-   - Auto-cleanup old epochs
-
-4. **Mining Pool Software**
-   - Stratum protocol with DAG support
-   - Epoch synchronization
-   - Share verification
+Changing this value **breaks consensus** — do not modify for mainnet.
 
 ---
 
-**Last Updated**: February 22, 2026  
-**Testing Status**: Integration complete, performance benchmarking pending
+## Troubleshooting
+
+### "Failed to upload DAG to GPU: out of memory"
+
+**Cause**: GPU has < 4 GB VRAM available.
+
+**Solutions**:
+1. Close Chrome/browsers (they use GPU memory for acceleration).
+2. Close other GPU-accelerated applications.
+3. Check available VRAM: `nvidia-smi`
+4. Use a GPU with ≥ 4 GB VRAM.
+
+### Low hashrate (< 10 MH/s)
+
+**Cause**: Throttling or wrong GPU selected.
+
+1. Check for power-limit throttling:
+   ```bash
+   nvidia-smi -pl 120    # Set power limit to 120 W
+   ```
+2. Check temperature: `nvidia-smi -q | grep "GPU Current Temp"`
+3. Force a specific GPU: `CUDA_VISIBLE_DEVICES=0`
+4. Close background GPU processes (browsers, video).
+
+### DAG generation takes > 10 minutes
+
+**Cause**: Insufficient free RAM or CPU bottleneck.
+
+1. Ensure ≥ 4 GB free RAM during generation.
+2. Close other applications.
+3. Wait — generation runs only once per epoch.
+
+### Miner can't connect to node (solo mode)
+
+1. Check the node is running: `curl http://127.0.0.1:19533/health`
+2. Verify `NODE_RPC_URL` in `config/minerSettings.conf`.
+3. Check node logs: `<DATA_DIR>/logs/node_*.log`
+
+### Miner can't connect to pool
+
+1. Verify `POOL_HOST` and `POOL_PORT` in `config/minerSettings.conf`.
+2. Ensure `astram-stratum` is running.
+3. Check pool logs and the node it is connected to.
+
+---
+
+## Profiling Tools
+
+### Nsight Compute
+
+```bash
+ncu --target-processes all ./target/release/Astram-miner
+```
+
+Analyzes memory bandwidth utilization, compute throughput, occupancy, and warp efficiency.
+
+### Nsight Systems
+
+```bash
+nsys profile ./target/release/Astram-miner
+```
+
+Shows timeline of GPU/host activity, kernel launch overhead, and memory copy operations.
+
+### Built-in Hashrate Monitor
+
+Enabled by default — logs every ~5 seconds and updates the status dashboard at `http://localhost:8090`.
+
+---
+
+## Pool Mining Setup
+
+### Start the Stratum pool server
+
+Edit `config/pool.conf`, then:
+
+```bash
+./release/linux/Astram.sh pool    # if included in release script
+# or
+./target/release/astram-stratum
+```
+
+The pool connects to the node at `http://127.0.0.1:19533` by default.
+
+### VarDiff
+
+The pool adjusts each miner's difficulty dynamically to target ~15 s between shares:
+- Min difficulty: 1
+- Max difficulty: 32
+
+### PPLNS Payout
+
+Payouts use PPLNS (Pay Per Last N Shares), default window 10,000 shares.  
+Minimum payout threshold: 0.5 ASRM (configurable).
+
+### Epoch Transitions
+
+When epoch boundary (every 7,500 blocks) is crossed:
+
+1. All miners regenerate their DAG (~3–5 min downtime per miner).
+2. The pool updates the epoch in the work template.
+3. Mining resumes with the new DAG.
+
+**Mitigation**: Pre-generate the next epoch's DAG in the background before the boundary is reached.
+
+---
+
+## Performance Comparison
+
+| Algorithm | Memory | ASIC Resistance | Est. GPU Hashrate |
+|-----------|--------|-----------------|-------------------|
+| SHA256d (Bitcoin) | 0 | None | 40 MH/s |
+| Scrypt (Litecoin) | 128 KB | Low | 500 KH/s |
+| Ethash (Ethereum) | 4 GB | High | 30 MH/s |
+| KawPow (Ravencoin) | 4 GB | High | 25 MH/s |
+| **Blake3-KawPow (Astram)** | **4 GB** | **High** | **50–150 MH/s** |
+
+Blake3 is faster than SHA-256 in software and maps well to CUDA SIMD execution.
+
+---
+
+## Future Optimizations
+
+1. **DAG Disk Caching**: Save DAG to `~/.Astram/dag/epoch-N.bin`; skip 3–5 min regeneration on restart. (~4 GB per epoch, 20 GB for 5 epochs.)
+2. **Light Client Verification**: Verify PoW without holding the full DAG.
+3. **Adaptive Batch Size**: Auto-tune `CUDA_BATCH_SIZE` for the connected GPU.
+4. **Shared Memory Optimization**: Reduce register pressure in the CUDA kernel.
+5. **Coalesced DAG Access**: Improve memory access patterns for better bandwidth utilization.
+
+---
+
+**Last Updated**: April 2026  
+**Status**: Functional — performance benchmarking in progress
