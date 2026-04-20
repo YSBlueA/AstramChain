@@ -349,15 +349,29 @@ impl Blockchain {
 
     /// validate and insert block (core of migration/consensus)
     pub fn validate_and_insert_block(&mut self, block: &Block) -> Result<()> {
-        // 0) Duplicate block check: skip if already stored
+        // 0) Duplicate block check: skip only if already on the main chain.
+        // A block may exist in DB as a fork block (b: written but i: missing);
+        // in that case we must continue so the index and tip get updated.
         let block_key = format!("b:{}", block.hash);
         if self.db.get(block_key.as_bytes())?.is_some() {
+            let index_key = format!("i:{}", block.header.index);
+            let is_on_main_chain = self.db.get(index_key.as_bytes())?
+                .map(|v| v == block.hash.as_bytes())
+                .unwrap_or(false);
+            if is_on_main_chain {
+                log::debug!(
+                    "Block #{} ({}) already on main chain, skipping",
+                    block.header.index,
+                    &block.hash[..16]
+                );
+                return Ok(());
+            }
+            // Fork block: data exists but not indexed — fall through to re-insert on main chain.
             log::debug!(
-                "Block #{} ({}) already exists, skipping insertion",
+                "Block #{} ({}) exists as fork block, re-inserting onto main chain",
                 block.header.index,
                 &block.hash[..16]
             );
-            return Ok(());
         }
 
         // 1) header hash match

@@ -94,8 +94,17 @@ impl P2PService {
         let nh_exists = node_handle.clone();
         p2p.set_check_block_exists(move |hash_hex: &str| {
             if let Ok(bc) = nh_exists.bc.try_lock() {
-                let key = format!("b:{}", hash_hex);
-                bc.db.get(key.as_bytes()).ok().flatten().is_some()
+                // Block must exist AND be indexed on the main chain (i:{height} → hash).
+                // A fork block has b:{hash} but no i:{height}; we must NOT skip it so
+                // it gets re-requested and promoted to the main chain on re-insertion.
+                if let Ok(Some(header)) = bc.load_header(hash_hex) {
+                    let index_key = format!("i:{}", header.index);
+                    bc.db.get(index_key.as_bytes()).ok().flatten()
+                        .map(|v| v.as_slice() == hash_hex.as_bytes())
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
             } else {
                 false // If lock contended, assume block doesn't exist (safe to re-request)
             }
