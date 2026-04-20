@@ -152,7 +152,10 @@ impl NodeClient {
     fn new(base_url: String) -> Self {
         Self {
             base_url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("reqwest client"),
         }
     }
 
@@ -657,7 +660,10 @@ async fn handle_stratum_inner(
                                                     || e_str.contains("stale")
                                                     || e_str.contains("duplicate")
                                                     || e_str.contains("too aggressively")
-                                                    || e_str.contains("difficulty target");
+                                                    || e_str.contains("difficulty target")
+                                                    || e_str.contains("error sending request")
+                                                    || e_str.contains("connection refused")
+                                                    || e_str.contains("timed out");
                                                 if is_stale {
                                                     log::warn!("[BLOCK] stale template at height={}: {}", tmpl.height, e_str);
                                                     // Clear pending payouts so they are rebuilt with

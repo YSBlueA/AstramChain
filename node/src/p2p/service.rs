@@ -291,11 +291,17 @@ impl P2PService {
                 let mut bc = state.bc.lock().unwrap();
                 debug!("[LOCK-DEBUG] ✅ Block #{} acquired bc.lock() after {:?}", block.header.index, lock_start.elapsed());
 
-                // Early duplicate check: if the block is already in the DB, skip all processing.
-                // This avoids: wrong [OK] log, wrong set_my_height downgrade, and unnecessary reorg work.
+                // Early duplicate check: skip only if the block is in the DB AND has a valid
+                // index entry on the main chain. A block may exist as a fork block (b: written
+                // but i: missing); in that case we must retry insertion so the index gets set.
                 let block_key = format!("b:{}", block.hash);
-                if bc.db.get(block_key.as_bytes()).ok().flatten().is_some() {
-                    debug!("[P2P] Block #{} ({}) already in DB, skipping", block.header.index, &block.hash[..16]);
+                let index_key = format!("i:{}", block.header.index);
+                let already_indexed = bc.db.get(block_key.as_bytes()).ok().flatten().is_some()
+                    && bc.db.get(index_key.as_bytes()).ok().flatten()
+                        .map(|v| v.as_ref() == block.hash.as_bytes())
+                        .unwrap_or(false);
+                if already_indexed {
+                    debug!("[P2P] Block #{} ({}) already in DB with index, skipping", block.header.index, &block.hash[..16]);
                     drop(bc);
                     continue;
                 }
