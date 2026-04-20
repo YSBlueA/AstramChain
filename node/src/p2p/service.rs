@@ -298,7 +298,7 @@ impl P2PService {
                 let index_key = format!("i:{}", block.header.index);
                 let already_indexed = bc.db.get(block_key.as_bytes()).ok().flatten().is_some()
                     && bc.db.get(index_key.as_bytes()).ok().flatten()
-                        .map(|v| v.as_ref() == block.hash.as_bytes())
+                        .map(|v| v.as_slice() == block.hash.as_bytes())
                         .unwrap_or(false);
                 if already_indexed {
                     debug!("[P2P] Block #{} ({}) already in DB with index, skipping", block.header.index, &block.hash[..16]);
