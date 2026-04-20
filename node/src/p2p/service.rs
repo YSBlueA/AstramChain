@@ -408,7 +408,18 @@ impl P2PService {
                     Err(e) => {
                         // Block validation failed - check if it's an orphan or fork
                         let error_msg = format!("{:?}", e);
-                        
+
+                        // Always log validation failures at WARN so we can diagnose
+                        warn!(
+                            "[BLOCK-FAIL] #{} hash={} prev={} bits=0x{:08x} ts={} | error: {}",
+                            block.header.index,
+                            &block.hash[..16],
+                            &block.header.previous_hash[..16],
+                            block.header.difficulty,
+                            block.header.timestamp,
+                            error_msg
+                        );
+
                         if error_msg.contains("previous header not found") || error_msg.contains("fork detected") {
                             debug!("[P2P] Block #{} is orphan/fork: {}", block.header.index, error_msg);
                             
@@ -567,7 +578,12 @@ impl P2PService {
                             p2p_block.request_block_by_hash(&parent_hash);
                             
                         } else {
-                            debug!("[DEBUG] Invalid block from p2p: {:?}", e);
+                            // Not orphan/fork — likely difficulty mismatch, merkle error, etc.
+                            // Already logged above as BLOCK-FAIL. Check server-side block validity.
+                            warn!(
+                                "[BLOCK-REJECT] Block #{} permanently rejected (not orphan/fork): {}",
+                                block.header.index, error_msg
+                            );
                         }
                     }
                 }

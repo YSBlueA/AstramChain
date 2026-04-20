@@ -301,6 +301,15 @@ async fn main() {
                     log::info!("✅ Blockchain tip recovered: height {} (hash: {})", header.index, &tip_hash[..16]);
                 }
             }
+
+            // Repair any missing i:{height} index entries that may have been left
+            // by the old fork-block bug (blocks stored with b: but no i:).
+            log::info!("🔧 Checking for missing index entries...");
+            match bc_guard.repair_index() {
+                Ok(0) => log::info!("✅ Index integrity OK - no repairs needed"),
+                Ok(n) => log::info!("✅ Index repaired: {} missing entries restored", n),
+                Err(e) => log::warn!("⚠️  Index repair failed: {}", e),
+            }
         }
     }
 

@@ -250,10 +250,14 @@ impl Blockchain {
             ));
         }
 
-        // 3) Expected difficulty check
+        // 3) Expected difficulty check (validate_fork_block)
         if block.header.index > 0 {
             let expected = self.calculate_adjusted_difficulty(block.header.index)?;
             if block.header.difficulty != expected {
+                log::error!(
+                    "[FORK-DIFF-MISMATCH] Block #{} | block=0x{:08x} | dwg3=0x{:08x} | tip_diff=0x{:08x}",
+                    block.header.index, block.header.difficulty, expected, self.difficulty
+                );
                 return Err(anyhow!(
                     "difficulty mismatch at height {}: expected 0x{:08x}, got 0x{:08x}",
                     block.header.index,
@@ -402,10 +406,31 @@ impl Blockchain {
             ));
         }
 
-        // 3) Expected difficulty check
+        // 3) Expected difficulty check (validate_and_insert_block)
         if block.header.index > 0 {
             let expected = self.calculate_adjusted_difficulty(block.header.index)?;
             if block.header.difficulty != expected {
+                log::error!(
+                    "[DIFF-MISMATCH] Block #{} hash={} | block=0x{:08x} | dwg3=0x{:08x} | tip_diff=0x{:08x}",
+                    block.header.index, &block.hash[..16],
+                    block.header.difficulty, expected, self.difficulty
+                );
+                for i in 1..=Self::RETARGET_WINDOW {
+                    let h = block.header.index - i as u64;
+                    match self.db.get(format!("i:{}", h).as_bytes()).ok().flatten()
+                        .and_then(|v| String::from_utf8(v).ok())
+                    {
+                        Some(hash) => {
+                            if let Ok(Some(hdr)) = self.load_header(&hash) {
+                                log::error!(
+                                    "  [DWG3] i:{} bits=0x{:08x} ts={}",
+                                    h, hdr.difficulty, hdr.timestamp
+                                );
+                            }
+                        }
+                        None => log::error!("  [DWG3] i:{} = MISSING", h),
+                    }
+                }
                 return Err(anyhow!(
                     "difficulty mismatch at height {}: expected 0x{:08x}, got 0x{:08x}",
                     block.header.index,
@@ -728,8 +753,21 @@ impl Blockchain {
             let hash_bytes = match self.db.get(format!("i:{}", height).as_bytes())? {
                 Some(v) => v,
                 None => {
-                    log::warn!("DWG3: missing index entry at height {}", height);
-                    return Ok(self.difficulty);
+                    // Hard error: a missing index entry means the DB is corrupt or repair_index
+                    // has not run yet.  Returning a fallback value here would allow the miner
+                    // to produce — and validate_and_insert_block to accept — a block whose
+                    // difficulty is wrong.  That corrupts the chain permanently.
+                    // Callers must run repair_index() before mining or validating.
+                    log::error!(
+                        "DWG3: FATAL — index entry i:{} missing while computing difficulty for block #{}. \
+                        Run repair_index() to fix DB gaps before mining.",
+                        height, current_index
+                    );
+                    return Err(anyhow!(
+                        "DWG3 index gap: i:{} is missing (needed for block #{}). \
+                        DB integrity error — run repair_index() before mining.",
+                        height, current_index
+                    ));
                 }
             };
 
@@ -737,8 +775,14 @@ impl Blockchain {
             let header = match self.load_header(&hash)? {
                 Some(h) => h,
                 None => {
-                    log::warn!("DWG3: missing header at height {}", height);
-                    return Ok(self.difficulty);
+                    log::error!(
+                        "DWG3: FATAL — block header missing for i:{} hash={} (block #{})",
+                        height, &hash[..16.min(hash.len())], current_index
+                    );
+                    return Err(anyhow!(
+                        "DWG3 header missing: i:{} points to hash {} but block body not found (block #{})",
+                        height, &hash[..16.min(hash.len())], current_index
+                    ));
                 }
             };
 
@@ -781,11 +825,25 @@ impl Blockchain {
         let previous_bits = match self.db.get(format!("i:{}", current_index - 1).as_bytes())? {
             Some(v) => {
                 let hash = String::from_utf8(v)?;
-                self.load_header(&hash)?
-                    .map(|h| h.difficulty)
-                    .unwrap_or(self.difficulty)
+                match self.load_header(&hash)? {
+                    Some(h) => h.difficulty,
+                    None => {
+                        return Err(anyhow!(
+                            "DWG3 clamp: header missing for i:{} (block #{})",
+                            current_index - 1, current_index
+                        ));
+                    }
+                }
             }
-            None => self.difficulty,
+            None => {
+                // i:{current_index-1} must exist at this point because the loop above
+                // already verified all entries from current_index-1 down.
+                // If we reach here something is very wrong.
+                return Err(anyhow!(
+                    "DWG3 clamp: i:{} unexpectedly missing after window scan passed (block #{})",
+                    current_index - 1, current_index
+                ));
+            }
         };
 
         // Clamp the result to the same 4× limit that block validation enforces,
@@ -1492,6 +1550,151 @@ impl Blockchain {
         }
 
         initial_block_reward() >> halvings
+    }
+
+    /// Walk backwards from chain_tip and write any missing `i:{height}` index entries.
+    /// Called once at startup to repair a DB that has gaps from previous fork-block handling.
+    pub fn repair_index(&mut self) -> Result<usize> {
+        let tip_hash = match &self.chain_tip {
+            Some(h) => h.clone(),
+            None => return Ok(0),
+        };
+
+        let mut repaired = 0usize;
+        let mut current_hash = tip_hash;
+        let mut batch = rocksdb::WriteBatch::default();
+
+        loop {
+            let block = match self.load_block(&current_hash)? {
+                Some(b) => b,
+                None => {
+                    log::warn!("repair_index: block not found for hash {}", &current_hash[..16]);
+                    break;
+                }
+            };
+
+            let height = block.header.index;
+            let index_key = format!("i:{}", height);
+
+            let needs_repair = match self.db.get(index_key.as_bytes())? {
+                Some(v) => v.as_slice() != current_hash.as_bytes(),
+                None => true,
+            };
+
+            if needs_repair {
+                batch.put(index_key.as_bytes(), current_hash.as_bytes());
+                repaired += 1;
+                log::info!("repair_index: wrote i:{} → {}", height, &current_hash[..16]);
+            }
+
+            if height == 0 {
+                break;
+            }
+            current_hash = block.header.previous_hash.clone();
+        }
+
+        if repaired > 0 {
+            put_batch(&self.db, batch)?;
+            log::info!("repair_index: repaired {} missing index entries", repaired);
+        }
+
+        Ok(repaired)
+    }
+
+    /// Truncate the chain to `target_height`, deleting all blocks above it.
+    /// Sets chain_tip to the block at `target_height`.
+    /// Cleans up b:, i:, t:, u: entries for orphaned blocks above target_height.
+    pub fn truncate_chain_to_height(&mut self, target_height: u64) -> Result<()> {
+        let tip_hash = match &self.chain_tip {
+            Some(h) => h.clone(),
+            None => return Err(anyhow!("No chain tip to truncate from")),
+        };
+
+        // Walk backwards from tip to find block at target_height
+        log::info!("🔧 Truncating chain to height {}...", target_height);
+        let mut current_hash = tip_hash.clone();
+        let mut blocks_to_delete: Vec<Block> = Vec::new();
+
+        loop {
+            let block = match self.load_block(&current_hash)? {
+                Some(b) => b,
+                None => {
+                    return Err(anyhow!(
+                        "truncate: block not found for hash {} while walking back",
+                        &current_hash[..16]
+                    ));
+                }
+            };
+
+            let height = block.header.index;
+
+            if height == target_height {
+                // This is the new tip
+                let new_tip_hash = current_hash.clone();
+                let new_tip_block = block;
+
+                // Delete all blocks above target_height
+                let mut batch = WriteBatch::default();
+                for del_block in &blocks_to_delete {
+                    let bkey = format!("b:{}", del_block.hash);
+                    let ikey = format!("i:{}", del_block.header.index);
+                    batch.delete(bkey.as_bytes());
+                    batch.delete(ikey.as_bytes());
+                    log::info!(
+                        "  truncate: deleting block #{} hash={}",
+                        del_block.header.index,
+                        &del_block.hash[..16]
+                    );
+
+                    // Delete transactions for this block
+                    for tx in &del_block.transactions {
+                        let tkey = format!("t:{}", tx.txid);
+                        batch.delete(tkey.as_bytes());
+
+                        // Delete UTXOs for this block's outputs
+                        for (vout, _output) in tx.outputs.iter().enumerate() {
+                            let ukey = format!("u:{}:{}", tx.txid, vout);
+                            batch.delete(ukey.as_bytes());
+                        }
+                    }
+                }
+
+                // Update tip pointer
+                batch.put(b"tip", new_tip_hash.as_bytes());
+
+                put_batch(&self.db, batch)?;
+
+                // Update in-memory state
+                self.chain_tip = Some(new_tip_hash);
+                self.difficulty = new_tip_block.header.difficulty;
+
+                log::info!(
+                    "✅ Chain truncated to #{} hash={} bits=0x{:08x}",
+                    target_height,
+                    &new_tip_block.hash[..16],
+                    new_tip_block.header.difficulty
+                );
+                return Ok(());
+            }
+
+            if height < target_height {
+                return Err(anyhow!(
+                    "truncate: walked past target height {} (reached {}), chain may be shorter than requested",
+                    target_height,
+                    height
+                ));
+            }
+
+            blocks_to_delete.push(block.clone());
+
+            if height == 0 {
+                return Err(anyhow!(
+                    "truncate: reached genesis without finding height {}",
+                    target_height
+                ));
+            }
+            current_hash = block.header.previous_hash.clone();
+        }
     }
 
     /// Reset blockchain to empty state (for chain reorg from genesis)

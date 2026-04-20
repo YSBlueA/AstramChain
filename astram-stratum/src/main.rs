@@ -132,6 +132,7 @@ struct ChainStatus {
     difficulty: u32,      // current chain tip compact bits
     next_difficulty: u32, // DWG3-adjusted difficulty for the next block
     tip_hash: String,
+    dwg3_ok: bool,        // false = node DB has index gaps, must not mine
 }
 
 #[derive(Deserialize)]
@@ -189,7 +190,14 @@ impl NodeClient {
             .unwrap_or("none")
             .to_string();
 
-        Ok(ChainStatus { height, difficulty, next_difficulty, tip_hash })
+        // dwg3_ok=false means the node's DB has index gaps and cannot compute
+        // correct difficulty. Default to true for older nodes that don't expose this field.
+        let dwg3_ok = bc
+            .and_then(|v| v.get("dwg3_ok"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        Ok(ChainStatus { height, difficulty, next_difficulty, tip_hash, dwg3_ok })
     }
 
     async fn fetch_mempool(&self) -> Result<MempoolSnapshot> {
@@ -258,6 +266,16 @@ async fn build_template(
     pending_payouts: &PendingPayouts,
 ) -> Result<MiningTemplate> {
     let status = client.fetch_status().await?;
+
+    // Guard: if the node's DWG3 index is broken, refuse to build a template.
+    // Mining with an incorrect difficulty would corrupt the chain permanently.
+    if !status.dwg3_ok {
+        return Err(anyhow!(
+            "Node DWG3 index is broken (dwg3_ok=false). \
+            The node must run repair_index() before mining can resume. \
+            Halting template build to prevent chain corruption."
+        ));
+    }
 
     let height = status.height + 1;
     let prev_hash = if status.tip_hash == "none" {

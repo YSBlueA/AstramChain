@@ -265,6 +265,7 @@ pub async fn run_server(
                 chain_height,
                 chain_difficulty,
                 next_difficulty,
+                dwg3_ok,
                 is_mining,
                 _current_difficulty,
                 hashrate,
@@ -275,7 +276,7 @@ pub async fn run_server(
                 let state = node.clone();
 
                 let _bc_lock_start = std::time::Instant::now();
-                let (chain_tip, genesis_hash, chain_height, chain_difficulty, next_difficulty) = {
+                let (chain_tip, genesis_hash, chain_height, chain_difficulty, next_difficulty, dwg3_ok) = {
                     let bc = state.bc.lock().unwrap();
                     let tip = bc.chain_tip
                         .as_ref()
@@ -297,9 +298,21 @@ pub async fn run_server(
                         .unwrap_or(0);
                     // Real compact-bits difficulty from chain (not mining.current_difficulty which stays 1)
                     let diff = bc.difficulty;
-                    // Next block's expected difficulty (DWG3 adjusted) — what the stratum must use
-                    let next_diff = bc.calculate_adjusted_difficulty(height + 1).unwrap_or(diff);
-                    (tip, genesis, height, diff, next_diff)
+                    // Next block's expected difficulty (DWG3 adjusted) — what the stratum must use.
+                    // Returns Err if any i:{height} index entry is missing (DB gap).
+                    // dwg3_ok=false signals the stratum to halt mining until repair_index runs.
+                    let (next_diff, dwg3_ok) = match bc.calculate_adjusted_difficulty(height + 1) {
+                        Ok(d) => (d, true),
+                        Err(e) => {
+                            log::error!(
+                                "[STATUS] DWG3 failed for next block #{}: {}. \
+                                Stratum must not mine until DB is repaired.",
+                                height + 1, e
+                            );
+                            (diff, false)  // fallback value (unusable — dwg3_ok=false)
+                        }
+                    };
+                    (tip, genesis, height, diff, next_diff, dwg3_ok)
                 };
                 let _chain_lock_start = std::time::Instant::now();
                 let memory_count = {
@@ -331,6 +344,7 @@ pub async fn run_server(
                     chain_height,
                     chain_difficulty,
                     next_difficulty,
+                    dwg3_ok,
                     state.mining.active.load(std::sync::atomic::Ordering::Relaxed),
                     diff,
                     hash,
@@ -380,6 +394,7 @@ pub async fn run_server(
                     "my_height": my_height,
                     "difficulty": chain_difficulty,
                     "next_difficulty": next_difficulty,
+                    "dwg3_ok": dwg3_ok,
                 },
                 "mempool": {
                     "pending_transactions": pending_tx,
@@ -1028,6 +1043,48 @@ pub async fn run_server(
 
 
     // -------------------------------
+    // POST /admin/truncate { "height": N } - Truncate chain to target height (admin)
+    #[derive(Deserialize)]
+    struct TruncateRequest {
+        height: u64,
+    }
+
+    let truncate_chain = warp::path!("admin" / "truncate")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(node_filter.clone())
+        .and_then(|req: TruncateRequest, node: NodeHandle| async move {
+            log::warn!("[ADMIN] truncate_chain_to_height({}) requested", req.height);
+            let result = {
+                let mut bc = node.bc.lock().unwrap();
+                bc.truncate_chain_to_height(req.height)
+            };
+            match result {
+                Ok(()) => {
+                    let tip = {
+                        let bc = node.bc.lock().unwrap();
+                        bc.chain_tip.clone().unwrap_or_default()
+                    };
+                    Ok::<_, warp::Rejection>(with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "status": "ok",
+                            "truncated_to": req.height,
+                            "new_tip": tip
+                        })),
+                        StatusCode::OK,
+                    ))
+                }
+                Err(e) => Ok::<_, warp::Rejection>(with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "status": "error",
+                        "message": format!("{}", e)
+                    })),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )),
+            }
+        });
+
+    // -------------------------------
     // GET / - Node Status Dashboard HTML
     let dashboard = warp::path::end()
         .and(warp::get())
@@ -1051,6 +1108,7 @@ pub async fn run_server(
         .or(relay_tx)
         .or(get_mempool)
         .or(submit_block)
+        .or(truncate_chain)
         .or(status)
         .or(get_balance)
         .or(get_address_info)
