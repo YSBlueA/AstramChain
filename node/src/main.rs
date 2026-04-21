@@ -310,8 +310,57 @@ async fn main() {
                 Ok(n) => log::info!("✅ Index repaired: {} missing entries restored", n),
                 Err(e) => log::warn!("⚠️  Index repair failed: {}", e),
             }
+
+            // Validate all stored blocks (hash, PoW, DWG3 difficulty, merkle root, parent link).
+            // If an invalid block is found the chain is truncated to just before it so the node
+            // can re-sync cleanly from peers instead of being stuck on a corrupt chain.
+            log::info!("🔍 Validating stored blocks...");
+            match bc_guard.validate_chain_integrity() {
+                Ok((checked, None)) => {
+                    log::info!("✅ All {} blocks passed integrity check", checked + 1);
+                }
+                Ok((valid_tip, Some(bad_height))) => {
+                    log::warn!(
+                        "⚠️  Chain truncated to height {} (invalid block detected at height {}). \
+                        Node will re-sync missing blocks from peers.",
+                        valid_tip, bad_height
+                    );
+                }
+                Err(e) => {
+                    log::error!("❌ Chain integrity check failed unexpectedly: {}", e);
+                }
+            }
         }
     }
+
+    // Read the chain height once, immediately after validation (which may have truncated the chain).
+    // This single value is used for both P2P and DNS so both always agree on the same height.
+    let my_height = {
+        let bc = bc.lock().unwrap();
+        if let Some(tip_hash) = &bc.chain_tip {
+            match bc.load_header(tip_hash) {
+                Ok(Some(header)) => {
+                    log::info!(
+                        "[INIT] Post-validation chain tip: height={} hash={}",
+                        header.index,
+                        &tip_hash[..16]
+                    );
+                    header.index
+                }
+                Ok(None) => {
+                    log::error!("[INIT] Chain tip '{}' exists but header missing in DB", tip_hash);
+                    0
+                }
+                Err(e) => {
+                    log::error!("[INIT] Failed to load tip header: {}", e);
+                    0
+                }
+            }
+        } else {
+            log::info!("[INIT] No chain tip (empty blockchain)");
+            0
+        }
+    };
 
     // Initialize P2P networking
     let p2p_service = P2PService::new();
@@ -319,6 +368,10 @@ async fn main() {
     let mining_state = Arc::new(MiningState::default());
 
     let p2p_handle = p2p_service.manager();
+
+    // Apply the post-validation height to P2P so peers receive the correct value immediately.
+    p2p_handle.set_my_height(my_height);
+    info!("[INFO] Local blockchain height set to: {}", my_height);
 
     let chain_state = Arc::new(Mutex::new(ChainState::default()));
     let node_meta = Arc::new(NodeMeta {
@@ -334,34 +387,6 @@ async fn main() {
     };
 
     let node_handle = Arc::new(node);
-
-    // Set current blockchain height in P2P manager
-    let my_height = {
-        let bc = node_handle.bc.lock().unwrap();
-        if let Some(tip_hash) = &bc.chain_tip {
-            log::info!("[INIT] Chain tip hash: {}", tip_hash);
-            match bc.load_header(tip_hash) {
-                Ok(Some(header)) => {
-                    let height = header.index;
-                    log::info!("[INIT] Successfully loaded tip header at height {}", height);
-                    height
-                }
-                Ok(None) => {
-                    log::error!("[INIT] Chain tip '{}' exists but header not found in DB!", tip_hash);
-                    0
-                }
-                Err(e) => {
-                    log::error!("[INIT] Failed to load chain tip header: {}", e);
-                    0
-                }
-            }
-        } else {
-            log::info!("[INIT] No chain tip found (empty blockchain)");
-            0
-        }
-    };
-    p2p_handle.set_my_height(my_height);
-    info!("[INFO] Local blockchain height set to: {}", my_height);
 
     let bind_addr = format!("{}:{}", node_settings.p2p_bind_addr, node_settings.p2p_port);
 
@@ -410,6 +435,7 @@ async fn main() {
         node_meta.clone(),
         shutdown_flag.clone(),
         node_settings.clone(),
+        my_height,
     )
     .await;
 
@@ -969,6 +995,9 @@ async fn start_services(
     node_meta: Arc<NodeMeta>,
     shutdown_flag: Arc<AtomicBool>,
     settings: Arc<NodeSettings>,
+    // Post-validation chain height passed in explicitly so DNS and P2P always report the same
+    // value without needing to re-acquire the blockchain lock here.
+    initial_height: u64,
 ) -> (
     Vec<tokio::task::JoinHandle<()>>,
     tokio::task::JoinHandle<()>,
@@ -977,22 +1006,6 @@ async fn start_services(
     let mut task_handles = Vec::new();
 
     let my_node_port = settings.p2p_port;
-
-    // Register with DNS server initially with height 0 (or try to read non-blocking)
-    // Don't hold lock for DNS registration - it can fail/timeout without affecting mining
-    let initial_height = if let Ok(bc) = node_handle.bc.try_lock() {
-        if let Some(tip_hash) = &bc.chain_tip {
-            if let Ok(Some(header)) = bc.load_header(tip_hash) {
-                header.index
-            } else {
-                0
-            }
-        } else {
-            0
-        }
-    } else {
-        0 // If can't read without blocking, use 0
-    };
 
     // Register with DNS server (fail fast if registration fails)
     // Note: This is outside the main mining loop, so it happens only once at startup

@@ -1781,6 +1781,206 @@ impl Blockchain {
         }
     }
 
+    /// Validate all blocks currently stored in the DB, walking from height 0 to the tip.
+    ///
+    /// For each block the following are checked:
+    ///   1. Header hash correctness
+    ///   2. PoW validity
+    ///   3. DWG3 difficulty match (height ≥ RETARGET_WINDOW)
+    ///   4. Merkle root
+    ///   5. Parent hash linkage
+    ///
+    /// When the first invalid block at height H is found:
+    ///   - If H == 0 the chain is fully reset.
+    ///   - Otherwise the chain is truncated to H-1 so the node can re-sync from a clean state.
+    ///
+    /// Returns `(last_checked_height, first_invalid_height)`.
+    /// `first_invalid_height` is `None` when the full chain is valid.
+    pub fn validate_chain_integrity(&mut self) -> Result<(u64, Option<u64>)> {
+        let tip_hash = match &self.chain_tip {
+            Some(h) => h.clone(),
+            None => {
+                log::info!("validate_chain_integrity: empty chain, nothing to validate");
+                return Ok((0, None));
+            }
+        };
+
+        // Determine tip height.
+        let tip_height = match self.load_header(&tip_hash)? {
+            Some(h) => h.index,
+            None => return Err(anyhow!("validate_chain_integrity: tip header missing")),
+        };
+
+        log::info!(
+            "🔍 Validating chain integrity: blocks 0..={} ...",
+            tip_height
+        );
+
+        let mut prev_hash: Option<String> = None;
+
+        for height in 0..=tip_height {
+            // Resolve hash for this height via the index.
+            let hash = match self.db.get(format!("i:{}", height).as_bytes())? {
+                Some(v) => match String::from_utf8(v) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        log::error!(
+                            "validate_chain_integrity: i:{} contains invalid UTF-8",
+                            height
+                        );
+                        return self.handle_invalid_block(height, tip_height);
+                    }
+                },
+                None => {
+                    log::error!(
+                        "validate_chain_integrity: index entry i:{} missing (DB gap)",
+                        height
+                    );
+                    return self.handle_invalid_block(height, tip_height);
+                }
+            };
+
+            let block = match self.load_block(&hash)? {
+                Some(b) => b,
+                None => {
+                    log::error!(
+                        "validate_chain_integrity: block body missing for i:{} hash={}",
+                        height,
+                        &hash[..16.min(hash.len())]
+                    );
+                    return self.handle_invalid_block(height, tip_height);
+                }
+            };
+
+            // 1) Header hash
+            match compute_header_hash(&block.header) {
+                Ok(computed) if computed == block.hash => {}
+                Ok(computed) => {
+                    log::error!(
+                        "validate_chain_integrity: #{} header hash mismatch computed={} stored={}",
+                        height,
+                        &computed[..16],
+                        &block.hash[..16]
+                    );
+                    return self.handle_invalid_block(height, tip_height);
+                }
+                Err(e) => {
+                    log::error!(
+                        "validate_chain_integrity: #{} compute_header_hash error: {}",
+                        height, e
+                    );
+                    return self.handle_invalid_block(height, tip_height);
+                }
+            }
+
+            // 2) PoW
+            match Self::is_valid_pow(&block.hash, block.header.difficulty) {
+                Ok(true) => {}
+                Ok(false) => {
+                    log::error!(
+                        "validate_chain_integrity: #{} invalid PoW hash={} bits=0x{:08x}",
+                        height,
+                        &block.hash[..16],
+                        block.header.difficulty
+                    );
+                    return self.handle_invalid_block(height, tip_height);
+                }
+                Err(e) => {
+                    log::error!(
+                        "validate_chain_integrity: #{} PoW check error: {}",
+                        height, e
+                    );
+                    return self.handle_invalid_block(height, tip_height);
+                }
+            }
+
+            // 3) DWG3 difficulty (only once the window is fully available)
+            if height >= Self::RETARGET_WINDOW as u64 {
+                match self.calculate_adjusted_difficulty(height) {
+                    Ok(expected) if expected == block.header.difficulty => {}
+                    Ok(expected) => {
+                        log::error!(
+                            "validate_chain_integrity: #{} difficulty mismatch stored=0x{:08x} expected=0x{:08x}",
+                            height,
+                            block.header.difficulty,
+                            expected
+                        );
+                        return self.handle_invalid_block(height, tip_height);
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "validate_chain_integrity: #{} DWG3 calculation error: {}",
+                            height, e
+                        );
+                        return self.handle_invalid_block(height, tip_height);
+                    }
+                }
+            }
+
+            // 4) Merkle root
+            let txids: Vec<String> = block.transactions.iter().map(|t| t.txid.clone()).collect();
+            let computed_merkle = compute_merkle_root(&txids);
+            if computed_merkle != block.header.merkle_root {
+                log::error!(
+                    "validate_chain_integrity: #{} merkle root mismatch computed={} stored={}",
+                    height,
+                    &computed_merkle[..16.min(computed_merkle.len())],
+                    &block.header.merkle_root[..16.min(block.header.merkle_root.len())]
+                );
+                return self.handle_invalid_block(height, tip_height);
+            }
+
+            // 5) Parent hash linkage
+            if height > 0 {
+                if let Some(ref expected_prev) = prev_hash {
+                    if &block.header.previous_hash != expected_prev {
+                        log::error!(
+                            "validate_chain_integrity: #{} broken parent link: block.prev={} expected={}",
+                            height,
+                            &block.header.previous_hash[..16],
+                            &expected_prev[..16]
+                        );
+                        return self.handle_invalid_block(height, tip_height);
+                    }
+                }
+            }
+
+            prev_hash = Some(block.hash.clone());
+
+            if height % 1000 == 0 && height > 0 {
+                log::info!("  ... validated up to block #{}", height);
+            }
+        }
+
+        log::info!("✅ Chain integrity OK — all {} blocks valid", tip_height + 1);
+        Ok((tip_height, None))
+    }
+
+    /// Internal helper: truncate (or reset) the chain when block at `bad_height` is invalid.
+    fn handle_invalid_block(&mut self, bad_height: u64, tip_height: u64) -> Result<(u64, Option<u64>)> {
+        log::warn!(
+            "⚠️  First invalid block at height {}. Truncating chain to height {} and re-syncing.",
+            bad_height,
+            bad_height.saturating_sub(1)
+        );
+
+        if bad_height == 0 {
+            log::warn!("  Genesis block is invalid — resetting entire chain");
+            self.reset_chain()?;
+        } else {
+            self.truncate_chain_to_height(bad_height - 1)?;
+        }
+
+        log::warn!(
+            "✂️  Chain truncated: removed {} blocks (heights {}..={})",
+            tip_height - bad_height + 1,
+            bad_height,
+            tip_height
+        );
+
+        Ok((bad_height.saturating_sub(1), Some(bad_height)))
+    }
+
     /// Count blocks in database (diagnostic utility)
     pub fn count_blocks(&self) -> usize {
         let mut count = 0;
