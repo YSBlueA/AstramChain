@@ -208,7 +208,7 @@ impl PeerManager {
             peer_handshakes: Arc::new(Mutex::new(HashMap::new())),
             peer_ips: Arc::new(Mutex::new(HashMap::new())),
             my_height: Arc::new(Mutex::new(0)),
-            my_listening_port: Arc::new(Mutex::new(8335)), // Default port
+            my_listening_port: Arc::new(Mutex::new(18335)), // Default port
             my_bind_addr: Arc::new(Mutex::new("0.0.0.0".to_string())),
             my_public_ip: Arc::new(Mutex::new(None)),
             is_syncing: Arc::new(Mutex::new(false)),

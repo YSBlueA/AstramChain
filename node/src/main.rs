@@ -66,7 +66,7 @@ impl Default for NodeSettings {
         Self {
             data_dir: default_data_dir(),
             p2p_bind_addr: "0.0.0.0".to_string(),
-            p2p_port: 8335,
+            p2p_port: 18335,
             http_bind_addr: "127.0.0.1".to_string(),
             http_port: 19533,
             public_rpc_port: 18533,

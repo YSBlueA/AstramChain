@@ -324,7 +324,7 @@ $NodeSettingsContent = @'
 
 # P2P listener
 P2P_BIND_ADDR=0.0.0.0
-P2P_PORT=8335
+P2P_PORT=18335
 
 # HTTP API server
 HTTP_BIND_ADDR=127.0.0.1
@@ -511,7 +511,7 @@ Pool stats are available at `http://localhost:8081`.
 
 - **start-mining-pool.bat** - One-click pool mining launcher
 - **pool-mining.ps1** - PowerShell pool mining script
-- **Astram-node.exe** - Main blockchain node (HTTP: 19533, P2P: 8335)
+- **Astram-node.exe** - Main blockchain node (HTTP: 19533, P2P: 18335)
 - **Astram-miner.exe** - GPU miner (pool or solo mode, NVIDIA CUDA required)
 - **Astram-stratum.exe** - Stratum mining pool server (Stratum: 3333, Stats: 8081)
 - **Astram-dns.exe** - DNS discovery server (Port: 8053)

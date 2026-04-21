@@ -77,7 +77,7 @@ wallet-cli ──POST /tx──────────────────�
 AstramX Wallet ──POST /tx──────────────────────────┤
                                                     ▼
                                           Astram-node (19533)
-                                          ├── P2P layer (8335) ◄──► Peers
+                                          ├── P2P layer (18335) ◄──► Peers
                                           ├── RocksDB (chain + UTXOs)
                                           └── Public RPC (18533) ◄── Explorer, dApps
 
@@ -96,7 +96,7 @@ astram-dns ──register/list────────────────�
 |---------|------|------|-------|
 | Node HTTP (local) | `19533` | `127.0.0.1` | Full API — wallet, mining, relay |
 | Node Public RPC | `18533` | `0.0.0.0` | Read-only — no wallet/mining |
-| P2P | `8335` | `0.0.0.0` | Must be reachable for DNS registration |
+| P2P | `18335` | `0.0.0.0` | Must be reachable for DNS registration |
 | Block Explorer | `8080` | `0.0.0.0` | Web UI |
 | DNS Registry | `8053` | `0.0.0.0` | Bootstrap server |
 | Stratum Pool | `3333` | `0.0.0.0` | Stratum TCP |
@@ -129,7 +129,7 @@ Key settings:
 |-----|---------|-------------|
 | `DATA_DIR` | `~/.Astram/data` | Blockchain DB root; logs go to `<DATA_DIR>/logs/` |
 | `P2P_BIND_ADDR` | `0.0.0.0` | P2P listen address |
-| `P2P_PORT` | `8335` | P2P listen port |
+| `P2P_PORT` | `18335` | P2P listen port |
 | `HTTP_BIND_ADDR` | `127.0.0.1` | Local HTTP API bind address |
 | `HTTP_PORT` | `19533` | Local HTTP API port |
 | `PUBLIC_RPC_PORT` | `18533` | Public read-only RPC (0 = disabled) |

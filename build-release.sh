@@ -335,7 +335,7 @@ cat > "$RELEASE_DIR/config/nodeSettings.conf" <<'CONF'
 
 # P2P listener
 P2P_BIND_ADDR=0.0.0.0
-P2P_PORT=8335
+P2P_PORT=18335
 
 # HTTP API server
 HTTP_BIND_ADDR=127.0.0.1
@@ -522,7 +522,7 @@ Pool stats are available at `http://localhost:8081`.
 ## Components
 
 - **start-mining-pool.sh** - One-click pool mining launcher
-- **Astram-node** - Main blockchain node (HTTP: 19533, P2P: 8335)
+- **Astram-node** - Main blockchain node (HTTP: 19533, P2P: 18335)
 - **Astram-miner** - GPU miner (pool or solo mode, NVIDIA CUDA required)
 - **Astram-stratum** - Stratum mining pool server (Stratum: 3333, Stats: 8081)
 - **Astram-dns** - DNS discovery server (Port: 8053)

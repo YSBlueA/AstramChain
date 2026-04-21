@@ -115,7 +115,7 @@ Address-based rate limiting is applied to transaction submission to reduce spam 
 - Keep data directories on storage with proper access controls (mode `700` or equivalent).
 - Protect wallet JSON files (`chmod 600`).
 - Monitor logs for repeated peer failures or suspicious registration patterns.
-- Forward only the P2P port (`8335`) through NAT; keep all other ports firewalled unless explicitly needed.
+- Forward only the P2P port (`18335`) through NAT; keep all other ports firewalled unless explicitly needed.
 - Back up the wallet mnemonic and store it offline.
 
 ## Log Monitoring

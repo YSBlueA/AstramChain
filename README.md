@@ -97,7 +97,7 @@ Windows:
 |---------|------|------|-------------|
 | Node HTTP (local) | `19533` | `127.0.0.1` | Dashboard, full API, wallet/mining endpoints |
 | Node Public RPC | `18533` | `0.0.0.0` | Read-only API accessible from outside |
-| P2P | `8335` | `0.0.0.0` | Peer-to-peer block/tx propagation |
+| P2P | `18335` | `0.0.0.0` | Peer-to-peer block/tx propagation |
 | Explorer | `8080` | `0.0.0.0` | Block explorer web UI |
 | DNS Server | `8053` | `0.0.0.0` | Node discovery registry |
 | Stratum Pool | `3333` | `0.0.0.0` | Stratum mining protocol (TCP) |
@@ -130,7 +130,7 @@ DATA_DIR=~/.Astram/data
 
 # P2P
 P2P_BIND_ADDR=0.0.0.0
-P2P_PORT=8335
+P2P_PORT=18335
 
 # Local HTTP API
 HTTP_BIND_ADDR=127.0.0.1
@@ -143,7 +143,7 @@ PUBLIC_RPC_PORT=18533
 DNS_SERVER_URL=http://161.33.19.183:8053
 
 # Optional: comma-separated fallback bootstrap peers
-# BOOTSTRAP_PEERS=1.2.3.4:8335,5.6.7.8:8335
+# BOOTSTRAP_PEERS=1.2.3.4:18335,5.6.7.8:18335
 ```
 
 ### Miner (`config/minerSettings.conf`)
@@ -255,7 +255,7 @@ DNS only accepts **publicly reachable nodes**. During registration it validates:
 - Public IP (no private or loopback ranges).
 - The P2P port is reachable from the DNS server.
 
-If DNS registration fails at startup, the node exits. Ensure your P2P port (default `8335`) is open and forwarded if behind NAT.
+If DNS registration fails at startup, the node exits. Ensure your P2P port (default `18335`) is open and forwarded if behind NAT.
 
 ## CUDA Requirements
 
@@ -270,7 +270,7 @@ cargo build --release -p Astram-miner --features cuda-miner
 ## FAQ
 
 **The node fails DNS registration. What do I do?**
-- Ensure port `8335` (or your configured `P2P_PORT`) is open for inbound TCP connections.
+- Ensure port `18335` (or your configured `P2P_PORT`) is open for inbound TCP connections.
 - If behind NAT, forward the port on your router.
 - Verify firewall rules.
 
