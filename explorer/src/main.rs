@@ -6,15 +6,97 @@ mod state;
 
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, middleware, web};
+use clap::Parser;
 use flexi_logger::{Age, Cleanup, Criterion, Duplicate, FileSpec, Logger, Naming, WriteMode};
 use db::ExplorerDB;
 use log::{error, info};
 use rpc::NodeRpcClient;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
 
+// ─── CLI ────────────────────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(name = "Astram-explorer", about = "Astram blockchain explorer")]
+struct Cli {
+    /// Path to explorer settings file (default: config/explorerSettings.conf)
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+struct ExplorerSettings {
+    db_path: String,
+    node_rpc_url: String,
+    bind_addr: String,
+    port: u16,
+    sync_interval_secs: u64,
+}
+
+fn resolve_conf_path() -> PathBuf {
+    let exe_path = std::env::current_exe().ok().and_then(|p| {
+        p.parent().map(|d| d.join("config/explorerSettings.conf"))
+    });
+    if let Some(ref p) = exe_path {
+        if p.exists() { return p.clone(); }
+    }
+    let cwd = PathBuf::from("config/explorerSettings.conf");
+    if cwd.exists() { return cwd; }
+    exe_path.unwrap_or(cwd)
+}
+
+fn load_conf(path: &std::path::Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let contents = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[WARN] explorerSettings not found at {:?}: {}", path, e);
+            return map;
+        }
+    };
+    for raw in contents.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        if let Some((k, v)) = line.split_once('=') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    map
+}
+
+fn get_setting(key: &str, file: &HashMap<String, String>, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .or_else(|| file.get(key).cloned())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn load_explorer_settings(config_path: Option<PathBuf>) -> ExplorerSettings {
+    let path = config_path.unwrap_or_else(resolve_conf_path);
+    let file = load_conf(&path);
+    if path.exists() {
+        eprintln!("[INFO] Loaded explorer settings from {:?}", path);
+    }
+
+    ExplorerSettings {
+        db_path:            get_setting("DB_PATH",             &file, "explorer_data"),
+        node_rpc_url:       get_setting("NODE_RPC_URL",        &file, "http://127.0.0.1:19533"),
+        bind_addr:          get_setting("BIND_ADDR",           &file, "0.0.0.0"),
+        port:               get_setting("PORT",                &file, "8080").parse().unwrap_or(8080),
+        sync_interval_secs: get_setting("SYNC_INTERVAL_SECS", &file, "10").parse().unwrap_or(10),
+    }
+}
+
+// ─── Main ────────────────────────────────────────────────────────────────────
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let cli = Cli::parse();
+    let settings = load_explorer_settings(cli.config);
+
     Logger::try_with_env_or_str("info")
         .expect("Failed to build logger")
         .log_to_file(FileSpec::default().directory("logs").basename("explorer"))
@@ -31,48 +113,35 @@ async fn main() -> std::io::Result<()> {
     info!("Astram Explorer starting...");
 
     // Explorer database initialization
-    let db_path = "explorer_data";
-    let explorer_db = Arc::new(ExplorerDB::new(db_path).expect("Failed to open explorer database"));
-
-    info!("Explorer database initialized at {}", db_path);
+    let explorer_db = Arc::new(
+        ExplorerDB::new(&settings.db_path).expect("Failed to open explorer database")
+    );
+    info!("Explorer database initialized at {}", settings.db_path);
 
     // Background sync with the Node process
     let db_sync = explorer_db.clone();
-    let rpc_client = Arc::new(NodeRpcClient::new("http://127.0.0.1:19533"));
+    let rpc_client = Arc::new(NodeRpcClient::new(&settings.node_rpc_url));
     let rpc_for_sync = rpc_client.clone();
+    let sync_secs = settings.sync_interval_secs;
     tokio::spawn(async move {
-
         info!("Starting blockchain indexing...");
 
-        // Initial sync
         match sync_blockchain(&db_sync, &rpc_for_sync).await {
-            Ok(()) => {
-                info!("Initial blockchain sync completed");
-            }
-            Err(e) => {
-                error!("Failed to sync blockchain on startup: {}", e);
-            }
+            Ok(()) => info!("Initial blockchain sync completed"),
+            Err(e) => error!("Failed to sync blockchain on startup: {}", e),
         }
 
-        // Sync every 10 seconds
-        let mut sync_interval = interval(Duration::from_secs(10));
-
+        let mut sync_interval = interval(Duration::from_secs(sync_secs));
         loop {
             sync_interval.tick().await;
-
-            match sync_blockchain(&db_sync, &rpc_for_sync).await {
-                Ok(()) => {
-                    // Success logging is handled in sync_blockchain
-                }
-                Err(e) => {
-                    error!("Failed to sync blockchain: {}", e);
-                }
+            if let Err(e) = sync_blockchain(&db_sync, &rpc_for_sync).await {
+                error!("Failed to sync blockchain: {}", e);
             }
         }
     });
 
-    let server_address = "0.0.0.0";
-    let server_port = 8080;
+    let server_address = settings.bind_addr.clone();
+    let server_port = settings.port;
 
     info!(
         "Server listening on http://{}:{}",

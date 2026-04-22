@@ -39,19 +39,29 @@ impl Config {
         Self::expand_path(&self.wallet_path)
     }
 
-    pub fn load() -> Self {
-        let path = Self::default_path();
+    /// Load config from an explicit path. If the file does not exist a default
+    /// config is written there and returned.
+    pub fn load_from(path: PathBuf) -> Self {
         if !path.exists() {
             println!(
                 "Configuration file not found. Creating default configuration.: {:?}",
                 path
             );
             let cfg = Self::default();
-            cfg.save();
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let json = serde_json::to_string_pretty(&cfg).unwrap();
+            let _ = fs::write(&path, json);
             return cfg;
         }
         let data = fs::read_to_string(&path).expect("Failed to read configuration file");
         serde_json::from_str(&data).expect("Configuration file format error")
+    }
+
+    /// Load config from the default path (~/.Astram/config.json).
+    pub fn load() -> Self {
+        Self::load_from(Self::default_path())
     }
 
     pub fn save(&self) {

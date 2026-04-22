@@ -5,6 +5,7 @@ mod shares;
 mod vardiff;
 
 use anyhow::{Result, anyhow};
+use clap::Parser;
 use base64::{Engine as _, engine::general_purpose};
 use futures::{SinkExt, StreamExt};
 use astram_config::config::Config;
@@ -47,61 +48,100 @@ struct PoolConfig {
     payout_db_path: String,
 }
 
+/// Load a key=value conf file into a HashMap.
+/// Lines starting with '#' or empty lines are ignored.
+/// Env vars always take priority over file values.
+fn load_conf_file(path: &std::path::Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let contents = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[WARN] Could not read pool config {:?}: {}", path, e);
+            return map;
+        }
+    };
+    for (line_no, raw) in contents.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.split_once('=') {
+            Some((k, v)) => { map.insert(k.trim().to_string(), v.trim().to_string()); }
+            None => eprintln!("[WARN] poolSettings line {}: invalid ({})", line_no + 1, raw),
+        }
+    }
+    log::info!("[POOL] Loaded {} settings from {:?}", map.len(), path);
+    map
+}
+
+/// Look up a setting: env var first, then conf file, then default.
+fn get_setting<'a>(key: &str, file: &'a HashMap<String, String>, default: &'a str) -> String {
+    std::env::var(key)
+        .ok()
+        .or_else(|| file.get(key).cloned())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn resolve_pool_settings_path() -> std::path::PathBuf {
+    let exe_path = std::env::current_exe().ok().and_then(|p| {
+        p.parent().map(|d| d.join("config/poolSettings.conf"))
+    });
+    if let Some(ref p) = exe_path {
+        if p.exists() { return p.clone(); }
+    }
+    let cwd = std::path::PathBuf::from("config/poolSettings.conf");
+    if cwd.exists() { return cwd; }
+    exe_path.unwrap_or(cwd)
+}
+
 impl PoolConfig {
     fn from_env(cfg: &Config) -> Result<Self> {
-        let node_rpc_url =
-            std::env::var("NODE_RPC_URL").unwrap_or_else(|_| cfg.node_rpc_url.clone());
+        Self::load(cfg, None)
+    }
+
+    fn load(cfg: &Config, config_path: Option<std::path::PathBuf>) -> Result<Self> {
+        let path = config_path.unwrap_or_else(resolve_pool_settings_path);
+        let file = if path.exists() {
+            load_conf_file(&path)
+        } else {
+            HashMap::new()
+        };
+
+        let node_rpc_url = get_setting("NODE_RPC_URL", &file, &cfg.node_rpc_url);
 
         let pool_address = std::env::var("POOL_ADDRESS")
             .ok()
+            .or_else(|| file.get("POOL_ADDRESS").cloned())
             .or_else(|| load_pool_address(cfg).ok())
             .ok_or_else(|| anyhow!("POOL_ADDRESS not set and wallet missing"))?;
 
         Ok(Self {
             node_rpc_url,
-            stratum_bind: std::env::var("STRATUM_BIND")
-                .unwrap_or_else(|_| "0.0.0.0:3333".to_string()),
-            gbt_bind: std::env::var("GBT_BIND")
-                .unwrap_or_else(|_| "0.0.0.0:8332".to_string()),
-            stats_bind: std::env::var("STATS_BIND")
-                .unwrap_or_else(|_| "0.0.0.0:8081".to_string()),
+            stratum_bind: get_setting("STRATUM_BIND", &file, "0.0.0.0:3333"),
+            gbt_bind:     get_setting("GBT_BIND",     &file, "0.0.0.0:8332"),
+            stats_bind:   get_setting("STATS_BIND",   &file, "0.0.0.0:8081"),
             pool_address,
-            pool_fee_percent: std::env::var("POOL_FEE_PERCENT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1.0),
-            pplns_window: std::env::var("PPLNS_WINDOW")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10_000),
+            pool_fee_percent: get_setting("POOL_FEE_PERCENT", &file, "1.0")
+                .parse().unwrap_or(1.0),
+            pplns_window: get_setting("PPLNS_WINDOW", &file, "10000")
+                .parse().unwrap_or(10_000),
             vardiff: VarDiffConfig {
-                min_diff: std::env::var("VARDIFF_MIN")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1),
-                max_diff: std::env::var("VARDIFF_MAX")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(32),
-                target_share_time: std::env::var("VARDIFF_TARGET_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(15.0),
+                min_diff: get_setting("VARDIFF_MIN", &file, "1")
+                    .parse().unwrap_or(1),
+                max_diff: get_setting("VARDIFF_MAX", &file, "32")
+                    .parse().unwrap_or(32),
+                target_share_time: get_setting("VARDIFF_TARGET_SECS", &file, "15.0")
+                    .parse().unwrap_or(15.0),
                 ..VarDiffConfig::default()
             },
             payout_threshold_ram: {
-                let asrm: f64 = std::env::var("PAYOUT_THRESHOLD_ASRM")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0.5_f64);
+                let asrm: f64 = get_setting("PAYOUT_THRESHOLD_ASRM", &file, "0.5")
+                    .parse().unwrap_or(0.5);
                 U256::from((asrm * 1_000_000_000_000_000_000_f64) as u128)
             },
-            payout_interval_secs: std::env::var("PAYOUT_INTERVAL_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(600u64),
-            payout_db_path: std::env::var("POOL_DB_PATH")
-                .unwrap_or_else(|_| "pool_data".to_string()),
+            payout_interval_secs: get_setting("PAYOUT_INTERVAL_SECS", &file, "600")
+                .parse().unwrap_or(600u64),
+            payout_db_path: get_setting("POOL_DB_PATH", &file, "pool_data"),
         })
     }
 }
@@ -1106,14 +1146,24 @@ fn load_pool_address(cfg: &Config) -> Result<String> {
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
+#[derive(Parser, Debug)]
+#[command(name = "Astram-stratum", about = "Astram stratum mining pool")]
+struct Cli {
+    /// Path to pool settings file (default: config/poolSettings.conf)
+    #[arg(long, value_name = "FILE")]
+    config: Option<std::path::PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)
         .init();
 
+    let cli = Cli::parse();
+
     let cfg = Config::load();
-    let pool_cfg = Arc::new(PoolConfig::from_env(&cfg)?);
+    let pool_cfg = Arc::new(PoolConfig::load(&cfg, cli.config)?);
     let client = NodeClient::new(pool_cfg.node_rpc_url.clone());
 
     // ── Payout system setup ──────────────────────────────────────────────────

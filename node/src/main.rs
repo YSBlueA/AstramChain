@@ -1,4 +1,5 @@
 // Use library exports instead of declaring local modules to avoid duplicate crate types
+use clap::Parser;
 use Astram_core::Blockchain;
 use astram_config::config::Config;
 use astram_node::ChainState;
@@ -122,9 +123,9 @@ fn resolve_node_settings_path() -> PathBuf {
     exe_path.unwrap_or(cwd_path)
 }
 
-fn load_node_settings() -> NodeSettings {
+fn load_node_settings_from(config_path: Option<PathBuf>) -> NodeSettings {
     let mut settings = NodeSettings::default();
-    let path = resolve_node_settings_path();
+    let path = config_path.unwrap_or_else(resolve_node_settings_path);
 
     match fs::read_to_string(&path) {
         Ok(contents) => {
@@ -198,12 +199,22 @@ fn to_socket_addr(addr: &str, port: u16, fallback: SocketAddr) -> SocketAddr {
     format!("{}:{}", addr, port).parse().unwrap_or(fallback)
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "Astram-node", about = "Astram blockchain node")]
+struct Cli {
+    /// Path to node settings file (default: config/nodeSettings.conf)
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() {
     println!("[INFO] Astram node starting...");
 
+    let cli = Cli::parse();
+
     // Load settings first so we can place log files inside data_dir/logs/
-    let node_settings = Arc::new(load_node_settings());
+    let node_settings = Arc::new(load_node_settings_from(cli.config));
 
     let log_dir = format!("{}/logs", node_settings.data_dir);
     let _ = fs::create_dir_all(&log_dir);

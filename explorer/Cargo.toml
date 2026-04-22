@@ -24,6 +24,7 @@ base64 = "0.22.1"
 bincode = "2.0.0"
 primitive-types = { version = "0.12", features = ["serde"] }
 rocksdb = "0.24.0"
+clap = { version = "4", features = ["derive"] }
 
 [features]
 default = []
