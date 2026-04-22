@@ -456,6 +456,37 @@ CONF
 echo -e "${SUCCESS}Created config/poolSettings.conf${NC}"
 
 # ---------------------------
+# explorerSettings.conf
+# ---------------------------
+
+echo -e "${INFO}Creating explorer settings configuration...${NC}"
+
+cat > "$RELEASE_DIR/config/explorerSettings.conf" <<'CONF'
+# ─── Astram Explorer Settings ───────────────────────────────────────────────
+# Lines starting with '#' are comments.
+# Format: KEY=VALUE
+
+# ── Database ─────────────────────────────────────────────────────────────────
+# Path to the explorer RocksDB database directory.
+DB_PATH=explorer_data
+
+# ── Node connection ───────────────────────────────────────────────────────────
+# URL of the Astram node's internal HTTP API.
+NODE_RPC_URL=http://127.0.0.1:19533
+
+# ── HTTP server ───────────────────────────────────────────────────────────────
+# Address and port the explorer web server listens on.
+BIND_ADDR=0.0.0.0
+PORT=8080
+
+# ── Sync interval ─────────────────────────────────────────────────────────────
+# How often (in seconds) to poll the node for new blocks.
+SYNC_INTERVAL_SECS=10
+CONF
+
+echo -e "${SUCCESS}Created config/explorerSettings.conf${NC}"
+
+# ---------------------------
 # README
 # ---------------------------
 

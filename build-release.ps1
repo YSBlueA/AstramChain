@@ -450,6 +450,34 @@ POOL_DB_PATH=pool_data
 Set-Content -Path "$ReleaseDir/config/poolSettings.conf" -Value $PoolSettingsContent
 Write-Success "Created config/poolSettings.conf"
 
+# Create explorerSettings.conf
+Write-Info "Creating explorer settings configuration..."
+$ExplorerSettingsContent = @'
+# ─── Astram Explorer Settings ───────────────────────────────────────────────
+# Lines starting with '#' are comments.
+# Format: KEY=VALUE
+
+# ── Database ─────────────────────────────────────────────────────────────────
+# Path to the explorer RocksDB database directory.
+DB_PATH=explorer_data
+
+# ── Node connection ───────────────────────────────────────────────────────────
+# URL of the Astram node's internal HTTP API.
+NODE_RPC_URL=http://127.0.0.1:19533
+
+# ── HTTP server ───────────────────────────────────────────────────────────────
+# Address and port the explorer web server listens on.
+BIND_ADDR=0.0.0.0
+PORT=8080
+
+# ── Sync interval ─────────────────────────────────────────────────────────────
+# How often (in seconds) to poll the node for new blocks.
+SYNC_INTERVAL_SECS=10
+'@
+
+Set-Content -Path "$ReleaseDir/config/explorerSettings.conf" -Value $ExplorerSettingsContent
+Write-Success "Created config/explorerSettings.conf"
+
 # Create README
 Write-Info "Creating README..."
 $ReadmeContent = @'
