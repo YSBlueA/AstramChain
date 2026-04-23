@@ -277,7 +277,7 @@ if ($Component -eq 'miner') {
         Write-Host "  Requires    : Astram-node.exe running on this machine" -ForegroundColor Yellow
         Write-Host "  Edit config\minerSettings.conf to switch to pool mode" -ForegroundColor DarkGray
     } else {
-        Write-Host "  Pool        : pool.astramchain.com:3333" -ForegroundColor Cyan
+        Write-Host "  Pool        : stratum.astramchain.com:3333" -ForegroundColor Cyan
         Write-Host "  Edit config\minerSettings.conf to switch to solo mode" -ForegroundColor DarkGray
     }
     Write-Host ""
@@ -370,7 +370,10 @@ MINING_MODE=pool
 
 # ----- Pool Mode Settings (used when MINING_MODE=pool) -----------------------------------------------------------------------
 # Address and port of the Stratum mining pool server.
-POOL_HOST=pool.astramchain.com
+# NOTE: stratum.astramchain.com is DNS-only (no Cloudflare proxy) so raw TCP
+#       on port 3333 reaches the server directly. Do NOT use pool.astramchain.com
+#       for stratum — that domain is Cloudflare-proxied (HTTP only).
+POOL_HOST=stratum.astramchain.com
 POOL_PORT=3333
 
 # Worker name shown on the pool dashboard.
@@ -490,7 +493,7 @@ Double-click `start-mining-pool.bat` (or right-click > Run with PowerShell on `p
 The script will:
 1. Detect your NVIDIA GPU
 2. Create a wallet automatically if you don't have one
-3. Connect to the pool at `pool.astramchain.com:3333`
+3. Connect to the pool at `stratum.astramchain.com:3333`
 
 Pool dashboard: https://pool.astramchain.com
 
@@ -516,7 +519,7 @@ Open PowerShell in this directory and run each component in a separate window:
 
 Edit `config\minerSettings.conf` to choose your mining mode:
 
-- **pool** (default) — Connect to `pool.astramchain.com:3333`. No local node required.
+- **pool** (default) — Connect to `stratum.astramchain.com:3333`. No local node required.
 - **solo** — Mine directly against your local node. Full block reward goes to your wallet.
   Requires `Astram-node.exe` running on the same machine.
 
