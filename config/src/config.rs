@@ -104,7 +104,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             wallet_path: Self::default_wallet_path(),
-            node_rpc_url: "http://127.0.0.1:19533".to_string(),
+            node_rpc_url: "https://rpc.astramchain.com".to_string(),
         }
     }
 }
